@@ -133,15 +133,62 @@ def test_load_pipeline_int8_quantizes_before_device(monkeypatch):
     monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
     monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
 
-    def fake_apply(pipe):
-        order.append("quant")
+    def fake_apply(pipe, dtype_name):
+        order.append(("quant", dtype_name))
         return "transformer"
 
-    monkeypatch.setattr("zimage.engine.pipeline.apply_int8_quantization", fake_apply)
+    monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
 
     pipe = pipeline_mod.load_pipeline("model", "cuda", "int8", False, False)
     assert pipe.moved_to == "cuda"
-    assert order == ["load", "quant", ("to", "cuda")]
+    assert order == ["load", ("quant", "int8"), ("to", "cuda")]
+
+
+def test_load_pipeline_fp8_quantizes_after_device(monkeypatch):
+    order = []
+
+    class Pipe:
+        def __init__(self):
+            self.moved_to = None
+
+        def to(self, device):
+            order.append(("to", device))
+            self.moved_to = device
+            return self
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            order.append("load")
+            return cls()
+
+    fake_diffusers = types.ModuleType("diffusers")
+    fake_diffusers.ZImagePipeline = Pipe
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
+    monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
+
+    def fake_apply(pipe, dtype_name):
+        order.append(("quant", dtype_name))
+        return "transformer"
+
+    monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
+
+    pipe = pipeline_mod.load_pipeline("model", "cuda", "fp8", False, False)
+    assert pipe.moved_to == "cuda"
+    assert order == ["load", ("to", "cuda"), ("quant", "fp8")]
+
+
+def test_load_pipeline_fp8_rejects_cpu(monkeypatch):
+    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.require_fp8_device",
+        lambda _device: (_ for _ in ()).throw(RuntimeError("fp8 requires CUDA")),
+    )
+    try:
+        pipeline_mod.load_pipeline("model", "cpu", "fp8", False, False)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "fp8" in str(exc)
 
 
 def test_load_pipeline_int8_requires_torchao(monkeypatch):

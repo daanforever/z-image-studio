@@ -80,10 +80,10 @@ def resolve_device(requested: str) -> str:
 def dtype_from_name(name: str):
     import torch
 
-    from zimage.engine.quantization import is_int8_precision
+    from zimage.engine.quantization import is_quantized_precision
 
-    if is_int8_precision(name):
-        # Compute dtype for torchao int8 weight-only (weights are quantized separately).
+    if is_quantized_precision(name):
+        # Compute dtype for torchao quantized weights (int8 / fp8).
         return torch.bfloat16
 
     mapping = {

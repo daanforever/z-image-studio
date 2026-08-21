@@ -20,7 +20,14 @@ from zimage.config import (
     is_truthy,
 )
 from zimage.engine.demo import demo_image
-from zimage.engine.quantization import apply_int8_quantization, is_int8_precision, require_torchao
+from zimage.engine.quantization import (
+    apply_quantization,
+    is_fp8_precision,
+    is_int8_precision,
+    is_quantized_precision,
+    require_fp8_device,
+    require_torchao,
+)
 from zimage.engine.runtime import dtype_from_name, resolve_device, runtime_status
 
 _lock = threading.Lock()
@@ -57,9 +64,10 @@ def _instantiate_pipeline(model_id: str, kwargs: dict[str, Any]):
 def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool, vae_tiling: bool):
     import torch
 
-    quantize_int8 = is_int8_precision(dtype_name)
-    if quantize_int8:
+    if is_quantized_precision(dtype_name):
         require_torchao()
+    if is_fp8_precision(dtype_name):
+        require_fp8_device(device)
 
     dtype = dtype_from_name(dtype_name)
     if device == "cpu" and dtype in {torch.bfloat16, torch.float16}:
@@ -74,14 +82,18 @@ def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool
 
     pipe = _instantiate_pipeline(model_id, kwargs)
 
-    # Quantize on CPU before moving to the device so peak VRAM is the int8 footprint.
-    if quantize_int8:
-        apply_int8_quantization(pipe)
+    # int8: quantize on CPU so peak VRAM is already the reduced footprint.
+    if is_int8_precision(dtype_name):
+        apply_quantization(pipe, dtype_name)
 
     if cpu_offload and device == "cuda":
         pipe.enable_model_cpu_offload()
     else:
         pipe.to(device)
+
+    # fp8 kernels expect CUDA (Ada 8.9+ / Blackwell); apply after placement.
+    if is_fp8_precision(dtype_name):
+        apply_quantization(pipe, dtype_name)
 
     if vae_tiling and hasattr(pipe, "enable_vae_tiling"):
         pipe.enable_vae_tiling()

@@ -92,4 +92,6 @@ def test_dtype_from_name():
     assert dtype_from_name("fp32") is torch.float32
     assert dtype_from_name("int8") is torch.bfloat16
     assert dtype_from_name("int8wo") is torch.bfloat16
+    assert dtype_from_name("fp8") is torch.bfloat16
+    assert dtype_from_name("float8dq") is torch.bfloat16
     assert dtype_from_name("unknown") is torch.bfloat16

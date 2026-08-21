@@ -70,7 +70,7 @@ Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during dist
                             choices=PRECISION_CHOICES,
                             value=DEFAULT_DTYPE if DEFAULT_DTYPE in PRECISION_CHOICES else "bfloat16",
                             label="Precision",
-                            info="int8 = torchao weight-only on the DiT (official checkpoint).",
+                            info="fp8 / int8: torchao on the DiT (official checkpoint). fp8 needs Ada 8.9+ / Blackwell.",
                         )
                     with gr.Row():
                         cpu_offload = gr.Checkbox(value=False, label="CPU offload (saves VRAM)")
@@ -131,7 +131,7 @@ Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during dist
 
         gr.Markdown(
             "Images are saved to `outputs/`. "
-            "**int8** quantizes the official **Z-Image-Turbo** DiT with torchao — "
+            "**fp8** / **int8** quantize the official **Z-Image-Turbo** DiT with torchao — "
             "not Disty0/SDNQ checkpoints."
         )
     return demo

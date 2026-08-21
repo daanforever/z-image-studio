@@ -7,7 +7,7 @@ from zimage.engine.pipeline import (
     save_image,
     unload_pipeline,
 )
-from zimage.engine.quantization import is_int8_precision
+from zimage.engine.quantization import is_fp8_precision, is_int8_precision, is_quantized_precision
 from zimage.engine.runtime import dtype_from_name, resolve_device, runtime_status
 
 __all__ = [
@@ -15,7 +15,9 @@ __all__ = [
     "dtype_from_name",
     "ensure_pipeline",
     "generate_image",
+    "is_fp8_precision",
     "is_int8_precision",
+    "is_quantized_precision",
     "resolve_device",
     "runtime_status",
     "save_image",

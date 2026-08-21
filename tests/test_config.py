@@ -12,8 +12,8 @@ from zimage.config import (
 )
 
 
-def test_precision_choices_include_int8():
-    assert PRECISION_CHOICES == ["bfloat16", "float16", "float32", "int8"]
+def test_precision_choices_include_quantized():
+    assert PRECISION_CHOICES == ["bfloat16", "float16", "float32", "fp8", "int8"]
 
 
 def test_parse_resolution_preset():

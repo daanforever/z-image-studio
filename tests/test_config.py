@@ -5,10 +5,15 @@ from pathlib import Path
 from zimage.config import (
     DEFAULT_HEIGHT,
     DEFAULT_WIDTH,
+    PRECISION_CHOICES,
     is_truthy,
     load_dotenv,
     parse_resolution,
 )
+
+
+def test_precision_choices_include_int8():
+    assert PRECISION_CHOICES == ["bfloat16", "float16", "float32", "int8"]
 
 
 def test_parse_resolution_preset():

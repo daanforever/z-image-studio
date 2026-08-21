@@ -28,6 +28,7 @@ OUTPUTS_DIR = Path(os.environ.get("ZIMAGE_OUTPUTS", ROOT / "outputs"))
 
 DEFAULT_MODEL = os.environ.get("ZIMAGE_MODEL", "Tongyi-MAI/Z-Image-Turbo")
 DEFAULT_DEVICE = os.environ.get("ZIMAGE_DEVICE", "auto")
+PRECISION_CHOICES = ["bfloat16", "float16", "float32", "int8"]
 DEFAULT_DTYPE = os.environ.get("ZIMAGE_DTYPE", "bfloat16")
 DEFAULT_PORT = int(os.environ.get("ZIMAGE_PORT", "43127"))
 

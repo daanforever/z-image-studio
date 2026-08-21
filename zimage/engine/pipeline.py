@@ -20,6 +20,7 @@ from zimage.config import (
     is_truthy,
 )
 from zimage.engine.demo import demo_image
+from zimage.engine.quantization import apply_int8_quantization, is_int8_precision, require_torchao
 from zimage.engine.runtime import dtype_from_name, resolve_device, runtime_status
 
 _lock = threading.Lock()
@@ -27,31 +28,18 @@ _pipe: Any = None
 _pipe_key: tuple | None = None
 
 
-def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool, vae_tiling: bool):
-    import torch
-
-    dtype = dtype_from_name(dtype_name)
-    if device == "cpu" and dtype in {torch.bfloat16, torch.float16}:
-        dtype = torch.float32
-
-    local_only = is_truthy(os.environ.get("HF_HUB_OFFLINE"))
-    kwargs = {
-        "torch_dtype": dtype,
-        "low_cpu_mem_usage": True,
-        "local_files_only": local_only,
-    }
-
+def _instantiate_pipeline(model_id: str, kwargs: dict[str, Any]):
     last_error: Exception | None = None
     try:
         from diffusers import ZImagePipeline
 
-        pipe = ZImagePipeline.from_pretrained(model_id, **kwargs)
+        return ZImagePipeline.from_pretrained(model_id, **kwargs)
     except Exception as exc:  # noqa: BLE001 — fallback is intentional
         last_error = exc
         try:
             from diffusers import DiffusionPipeline
 
-            pipe = DiffusionPipeline.from_pretrained(model_id, **kwargs)
+            return DiffusionPipeline.from_pretrained(model_id, **kwargs)
         except Exception as fallback_exc:  # noqa: BLE001
             hint = ""
             if last_error is not None and (
@@ -64,6 +52,31 @@ def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool
             raise RuntimeError(
                 f"Failed to load model {model_id}: {fallback_exc}.{hint}"
             ) from fallback_exc
+
+
+def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool, vae_tiling: bool):
+    import torch
+
+    quantize_int8 = is_int8_precision(dtype_name)
+    if quantize_int8:
+        require_torchao()
+
+    dtype = dtype_from_name(dtype_name)
+    if device == "cpu" and dtype in {torch.bfloat16, torch.float16}:
+        dtype = torch.float32
+
+    local_only = is_truthy(os.environ.get("HF_HUB_OFFLINE"))
+    kwargs = {
+        "torch_dtype": dtype,
+        "low_cpu_mem_usage": True,
+        "local_files_only": local_only,
+    }
+
+    pipe = _instantiate_pipeline(model_id, kwargs)
+
+    # Quantize on CPU before moving to the device so peak VRAM is the int8 footprint.
+    if quantize_int8:
+        apply_int8_quantization(pipe)
 
     if cpu_offload and device == "cuda":
         pipe.enable_model_cpu_offload()

@@ -111,6 +111,51 @@ def test_load_pipeline_cpu_offload_and_tiling(monkeypatch):
     assert cuda_pipe.moved_to is None
 
 
+def test_load_pipeline_int8_quantizes_before_device(monkeypatch):
+    order = []
+
+    class Pipe:
+        def __init__(self):
+            self.moved_to = None
+
+        def to(self, device):
+            order.append(("to", device))
+            self.moved_to = device
+            return self
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            order.append("load")
+            return cls()
+
+    fake_diffusers = types.ModuleType("diffusers")
+    fake_diffusers.ZImagePipeline = Pipe
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
+
+    def fake_apply(pipe):
+        order.append("quant")
+        return "transformer"
+
+    monkeypatch.setattr("zimage.engine.pipeline.apply_int8_quantization", fake_apply)
+
+    pipe = pipeline_mod.load_pipeline("model", "cuda", "int8", False, False)
+    assert pipe.moved_to == "cuda"
+    assert order == ["load", "quant", ("to", "cuda")]
+
+
+def test_load_pipeline_int8_requires_torchao(monkeypatch):
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.require_torchao",
+        lambda: (_ for _ in ()).throw(RuntimeError("int8 precision requires torchao")),
+    )
+    try:
+        pipeline_mod.load_pipeline("model", "cuda", "int8", False, False)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "torchao" in str(exc)
+
+
 def test_load_pipeline_falls_back_and_hints(monkeypatch):
     class ZImagePipeline:
         @staticmethod

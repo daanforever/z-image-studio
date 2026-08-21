@@ -12,6 +12,7 @@ from zimage.config import (
     DEFAULT_RESOLUTION,
     DEFAULT_STEPS,
     EXAMPLE_PROMPTS,
+    PRECISION_CHOICES,
     RESOLUTION_PRESETS,
 )
 from zimage.ui.handlers import generate, load_model, unload_model
@@ -66,9 +67,10 @@ Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during dist
                             label="Device",
                         )
                         dtype_name = gr.Radio(
-                            choices=["bfloat16", "float16", "float32"],
-                            value=DEFAULT_DTYPE if DEFAULT_DTYPE in {"bfloat16", "float16", "float32"} else "bfloat16",
+                            choices=PRECISION_CHOICES,
+                            value=DEFAULT_DTYPE if DEFAULT_DTYPE in PRECISION_CHOICES else "bfloat16",
                             label="Precision",
+                            info="int8 = torchao weight-only on the DiT (official checkpoint).",
                         )
                     with gr.Row():
                         cpu_offload = gr.Checkbox(value=False, label="CPU offload (saves VRAM)")
@@ -129,6 +131,7 @@ Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during dist
 
         gr.Markdown(
             "Images are saved to `outputs/`. "
-            "This is not Disty0/q8 quantized weights — official **Z-Image-Turbo** only."
+            "**int8** quantizes the official **Z-Image-Turbo** DiT with torchao — "
+            "not Disty0/SDNQ checkpoints."
         )
     return demo

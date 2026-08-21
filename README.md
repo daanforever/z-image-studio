@@ -105,12 +105,23 @@ ZIMAGE_DEMO=1 python app.py --port 43127
 
 На 16 ГБ (RTX 5080) Turbo в `bfloat16` обычно помещается. Если не хватает — включите **CPU offload** или **VAE tiling**. Не переключайтесь на Disty0 q8 из этого UI: его здесь нет.
 
+## Тесты
+
+```bat
+pip install -r requirements-dev.txt
+pytest
+```
+
+Покрыты конфиг, runtime/demo/pipeline и обработчики UI. Веса модели и живой GPU не требуются.
+
 ## Структура
 
 ```
-app.py           Gradio-интерфейс
-engine.py        загрузка пайплайна и генерация
-config.py        пресеты и .env
-launch.bat       запуск под Windows с вашими путями
-outputs/         сохранённые PNG
+app.py                 точка входа (python app.py)
+zimage/config.py       пресеты и .env
+zimage/engine/         статус устройства, demo-кадр, пайплайн
+zimage/ui/             тема, статус, обработчики, вёрстка Gradio
+tests/                 pytest
+launch.bat             запуск под Windows с вашими путями
+outputs/               сохранённые PNG
 ```

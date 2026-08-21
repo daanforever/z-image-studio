@@ -5,7 +5,25 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_dotenv(path: Path | None = None) -> None:
+    env_path = path or ROOT / ".env"
+    if not env_path.is_file():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+load_dotenv()
+
 OUTPUTS_DIR = Path(os.environ.get("ZIMAGE_OUTPUTS", ROOT / "outputs"))
 
 DEFAULT_MODEL = os.environ.get("ZIMAGE_MODEL", "Tongyi-MAI/Z-Image-Turbo")
@@ -21,6 +39,11 @@ DEFAULT_MAX_SEQ = 512
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 768
 DEFAULT_RESOLUTION = "1024x768 (4:3)"
+
+CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu130"
+CUDA_REINSTALL_CMD = (
+    f"pip install --force-reinstall torch torchvision --index-url {CUDA_INDEX_URL}"
+)
 
 RESOLUTION_PRESETS = [
     "512x384 (4:3)",
@@ -46,20 +69,6 @@ EXAMPLE_PROMPTS = [
         "A white ceramic cat figurine on a windowsill, rain on the glass, soft overcast light, product photography, text «造相» printed on the box beside it."
     ],
 ]
-
-
-def load_dotenv(path: Path | None = None) -> None:
-    env_path = path or ROOT / ".env"
-    if not env_path.is_file():
-        return
-    for raw in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
 
 
 def parse_resolution(label: str) -> tuple[int, int]:

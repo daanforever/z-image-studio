@@ -1,24 +1,25 @@
 # Z-Image-Turbo Studio
 
-Локальный веб-интерфейс на **Gradio** для инференса [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) через `diffusers`. Это не обёртка над `zimg.exe`: модель грузится напрямую, с CUDA, если PyTorch собран с GPU.
+Local **Gradio** web UI for [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) inference via `diffusers`. The model loads directly, on CUDA when PyTorch is built with GPU support.
 
-Turbo-рецепт по документации модели: **9 шагов** (8 проходов DiT) и **`guidance_scale=0`**.
+Official Turbo recipe from the model card: **9 steps** (8 DiT forwards) and **`guidance_scale=0`**.
 
-## Что умеет
+## Features
 
-- Промпт, пресеты разрешения, seed, шаги, time shift
-- Путь к модели: Hugging Face id **или** локальный snapshot
-- Автовыбор `cuda` / `cpu`, статус VRAM
-- Precision: **fp8** по умолчанию; также `bfloat16` / `float16` / `float32` / `int8` (torchao на DiT)
-- CPU offload и VAE tiling, если мало памяти
-- Сохранение PNG в `outputs/`
-- Демо-режим без весов и без GPU (чтобы открыть UI)
+- Prompt, resolution presets, seed, batch (incremental seeds), steps, time shift
+- Stop in the navbar cancels the rest of the batch without discarding images already generated
+- Model path: Hugging Face ID **or** a local snapshot
+- Auto-selects `cuda` / `cpu`, VRAM status
+- Precision: **fp8** by default; also `bfloat16` / `float16` / `float32` / `int8` (torchao on the DiT)
+- CPU offload and VAE tiling for low VRAM
+- Saves PNGs to `outputs/`
+- Demo mode with no weights and no GPU (to inspect the UI)
 
-Интерфейс не использует квантованные `Disty0/Z-Image-Turbo-SDNQ-*`. Нужен официальный **Z-Image-Turbo**.
+The UI does not use quantized `Disty0/Z-Image-Turbo-SDNQ-*` checkpoints. Use the official **Z-Image-Turbo**.
 
-## Установка (Windows, RTX 50xx)
+## Installation (Windows, RTX 50xx)
 
-В каталоге проекта:
+In the project directory:
 
 ```bat
 python -m venv .venv
@@ -27,54 +28,54 @@ pip install -r requirements.txt
 pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu130
 ```
 
-`pip install torch` с PyPI ставит **CPU-сборку**. На RTX 5080 её недостаточно — нужна колесо `cu128`/`cu130` с `download.pytorch.org`. Если CPU-версия уже стоит, обычный `pip install` ничего не меняет: нужен `--force-reinstall` (или сначала `pip uninstall torch torchvision`).
+`pip install torch` from PyPI installs a **CPU build**. That is not enough for an RTX 5080 — you need a `cu128`/`cu130` wheel from `download.pytorch.org`. If a CPU build is already installed, a plain `pip install` will not replace it: use `--force-reinstall` (or `pip uninstall torch torchvision` first).
 
-Если `from diffusers import ZImagePipeline` падает, поставьте diffusers из git:
+If `from diffusers import ZImagePipeline` fails, install diffusers from git:
 
 ```bat
 pip install git+https://github.com/huggingface/diffusers
 ```
 
-Проверка GPU:
+Verify the GPU:
 
 ```bat
 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
 ```
 
-Ожидается `True` и имя видеокарты.
+Expect `True` and the GPU name.
 
-## Запуск
+## Launch
 
-Самый простой путь на вашей машине — `launch.bat`. Он выставляет:
+The simplest path on this machine is `launch.bat`. It sets:
 
-| Переменная | Значение по умолчанию |
+| Variable | Default |
 |---|---|
 | `HF_HUB_CACHE` | `E:\Backup\huggingface\hub` |
 | `HF_HOME` | `E:\Backup\huggingface` |
-| `HF_HUB_OFFLINE` | `0` (можно докачивать с Hub) |
+| `HF_HUB_OFFLINE` | `0` (Hub downloads allowed) |
 | `ZIMAGE_MODEL` | `Tongyi-MAI/Z-Image-Turbo` |
-| порт | `43127` |
+| port | `43127` |
 
 ```bat
 launch.bat
 ```
 
-Либо вручную:
+Or run manually:
 
 ```bat
 python app.py --host 127.0.0.1 --port 43127
 ```
 
-Откройте http://127.0.0.1:43127
+Open http://127.0.0.1:43127
 
-Чтобы грузить конкретный snapshot, не трогая Hub:
+To load a specific snapshot without hitting the Hub:
 
 ```bat
 set ZIMAGE_MODEL=E:\Backup\huggingface\hub\models--Tongyi-MAI--Z-Image-Turbo\snapshots\0e36c2b379e66fa531d01cc531c44919e5f1c6fd
 python app.py
 ```
 
-Можно скопировать `.env.example` в `.env` — приложение подхватит переменные при старте.
+Copy `.env.example` to `.env` — the app loads those variables on startup.
 
 ## Linux / macOS
 
@@ -85,44 +86,44 @@ pip install -r requirements.txt
 python app.py --host 127.0.0.1 --port 43127
 ```
 
-Без CUDA генерация на CPU будет очень медленной. Для проверки интерфейса:
+Without CUDA, CPU generation is very slow. To check the UI:
 
 ```bash
 ZIMAGE_DEMO=1 python app.py --port 43127
 ```
 
-## Параметры Turbo vs полная Z-Image
+## Turbo vs full Z-Image
 
 | | Z-Image-Turbo | Z-Image |
 |---|---|---|
-| Модель | `Tongyi-MAI/Z-Image-Turbo` | `Tongyi-MAI/Z-Image` |
-| Шаги | 9 | 28–50 |
+| Model | `Tongyi-MAI/Z-Image-Turbo` | `Tongyi-MAI/Z-Image` |
+| Steps | 9 | 28–50 |
 | Guidance | 0.0 | 3.0–5.0 |
-| Negative prompt | не нужен | полезен |
+| Negative prompt | not needed | useful |
 
-Это приложение заточено под Turbo. Полную Z-Image можно указать в поле модели, но guidance тогда поднимите вручную в блоке «Дополнительно».
+This app is tuned for Turbo. You can point the model field at full Z-Image, but raise guidance manually under **Advanced**.
 
 ## VRAM
 
-По умолчанию Turbo грузится в **fp8** (Ada 8.9+ / Blackwell, в том числе RTX 5080; не сочетается с CPU offload). **bfloat16** — полный режим, если fp8 не нужен. **int8** — если нужен CPU offload. Плюс **VAE tiling**. Это не Disty0/SDNQ-чекпоинты: квантуется тот же `Tongyi-MAI/Z-Image-Turbo`.
+By default Turbo loads in **fp8** (Ada 8.9+ / Blackwell, including RTX 5080; incompatible with CPU offload). **bfloat16** is the full-precision path if you do not need fp8. **int8** if you need CPU offload. Plus **VAE tiling**. These are not Disty0/SDNQ checkpoints: the same `Tongyi-MAI/Z-Image-Turbo` is quantized in-process.
 
-## Тесты
+## Tests
 
 ```bat
 pip install -r requirements-dev.txt
 pytest
 ```
 
-Покрыты конфиг, runtime/demo/pipeline и обработчики UI. Веса модели и живой GPU не требуются.
+Covers config, runtime/demo/pipeline, and UI handlers. Model weights and a live GPU are not required.
 
-## Структура
+## Layout
 
 ```
-app.py                 точка входа (python app.py)
-zimage/config.py       пресеты и .env
-zimage/engine/         статус устройства, demo-кадр, пайплайн
-zimage/ui/             тема, статус, обработчики, вёрстка Gradio
+app.py                 entry point (python app.py)
+zimage/config.py       presets and .env
+zimage/engine/         device status, demo frame, pipeline
+zimage/ui/             theme, status, handlers, Gradio layout
 tests/                 pytest
-launch.bat             запуск под Windows с вашими путями
-outputs/               сохранённые PNG
+launch.bat             Windows launcher with local paths
+outputs/               saved PNGs
 ```

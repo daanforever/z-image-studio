@@ -6,7 +6,15 @@ import gradio as gr
 import pytest
 
 from zimage.config import DEFAULT_MODEL
-from zimage.ui.handlers import generate, load_model, unload_model
+from zimage.ui.handlers import generate, load_model, request_stop, unload_model
+import zimage.ui.handlers as handlers
+
+
+def _drain(gen):
+    last = None
+    for last in gen:
+        pass
+    return last
 
 
 def _generate(
@@ -23,24 +31,28 @@ def _generate(
     dtype_name="float32",
     cpu_offload=False,
     vae_tiling=False,
+    batch_count=1,
     gallery=None,
     progress=None,
 ):
-    return generate(
-        prompt,
-        resolution,
-        seed,
-        random_seed,
-        steps,
-        guidance,
-        time_shift,
-        model_id,
-        device,
-        dtype_name,
-        cpu_offload,
-        vae_tiling,
-        gallery,
-        progress=progress,
+    return _drain(
+        generate(
+            prompt,
+            resolution,
+            seed,
+            random_seed,
+            steps,
+            guidance,
+            time_shift,
+            model_id,
+            device,
+            dtype_name,
+            cpu_offload,
+            vae_tiling,
+            batch_count,
+            gallery,
+            progress=progress,
+        )
     )
 
 
@@ -54,6 +66,17 @@ def test_generate_requires_prompt_when_none():
         _generate(prompt=None)
 
 
+def test_generate_rejects_invalid_batch_count():
+    with pytest.raises(gr.Error, match="Batch count"):
+        _generate(batch_count=0)
+    with pytest.raises(gr.Error, match="Batch count"):
+        _generate(batch_count=10_000)
+    with pytest.raises(gr.Error, match="Batch count"):
+        _generate(batch_count=None)
+    with pytest.raises(gr.Error, match="Batch count"):
+        _generate(batch_count="x")
+
+
 def test_generate_success_prepends_gallery(monkeypatch):
     fake = Image.new("RGB", (8, 8), "blue")
     previous = Image.new("RGB", (8, 8), "green")
@@ -65,7 +88,7 @@ def test_generate_success_prepends_gallery(monkeypatch):
         return fake, 42, {"device": "cpu", "device_name": "CPU", "loaded": True}
 
     monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
-    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status: "ok")
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
 
     items, used, seed, status = _generate(
         prompt="a cat",
@@ -89,7 +112,7 @@ def test_generate_random_seed_and_default_model(monkeypatch):
         return fake, kwargs["seed"], {"loaded": True}
 
     monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
-    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status: "ok")
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
     monkeypatch.setattr("zimage.ui.handlers.random.randint", lambda _a, _b: 99)
 
     items, used, seed, _status = _generate(
@@ -105,6 +128,66 @@ def test_generate_random_seed_and_default_model(monkeypatch):
     assert seed == 99
 
 
+def test_generate_batch_incremental_seeds(monkeypatch):
+    seeds = []
+    fakes = [Image.new("RGB", (2, 2), c) for c in ("red", "green", "blue")]
+
+    def fake_generate_image(*_args, **kwargs):
+        seeds.append(kwargs["seed"])
+        return fakes[len(seeds) - 1], kwargs["seed"], {"loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+
+    items, used, seed, _status = _generate(seed=10, batch_count=3, gallery=None)
+    assert seeds == [10, 11, 12]
+    assert used == "10–12"
+    assert seed == 12
+    assert items == list(reversed(fakes))
+
+
+def test_generate_batch_random_start_then_increment(monkeypatch):
+    seeds = []
+
+    def fake_generate_image(*_args, **kwargs):
+        seeds.append(kwargs["seed"])
+        return Image.new("RGB", (2, 2), "white"), kwargs["seed"], {}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+    monkeypatch.setattr("zimage.ui.handlers.random.randint", lambda _a, _b: 50)
+
+    items, used, seed, _status = _generate(random_seed=True, batch_count=2)
+    assert seeds == [50, 51]
+    assert used == "50–51"
+    assert seed == 51
+    assert len(items) == 2
+
+
+def test_generate_batch_stop_keeps_frames(monkeypatch):
+    call_n = {"n": 0}
+
+    def fake_generate_image(*_args, **kwargs):
+        call_n["n"] += 1
+        if call_n["n"] == 2:
+            request_stop()
+        return Image.new("RGB", (2, 2), "white"), kwargs["seed"], {"loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr(
+        "zimage.ui.handlers.format_status",
+        lambda status, extra="": extra or "ok",
+    )
+    handlers._stop_event.clear()
+
+    items, used, seed, status = _generate(seed=7, batch_count=5)
+    assert call_n["n"] == 2
+    assert len(items) == 2
+    assert used == "7–8"
+    assert seed == 8
+    assert "Stopped after 2 of 5" in status
+
+
 def test_generate_caps_gallery_at_twelve(monkeypatch):
     fake = Image.new("RGB", (2, 2), "white")
     previous = [Image.new("RGB", (2, 2), "black") for _ in range(12)]
@@ -113,13 +196,70 @@ def test_generate_caps_gallery_at_twelve(monkeypatch):
         "zimage.ui.handlers.generate_image",
         lambda *_args, **_kwargs: (fake, 1, {}),
     )
-    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status: "ok")
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
 
     items, _used, _seed, _status = _generate(gallery=previous)
     assert len(items) == 12
     assert items[0] is fake
     assert items[-1] is previous[10]
     assert all(item is not previous[11] for item in items)
+
+
+def test_generate_batch_caps_gallery_at_twelve(monkeypatch):
+    previous = [Image.new("RGB", (2, 2), "black") for _ in range(10)]
+    created = []
+
+    def fake_generate_image(*_args, **kwargs):
+        img = Image.new("RGB", (2, 2), "white")
+        created.append(img)
+        return img, kwargs["seed"], {}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+
+    items, _used, _seed, _status = _generate(seed=1, batch_count=5, gallery=previous)
+    assert len(items) == 12
+    assert items[0] is created[-1]
+    assert items[4] is created[0]
+
+
+def test_generate_mid_batch_error_keeps_frames(monkeypatch):
+    call_n = {"n": 0}
+    first = Image.new("RGB", (2, 2), "red")
+
+    def fake_generate_image(*_args, **kwargs):
+        call_n["n"] += 1
+        if call_n["n"] == 1:
+            return first, kwargs["seed"], {"loaded": True}
+        raise RuntimeError("CUDA OOM")
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr(
+        "zimage.ui.handlers.format_status",
+        lambda status, extra="": extra or "ok",
+    )
+
+    gen = generate(
+        "a cat",
+        "512x384 (4:3)",
+        3,
+        False,
+        9,
+        0.0,
+        3.0,
+        "model",
+        "cpu",
+        "float32",
+        False,
+        False,
+        3,
+        None,
+        progress=None,
+    )
+    first_yield = next(gen)
+    assert first_yield[0][0] is first
+    with pytest.raises(gr.Error, match="CUDA OOM"):
+        _drain(gen)
 
 
 def test_generate_offline_hint(monkeypatch):
@@ -146,7 +286,7 @@ def test_load_model_success(monkeypatch):
         "zimage.ui.handlers.ensure_pipeline",
         lambda *_args, **_kwargs: (object(), {"loaded": True, "device": "cpu"}),
     )
-    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status: "loaded-ok")
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "loaded-ok")
     assert load_model("model", "cpu", "float32", False, False) == "loaded-ok"
 
 

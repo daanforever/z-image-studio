@@ -60,6 +60,21 @@ CUSTOM_CSS = """
     min-height: 2.25rem;
     min-width: 8rem;
 }
+#studio-stop-btn {
+    min-width: 5.5rem;
+    font-weight: 500;
+}
+#studio-stop-btn::before {
+    content: "";
+    display: inline-block;
+    width: 0.55em;
+    height: 0.85em;
+    margin-right: 0.45em;
+    vertical-align: -0.1em;
+    background:
+        linear-gradient(currentColor, currentColor) left / 0.22em 100% no-repeat,
+        linear-gradient(currentColor, currentColor) right / 0.22em 100% no-repeat;
+}
 #generate-btn {
     min-height: 48px;
     font-size: 1rem;

@@ -28,6 +28,7 @@ def test_build_ui_has_navbar(monkeypatch):
     assert "studio-navbar" in ids
     assert "studio-brand" in ids
     assert "studio-navbar-actions" in ids
+    assert "studio-stop-btn" in ids
     brand = next(
         block
         for block in demo.blocks.values()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import gradio as gr
 
 from zimage.config import (
+    DEFAULT_BATCH,
     DEFAULT_DEVICE,
     DEFAULT_DTYPE,
     DEFAULT_GUIDANCE,
@@ -12,23 +13,29 @@ from zimage.config import (
     DEFAULT_RESOLUTION,
     DEFAULT_STEPS,
     EXAMPLE_PROMPTS,
+    MAX_BATCH,
     PRECISION_CHOICES,
     RESOLUTION_PRESETS,
 )
-from zimage.ui.handlers import generate, load_model, unload_model
+from zimage.ui.handlers import generate, load_model, request_stop, unload_model
 from zimage.ui.status import format_status
 
 
-def build_navbar() -> None:
-    """Bootstrap-style top bar: brand on the left, reserved actions on the right."""
+def build_navbar() -> gr.Button:
+    """Bootstrap-style top bar: brand on the left, Stop on the right."""
     with gr.Row(elem_id="studio-navbar", equal_height=True, min_height=52):
         gr.HTML(
             '<span class="studio-brand">Studio</span>',
             elem_id="studio-brand",
         )
         with gr.Row(elem_id="studio-navbar-actions", equal_height=True):
-            # Reserved for future action buttons.
-            pass
+            stop_btn = gr.Button(
+                "Stop",
+                variant="stop",
+                elem_id="studio-stop-btn",
+                size="sm",
+            )
+    return stop_btn
 
 
 def build_ui() -> gr.Blocks:
@@ -36,7 +43,7 @@ def build_ui() -> gr.Blocks:
         title="Z-Image-Turbo Studio",
         fill_height=True,
     ) as demo:
-        build_navbar()
+        stop_btn = build_navbar()
         with gr.Row():
             with gr.Column(scale=5):
                 prompt = gr.Textbox(
@@ -51,6 +58,14 @@ def build_ui() -> gr.Blocks:
                         label="Resolution",
                     )
                     steps = gr.Slider(1, 20, value=DEFAULT_STEPS, step=1, label="Steps (Turbo = 9)")
+                batch_count = gr.Number(
+                    value=DEFAULT_BATCH,
+                    precision=0,
+                    minimum=1,
+                    maximum=MAX_BATCH,
+                    label="Batch",
+                    info="Images to generate with incremental seeds (seed, seed+1, …).",
+                )
                 with gr.Row():
                     seed = gr.Number(value=42, precision=0, label="Seed")
                     random_seed = gr.Checkbox(value=True, label="Random seed")
@@ -91,7 +106,14 @@ def build_ui() -> gr.Blocks:
                         label="Guidance scale",
                         info="Keep at 0 for Turbo. For full Z-Image, 3–5 is typical.",
                     )
-                    time_shift = gr.Slider(1.0, 10.0, value=3.0, step=0.1, label="Time shift")
+                    time_shift = gr.Slider(
+                        1.0,
+                        10.0,
+                        value=3.0,
+                        step=0.1,
+                        label="Time shift",
+                        info="3 is the Turbo default. Toward 10: more steps on composition. Toward 1: more on fine detail.",
+                    )
 
             with gr.Column(scale=6):
                 gallery = gr.Gallery(
@@ -112,7 +134,7 @@ def build_ui() -> gr.Blocks:
             outputs=status,
         )
         unload_btn.click(unload_model, outputs=status)
-        generate_btn.click(
+        generate_event = generate_btn.click(
             generate,
             inputs=[
                 prompt,
@@ -127,10 +149,12 @@ def build_ui() -> gr.Blocks:
                 dtype_name,
                 cpu_offload,
                 vae_tiling,
+                batch_count,
                 gallery,
             ],
             outputs=[gallery, used_seed, seed, status],
         )
+        stop_btn.click(request_stop, cancels=[generate_event])
 
         gr.Markdown(
             """

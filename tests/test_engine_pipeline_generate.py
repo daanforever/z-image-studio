@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 from zimage.engine.pipeline import generate_image
 
@@ -303,3 +304,126 @@ def test_generate_image_reports_loading_on_cache_miss(monkeypatch, tmp_path: Pat
     )
     assert progress[0] == (0.0, "Loading model…")
     assert any(desc == "Loading model…" and value == 0.02 for value, desc in progress)
+
+
+def test_generate_image_syncs_loras(monkeypatch, tmp_path: Path):
+    from zimage.engine.lora import LoraSpec
+
+    fake = Image.new("RGB", (4, 4), "red")
+    pipe = _FakePipe(fake)
+    captured = {}
+    spec = LoraSpec(
+        path=tmp_path / "style.safetensors",
+        filename="style.safetensors",
+        adapter_name="style",
+        scale=0.8,
+    )
+
+    def fake_ensure(*_args, **kwargs):
+        captured["skip"] = kwargs.get("skip_quantize_for_lora")
+        return pipe, {}
+
+    def fake_sync(synced_pipe, specs):
+        captured["pipe"] = synced_pipe
+        captured["specs"] = tuple(specs)
+
+    monkeypatch.setattr("zimage.engine.pipeline.runtime_status", _non_demo_status)
+    monkeypatch.setattr("zimage.engine.pipeline.resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr("zimage.engine.pipeline.ensure_pipeline", fake_ensure)
+    monkeypatch.setattr("zimage.engine.pipeline._pipeline_cache_hit", lambda *_a, **_k: True)
+    monkeypatch.setattr("zimage.engine.pipeline.sync_lora_adapters", fake_sync)
+
+    image, seed, status = generate_image(
+        "prompt",
+        seed=2,
+        outputs_dir=tmp_path,
+        loras=(spec,),
+    )
+    assert image is fake
+    assert seed == 2
+    assert captured["pipe"] is pipe
+    assert captured["specs"] == (spec,)
+    assert captured["skip"] is True
+    assert status["loras"] == [{"name": "style.safetensors", "strength": 0.8}]
+
+
+def test_generate_image_demo_skips_lora_sync(monkeypatch, tmp_path: Path):
+    from zimage.engine.lora import LoraSpec
+
+    called = {"n": 0}
+    spec = LoraSpec(
+        path=tmp_path / "style.safetensors",
+        filename="style.safetensors",
+        adapter_name="style",
+        scale=1.0,
+    )
+    monkeypatch.setenv("ZIMAGE_DEMO", "1")
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.sync_lora_adapters",
+        lambda *_args, **_kwargs: called.__setitem__("n", called["n"] + 1),
+    )
+    image, _seed, status = generate_image(
+        "prompt",
+        seed=1,
+        outputs_dir=tmp_path,
+        loras=(spec,),
+    )
+    assert status["demo"] is True
+    assert image.mode == "RGB"
+    assert called["n"] == 0
+
+
+def test_generate_image_lora_sync_error_propagates(monkeypatch, tmp_path: Path):
+    from zimage.engine.lora import LoraSpec
+
+    fake = Image.new("RGB", (4, 4), "red")
+    spec = LoraSpec(
+        path=tmp_path / "style.safetensors",
+        filename="style.safetensors",
+        adapter_name="style",
+        scale=1.0,
+    )
+    monkeypatch.setattr("zimage.engine.pipeline.runtime_status", _non_demo_status)
+    monkeypatch.setattr("zimage.engine.pipeline.resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.ensure_pipeline",
+        lambda *_args, **_kwargs: (_FakePipe(fake), {}),
+    )
+    monkeypatch.setattr("zimage.engine.pipeline._pipeline_cache_hit", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.sync_lora_adapters",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad adapter")),
+    )
+    with pytest.raises(RuntimeError, match="bad adapter"):
+        generate_image("prompt", seed=1, outputs_dir=tmp_path, loras=(spec,))
+
+
+def test_generate_image_passes_skip_quantize_on_cache_check(monkeypatch, tmp_path: Path):
+    from zimage.engine.lora import LoraSpec
+
+    fake = Image.new("RGB", (4, 4), "red")
+    captured = {}
+    spec = LoraSpec(
+        path=tmp_path / "style.safetensors",
+        filename="style.safetensors",
+        adapter_name="style",
+        scale=1.0,
+    )
+
+    def fake_hit(*args, **kwargs):
+        captured["skip"] = kwargs.get("skip_quantize_for_lora")
+        if len(args) >= 8:
+            captured["skip"] = args[7]
+        return True
+
+    monkeypatch.setattr("zimage.engine.pipeline.runtime_status", _non_demo_status)
+    monkeypatch.setattr("zimage.engine.pipeline.resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.ensure_pipeline",
+        lambda *_args, **_kwargs: (_FakePipe(fake), {}),
+    )
+    monkeypatch.setattr("zimage.engine.pipeline._pipeline_cache_hit", fake_hit)
+    monkeypatch.setattr("zimage.engine.pipeline.sync_lora_adapters", lambda *_a, **_k: None)
+    generate_image("prompt", seed=1, outputs_dir=tmp_path, loras=(spec,))
+    assert captured["skip"] is True
+

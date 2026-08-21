@@ -7,6 +7,24 @@ from zimage.engine import resolve_device, runtime_status
 from zimage.ui.log import log_status
 
 
+def _format_strength(value: float) -> str:
+    text = f"{float(value):.2f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        text += ".0"
+    return text
+
+
+def _format_loras(loras) -> str:
+    if not loras:
+        return "none"
+    parts = []
+    for item in loras:
+        name = item.get("name") if isinstance(item, dict) else item[0]
+        strength = item.get("strength") if isinstance(item, dict) else item[1]
+        parts.append(f"{name} ({_format_strength(strength)})")
+    return ", ".join(parts)
+
+
 def format_status(status: dict | None = None, extra: str = "") -> str:
     status = status or runtime_status()
     if status.get("demo"):
@@ -34,6 +52,7 @@ def format_status(status: dict | None = None, extra: str = "") -> str:
         if precision:
             loaded += f" · `{precision}`"
         lines.append(loaded)
+        lines.append(f"**LoRA:** {_format_loras(status.get('loras'))}")
     else:
         lines.append("**Model:** not in memory yet (loads on first generation)")
     if status.get("cpu_torch_on_nvidia"):

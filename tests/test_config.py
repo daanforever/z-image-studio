@@ -11,6 +11,7 @@ from zimage.config import (
     PRECISION_CHOICES,
     QUANTIZE_CHOICES,
     canonical_precision,
+    default_lora_dir,
     is_truthy,
     load_dotenv,
     parse_quantize_modules,
@@ -105,3 +106,13 @@ def test_load_dotenv_strips_quotes_and_skips_junk(tmp_path: Path, monkeypatch):
     load_dotenv(env_file)
     assert os.environ["ZIMAGE_TEST_Q"] == "quoted"
     assert os.environ["ZIMAGE_TEST_S"] == "single"
+
+
+def test_default_lora_dir_empty_without_env(monkeypatch):
+    monkeypatch.delenv("ZIMAGE_LORA_DIR", raising=False)
+    assert default_lora_dir() == ""
+
+
+def test_default_lora_dir_from_env(monkeypatch):
+    monkeypatch.setenv("ZIMAGE_LORA_DIR", r"D:\loras")
+    assert default_lora_dir() == r"D:\loras"

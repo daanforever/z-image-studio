@@ -338,3 +338,28 @@ def test_load_pipeline_passes_quantize_flags(monkeypatch):
     assert captured["dtype"] == "int8"
     assert captured["quantize_transformer"] is False
     assert captured["quantize_text_encoder"] is True
+
+
+def test_load_pipeline_skips_quantization_for_lora(monkeypatch):
+    _install_pipe(monkeypatch, _BasePipe)
+    called = {"torchao": 0, "apply": 0}
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.require_torchao",
+        lambda: called.__setitem__("torchao", called["torchao"] + 1),
+    )
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.apply_quantization",
+        lambda *_args, **_kwargs: called.__setitem__("apply", called["apply"] + 1),
+    )
+    pipe = pipeline_mod.load_pipeline(
+        "model",
+        "cuda",
+        "fp8",
+        False,
+        False,
+        quantize_transformer=True,
+        quantize_text_encoder=True,
+        skip_quantize_for_lora=True,
+    )
+    assert called == {"torchao": 0, "apply": 0}
+    assert pipe.moved_to == "cuda"

@@ -9,6 +9,7 @@ from zimage.config import (
     DEFAULT_DEVICE,
     DEFAULT_DTYPE,
     DEFAULT_GUIDANCE,
+    DEFAULT_LORA_DIR,
     DEFAULT_MODEL,
     DEFAULT_QUANTIZE_MODULES,
     DEFAULT_RESOLUTION,
@@ -19,7 +20,7 @@ from zimage.config import (
     QUANTIZE_CHOICES,
     RESOLUTION_PRESETS,
 )
-from zimage.ui.handlers import generate, load_model, request_stop, unload_model
+from zimage.ui.handlers import generate, load_model, refresh_loras, request_stop, sync_lora_weights, unload_model
 from zimage.ui.status import format_status
 
 
@@ -104,6 +105,32 @@ def build_ui() -> gr.Blocks:
                         load_btn = gr.Button("Load model")
                         unload_btn = gr.Button("Unload")
 
+                with gr.Accordion("LoRA", open=True, elem_id="studio-lora"):
+                    lora_dir = gr.Textbox(
+                        value=DEFAULT_LORA_DIR,
+                        label="Directory",
+                        info="Local folder of .safetensors / .pt adapters. Leave empty for the base model.",
+                        elem_id="studio-lora-dir",
+                    )
+                    lora_refresh = gr.Button("Refresh", elem_id="studio-lora-refresh")
+                    lora_adapters = gr.Dropdown(
+                        choices=[],
+                        value=[],
+                        multiselect=True,
+                        label="Adapters",
+                        info="Select one or more files. Empty = no LoRA.",
+                        elem_id="studio-lora-adapters",
+                    )
+                    lora_weights = gr.Dataframe(
+                        headers=["LoRA", "Strength"],
+                        datatype=["str", "number"],
+                        value=[],
+                        column_count=2,
+                        interactive=True,
+                        label="Strength",
+                        elem_id="studio-lora-weights",
+                    )
+
                 with gr.Accordion("Advanced", open=False):
                     guidance = gr.Slider(
                         0.0,
@@ -147,6 +174,26 @@ def build_ui() -> gr.Blocks:
             outputs=status,
         )
         unload_btn.click(unload_model, outputs=status)
+        lora_refresh.click(
+            refresh_loras,
+            inputs=[lora_dir, lora_adapters, lora_weights],
+            outputs=[lora_adapters, lora_weights],
+        )
+        lora_dir.submit(
+            refresh_loras,
+            inputs=[lora_dir, lora_adapters, lora_weights],
+            outputs=[lora_adapters, lora_weights],
+        )
+        lora_dir.blur(
+            refresh_loras,
+            inputs=[lora_dir, lora_adapters, lora_weights],
+            outputs=[lora_adapters, lora_weights],
+        )
+        lora_adapters.change(
+            sync_lora_weights,
+            inputs=[lora_adapters, lora_weights],
+            outputs=lora_weights,
+        )
         generate_event = generate_btn.click(
             generate,
             inputs=[
@@ -165,6 +212,9 @@ def build_ui() -> gr.Blocks:
                 quantize_modules,
                 batch_count,
                 gallery,
+                lora_dir,
+                lora_adapters,
+                lora_weights,
             ],
             outputs=[gallery, used_seed, seed, status],
             show_progress="minimal",
@@ -175,12 +225,12 @@ def build_ui() -> gr.Blocks:
         gr.Markdown(
             """
 Local Gradio UI for **Tongyi-MAI/Z-Image-Turbo** via `diffusers`.
-The model works best in English and Chinese; Russian is supported but weaker.
+The model works best in English and Chinese; Russian is supported but weaker.<br>
 Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during distillation.
 
-Images are saved to `outputs/`.
+Images are saved to `outputs/`.<br>
 **fp8** / **int8** quantize the checked modules of official **Z-Image-Turbo**
-with torchao — not Disty0/SDNQ checkpoints.
+with torchao.
             """,
             elem_classes=["studio-footer"],
         )

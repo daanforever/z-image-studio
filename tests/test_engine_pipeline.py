@@ -128,6 +128,45 @@ def test_ensure_pipeline_reloads_on_quantize_targets_change(monkeypatch, reset_p
     assert loads == [(True, True), (True, False)]
 
 
+def test_pipeline_key_changes_with_lora_skip():
+    base = dict(
+        model_id="model-a",
+        device="cuda",
+        dtype_name="fp8",
+        cpu_offload=False,
+        vae_tiling=False,
+        quantize_transformer=True,
+        quantize_text_encoder=True,
+    )
+    without = pipeline_mod._pipeline_key(**base, skip_quantize_for_lora=False)
+    with_lora = pipeline_mod._pipeline_key(**base, skip_quantize_for_lora=True)
+    assert without != with_lora
+    assert with_lora[-1] is True
+    assert without[-1] is False
+
+
+def test_ensure_pipeline_reloads_on_lora_skip_change(monkeypatch, reset_pipeline):
+    loads: list[bool] = []
+
+    def fake_load(*_args, **kwargs):
+        loads.append(bool(kwargs.get("skip_quantize_for_lora", False)))
+        return object()
+
+    monkeypatch.setattr("zimage.engine.pipeline.resolve_device", lambda _device: "cuda")
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.runtime_status",
+        lambda: {"demo": False, "cuda": True},
+    )
+    monkeypatch.setattr("zimage.engine.pipeline.load_pipeline", fake_load)
+    monkeypatch.setattr("zimage.engine.pipeline._reclaim_memory", lambda: None)
+
+    ensure_pipeline("model-a", "cuda", "fp8", False, False, skip_quantize_for_lora=False)
+    ensure_pipeline("model-a", "cuda", "fp8", False, False, skip_quantize_for_lora=True)
+    ensure_pipeline("model-a", "cuda", "fp8", False, False, skip_quantize_for_lora=True)
+    ensure_pipeline("model-a", "cuda", "fp8", False, False, skip_quantize_for_lora=False)
+    assert loads == [False, True, False]
+
+
 def test_reclaim_memory_without_torch(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "torch", None)
     pipeline_mod._reclaim_memory()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import warnings
 
+from zimage.config import DEFAULT_LORA_DIR
 from zimage.ui.handlers import generate
 from zimage.ui.layout import build_ui
 
@@ -97,3 +98,67 @@ def test_model_device_quantize_checkboxes(monkeypatch):
     assert quant.label == "quantize"
     assert _choice_labels(quant.choices) == ["transformer", "text encoder"]
     assert list(quant.value) == ["transformer", "text encoder"]
+
+
+def _block_by_label(demo, label: str):
+    return next(
+        block
+        for block in demo.blocks.values()
+        if getattr(block, "label", None) == label
+    )
+
+
+def _fns_named(demo, name: str):
+    return [
+        fn
+        for fn in demo.fns.values()
+        if getattr(getattr(fn, "fn", None), "__name__", None) == name
+    ]
+
+
+def test_lora_accordion_after_model_device(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    ids = _elem_ids(demo)
+    assert "studio-lora" in ids
+    assert "studio-lora-dir" in ids
+    assert "studio-lora-refresh" in ids
+    assert "studio-lora-adapters" in ids
+    assert "studio-lora-weights" in ids
+
+    lora = _block_by_elem_id(demo, "studio-lora")
+    model = _block_by_label(demo, "Model & device")
+    assert lora.parent is model.parent
+    siblings = list(lora.parent.children)
+    assert siblings.index(model) < siblings.index(lora)
+
+    directory = _block_by_elem_id(demo, "studio-lora-dir")
+    assert directory.value == DEFAULT_LORA_DIR
+
+    adapters = _block_by_elem_id(demo, "studio-lora-adapters")
+    assert adapters.multiselect is True
+    assert list(adapters.value or []) == []
+
+    weights = _block_by_elem_id(demo, "studio-lora-weights")
+    headers = list(getattr(weights, "headers", []) or [])
+    assert headers[:2] == ["LoRA", "Strength"]
+
+
+def test_generate_event_includes_lora_inputs(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    generate_fn = _fns_named(demo, "generate")[0]
+    input_ids = [getattr(block, "elem_id", None) for block in generate_fn.inputs]
+    assert "studio-lora-dir" in input_ids
+    assert "studio-lora-adapters" in input_ids
+    assert "studio-lora-weights" in input_ids
+
+
+def test_lora_events_wired(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    refresh_fns = _fns_named(demo, "refresh_loras")
+    assert len(refresh_fns) == 3
+    assert {fn.fn.__name__ for fn in refresh_fns} == {"refresh_loras"}
+    weight_fns = _fns_named(demo, "sync_lora_weights")
+    assert len(weight_fns) == 1

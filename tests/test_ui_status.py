@@ -32,6 +32,32 @@ def test_format_status_cuda_loaded():
     assert "`fp8`" in markdown
     assert "outputs/zimage-1.png" in markdown
     assert "without CUDA" not in markdown
+    assert "**LoRA:** none" in markdown
+
+
+def test_format_status_lists_loras():
+    markdown = format_status(
+        {
+            "demo": False,
+            "device": "cpu",
+            "device_name": "CPU",
+            "torch_version": "x",
+            "cuda_built": "no",
+            "loaded": True,
+            "model": "model-a",
+            "precision": "bfloat16",
+            "loras": [
+                {"name": "style.safetensors", "strength": 0.8},
+                {"name": "char.safetensors", "strength": 1.0},
+            ],
+        }
+    )
+    assert "**LoRA:** style.safetensors (0.8), char.safetensors (1.0)" in markdown
+
+
+def test_format_status_demo_omits_lora():
+    markdown = format_status({"demo": True, "demo_reason": "forced"})
+    assert "**LoRA:**" not in markdown
 
 
 def test_format_status_cpu_torch_warning():

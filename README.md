@@ -11,6 +11,7 @@ Official Turbo recipe from the model card: **9 steps** (8 DiT forwards) and **`g
 - Model path: Hugging Face ID **or** a local snapshot
 - Auto-selects `cuda` / `cpu`, VRAM status
 - Precision: **fp8** by default; also `bfloat16` / `float16` / `float32` / `int8` (torchao on checked modules)
+- LoRA: local directory (`ZIMAGE_LORA_DIR`), multi-select `.safetensors` / `.pt`, per-adapter strength
 - CPU offload and VAE tiling for low VRAM
 - Saves PNGs to `outputs/`
 - Demo mode with no weights and no GPU (to inspect the UI)
@@ -54,6 +55,7 @@ The simplest path on this machine is `launch.bat`. It sets:
 | `HF_HOME` | `E:\Backup\huggingface` |
 | `HF_HUB_OFFLINE` | `0` (Hub downloads allowed) |
 | `ZIMAGE_MODEL` | `Tongyi-MAI/Z-Image-Turbo` |
+| `ZIMAGE_LORA_DIR` | (unset — set a local folder of LoRA files) |
 | port | `43127` |
 
 ```bat

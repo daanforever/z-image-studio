@@ -101,8 +101,17 @@ CUSTOM_CSS = """
     font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.875rem;
 }
+.studio-footer,
+.studio-footer .prose,
+.studio-footer .md {
+    max-width: none !important;
+    width: 100%;
+    text-align: center;
+}
 .studio-footer p {
-    max-width: 64ch;
+    max-width: none;
+    margin-left: auto;
+    margin-right: auto;
     color: var(--body-text-color-subdued);
 }
 .dark #output-gallery,

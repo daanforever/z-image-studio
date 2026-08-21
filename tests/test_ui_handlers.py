@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import inspect
+from pathlib import Path
+
 from PIL import Image
 
 import gradio as gr
@@ -10,7 +13,9 @@ from zimage.ui.handlers import (
     _image_progress,
     generate,
     load_model,
+    refresh_loras,
     request_stop,
+    sync_lora_weights,
     unload_model,
 )
 import zimage.ui.handlers as handlers
@@ -40,6 +45,9 @@ def _generate(
     quantize_modules=None,
     batch_count=1,
     gallery=None,
+    lora_dir="",
+    lora_names=None,
+    lora_weights=None,
     progress=None,
 ):
     return _drain(
@@ -59,6 +67,9 @@ def _generate(
             quantize_modules,
             batch_count,
             gallery,
+            lora_dir,
+            lora_names,
+            lora_weights,
             progress=progress,
         )
     )
@@ -473,3 +484,107 @@ def test_generate_passes_progress_wrapper(monkeypatch):
     _generate(progress=progress)
     assert captured["progress"] is not None
     assert captured["progress"] is not progress
+
+
+def test_refresh_loras_keeps_existing_files(tmp_path: Path):
+    (tmp_path / "alpha.safetensors").write_bytes(b"")
+    (tmp_path / "beta.safetensors").write_bytes(b"")
+    dropdown, weights = refresh_loras(
+        str(tmp_path),
+        ["alpha.safetensors", "gone.safetensors"],
+        [["alpha.safetensors", 0.8], ["gone.safetensors", 0.5]],
+    )
+    labels = []
+    for choice in dropdown.choices:
+        if isinstance(choice, (list, tuple)):
+            labels.append(str(choice[0]))
+        else:
+            labels.append(str(choice))
+    assert labels == ["alpha.safetensors", "beta.safetensors"]
+    assert dropdown.value == ["alpha.safetensors"]
+    assert weights == [["alpha.safetensors", 0.8]]
+
+
+def test_sync_lora_weights_preserves_and_defaults():
+    rows = sync_lora_weights(
+        ["style.safetensors", "char.safetensors"],
+        [["style.safetensors", 0.8], ["old.safetensors", 0.2]],
+    )
+    assert rows == [["style.safetensors", 0.8], ["char.safetensors", 1.0]]
+
+
+def test_generate_passes_lora_specs(monkeypatch, tmp_path: Path):
+    captured = {}
+    (tmp_path / "style.safetensors").write_bytes(b"")
+
+    def fake_generate_image(*_args, **kwargs):
+        captured.update(kwargs)
+        return Image.new("RGB", (2, 2), "white"), 1, {"loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+    _generate(
+        lora_dir=str(tmp_path),
+        lora_names=["style.safetensors"],
+        lora_weights=[["style.safetensors", 0.8]],
+    )
+    specs = captured["loras"]
+    assert len(specs) == 1
+    assert specs[0].filename == "style.safetensors"
+    assert specs[0].scale == 0.8
+
+
+def test_generate_lora_error_is_gr_error(monkeypatch, tmp_path: Path):
+    (tmp_path / "style.safetensors").write_bytes(b"")
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("bad adapter")
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", boom)
+    with pytest.raises(gr.Error, match="bad adapter"):
+        _generate(
+            lora_dir=str(tmp_path),
+            lora_names=["style.safetensors"],
+            lora_weights=[["style.safetensors", 1.0]],
+        )
+
+
+def test_refresh_loras_from_fixture(tiny_lora_dir: Path):
+    dropdown, weights = refresh_loras(str(tiny_lora_dir), None, None)
+    labels = []
+    for choice in dropdown.choices:
+        if isinstance(choice, (list, tuple)):
+            labels.append(str(choice[0]))
+        else:
+            labels.append(str(choice))
+    assert "tiny_zimage_lora.safetensors" in labels
+    assert weights == []
+
+
+def test_generate_passes_real_fixture_lora(monkeypatch, tiny_lora_dir: Path):
+    captured = {}
+
+    def fake_generate_image(*_args, **kwargs):
+        captured.update(kwargs)
+        return Image.new("RGB", (2, 2), "white"), 1, {"loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+    _generate(
+        lora_dir=str(tiny_lora_dir),
+        lora_names=["tiny_zimage_lora.safetensors"],
+        lora_weights=[["tiny_zimage_lora.safetensors", 0.55]],
+    )
+    specs = captured["loras"]
+    assert len(specs) == 1
+    assert specs[0].filename == "tiny_zimage_lora.safetensors"
+    assert specs[0].scale == 0.55
+    assert specs[0].path.is_file()
+    assert specs[0].path.stat().st_size > 1024
+
+
+def test_load_model_does_not_accept_lora():
+    params = inspect.signature(load_model).parameters
+    assert "lora_dir" not in params
+    assert "loras" not in params
+    assert "lora_names" not in params

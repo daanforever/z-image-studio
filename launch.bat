@@ -14,6 +14,9 @@ REM Uncomment to skip the Hub and load a specific snapshot:
 REM set "ZIMAGE_MODEL=E:\Backup\huggingface\hub\models--Tongyi-MAI--Z-Image-Turbo\snapshots\0e36c2b379e66fa531d01cc531c44919e5f1c6fd"
 if not defined ZIMAGE_MODEL set "ZIMAGE_MODEL=Tongyi-MAI/Z-Image-Turbo"
 
+REM Optional LoRA directory (scanned for .safetensors / .pt):
+REM if not defined ZIMAGE_LORA_DIR set "ZIMAGE_LORA_DIR="
+
 set "ZIMAGE_DEVICE=auto"
 set "ZIMAGE_PORT=43127"
 set "PYTHONUTF8=1"

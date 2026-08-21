@@ -52,6 +52,13 @@ def canonical_precision(name: str | None) -> str:
 DEFAULT_DTYPE = canonical_precision(os.environ.get("ZIMAGE_DTYPE", "fp8"))
 DEFAULT_PORT = int(os.environ.get("ZIMAGE_PORT", "43127"))
 
+
+def default_lora_dir() -> str:
+    return os.environ.get("ZIMAGE_LORA_DIR", "")
+
+
+DEFAULT_LORA_DIR = default_lora_dir()
+
 QUANTIZE_TRANSFORMER = "transformer"
 QUANTIZE_TEXT_ENCODER = "text encoder"
 QUANTIZE_CHOICES = [QUANTIZE_TRANSFORMER, QUANTIZE_TEXT_ENCODER]

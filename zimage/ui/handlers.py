@@ -10,6 +10,7 @@ import gradio as gr
 
 from zimage.config import DEFAULT_BATCH, DEFAULT_MODEL, MAX_BATCH, parse_quantize_modules, parse_resolution
 from zimage.engine import ensure_pipeline, generate_image, runtime_status, unload_pipeline
+from zimage.engine.lora import DEFAULT_STRENGTH, list_lora_files, parse_lora_specs, weights_map
 from zimage.ui.log import log_error
 from zimage.ui.status import format_status
 
@@ -68,6 +69,29 @@ def _image_progress(progress, index: int, count: int):
     return report
 
 
+def _as_name_list(names) -> list[str]:
+    if names is None:
+        return []
+    if isinstance(names, str):
+        text = names.strip()
+        return [text] if text else []
+    return [str(item).strip() for item in names if str(item).strip()]
+
+
+def refresh_loras(directory, selected=None, current_df=None):
+    files = list_lora_files(directory)
+    kept = [name for name in _as_name_list(selected) if name in files]
+    return gr.Dropdown(choices=files, value=kept, multiselect=True), sync_lora_weights(kept, current_df)
+
+
+def sync_lora_weights(selected, current_df=None):
+    previous = weights_map(current_df)
+    rows = []
+    for name in _as_name_list(selected):
+        rows.append([name, previous.get(name, DEFAULT_STRENGTH)])
+    return rows
+
+
 def load_model(
     model_id: str,
     device: str,
@@ -116,6 +140,9 @@ def generate(
     quantize_modules=None,
     batch_count=DEFAULT_BATCH,
     gallery: list | None = None,
+    lora_dir: str = "",
+    lora_names=None,
+    lora_weights=None,
     progress=gr.Progress(),
 ) -> Generator[tuple, None, None]:
     prompt = (prompt or "").strip()
@@ -130,6 +157,7 @@ def generate(
     base_seed = random.randint(1, 2_147_483_647) if random_seed else int(seed)
     width, height = parse_resolution(resolution)
     model = model_id.strip() or DEFAULT_MODEL
+    loras = parse_lora_specs(lora_dir, lora_names, lora_weights)
     items = list(gallery or [])
     last_seed = base_seed
     last_status: dict | None = None
@@ -160,6 +188,7 @@ def generate(
                 vae_tiling=vae_tiling,
                 quantize_transformer=quantize_transformer,
                 quantize_text_encoder=quantize_text_encoder,
+                loras=loras,
                 progress=image_progress,
             )
         except Exception as exc:  # noqa: BLE001

@@ -21,6 +21,12 @@ from zimage.config import (
     is_truthy,
 )
 from zimage.engine.demo import demo_image
+from zimage.engine.lora import (
+    LoraSpec,
+    reset_lora_adapters,
+    status_loras,
+    sync_lora_adapters,
+)
 from zimage.engine.quantization import (
     apply_quantization,
     is_fp8_precision,
@@ -92,14 +98,16 @@ def _pipeline_key(
     vae_tiling: bool,
     quantize_transformer: bool,
     quantize_text_encoder: bool,
+    skip_quantize_for_lora: bool = False,
 ) -> tuple:
     dtype_name = canonical_precision(dtype_name)
-    if is_quantized_precision(dtype_name):
-        quantize_transformer = bool(quantize_transformer)
-        quantize_text_encoder = bool(quantize_text_encoder)
-    else:
+    skip_quantize_for_lora = bool(skip_quantize_for_lora)
+    if skip_quantize_for_lora or not is_quantized_precision(dtype_name):
         quantize_transformer = False
         quantize_text_encoder = False
+    else:
+        quantize_transformer = bool(quantize_transformer)
+        quantize_text_encoder = bool(quantize_text_encoder)
     return (
         model_id.strip(),
         device,
@@ -108,6 +116,7 @@ def _pipeline_key(
         vae_tiling,
         quantize_transformer,
         quantize_text_encoder,
+        skip_quantize_for_lora,
     )
 
 
@@ -119,11 +128,15 @@ def load_pipeline(
     vae_tiling: bool,
     quantize_transformer: bool = True,
     quantize_text_encoder: bool = True,
+    skip_quantize_for_lora: bool = False,
 ):
     import torch
 
     dtype_name = canonical_precision(dtype_name)
-    quantize = should_quantize(dtype_name, quantize_transformer, quantize_text_encoder)
+    quantize = (
+        should_quantize(dtype_name, quantize_transformer, quantize_text_encoder)
+        and not skip_quantize_for_lora
+    )
     if quantize:
         require_torchao()
     if quantize and is_fp8_precision(dtype_name):
@@ -198,6 +211,7 @@ def ensure_pipeline(
     vae_tiling: bool = False,
     quantize_transformer: bool = True,
     quantize_text_encoder: bool = True,
+    skip_quantize_for_lora: bool = False,
 ):
     global _pipe, _pipe_key
 
@@ -214,12 +228,14 @@ def ensure_pipeline(
         vae_tiling,
         quantize_transformer,
         quantize_text_encoder,
+        skip_quantize_for_lora=skip_quantize_for_lora,
     )
     with _lock:
         if _pipe is not None and _pipe_key == key:
             return _pipe, _loaded_status(model_id, resolved, dtype_name)
         _pipe = None
         _pipe_key = None
+        reset_lora_adapters()
         _reclaim_memory()
         _pipe = load_pipeline(
             model_id,
@@ -229,6 +245,7 @@ def ensure_pipeline(
             vae_tiling,
             quantize_transformer=quantize_transformer,
             quantize_text_encoder=quantize_text_encoder,
+            skip_quantize_for_lora=skip_quantize_for_lora,
         )
         _pipe_key = key
         return _pipe, _loaded_status(model_id, resolved, dtype_name)
@@ -239,6 +256,7 @@ def unload_pipeline() -> None:
     with _lock:
         _pipe = None
         _pipe_key = None
+    reset_lora_adapters()
     _reclaim_memory()
 
 
@@ -259,6 +277,7 @@ def _pipeline_cache_hit(
     vae_tiling: bool,
     quantize_transformer: bool,
     quantize_text_encoder: bool,
+    skip_quantize_for_lora: bool = False,
 ) -> bool:
     key = _pipeline_key(
         model_id,
@@ -268,6 +287,7 @@ def _pipeline_cache_hit(
         vae_tiling,
         quantize_transformer,
         quantize_text_encoder,
+        skip_quantize_for_lora=skip_quantize_for_lora,
     )
     return _pipe is not None and _pipe_key == key
 
@@ -295,11 +315,13 @@ def generate_image(
     vae_tiling: bool = False,
     quantize_transformer: bool = True,
     quantize_text_encoder: bool = True,
+    loras: tuple[LoraSpec, ...] | list[LoraSpec] | None = (),
     progress=None,
     outputs_dir: Path | None = None,
 ) -> tuple[Image.Image, int, dict[str, Any]]:
     status = runtime_status()
     resolved = resolve_device(device)
+    lora_specs = tuple(loras or ())
 
     if resolved == "demo" or status["demo"]:
         if progress is not None:
@@ -315,6 +337,7 @@ def generate_image(
             progress(1.0, desc="Done")
         return image, seed, status
 
+    skip_quantize_for_lora = bool(lora_specs)
     needs_load = not _pipeline_cache_hit(
         model_id,
         resolved,
@@ -323,6 +346,7 @@ def generate_image(
         vae_tiling,
         quantize_transformer,
         quantize_text_encoder,
+        skip_quantize_for_lora=skip_quantize_for_lora,
     )
     if progress is not None and needs_load:
         progress(0.0, desc="Loading model…")
@@ -335,7 +359,9 @@ def generate_image(
         vae_tiling,
         quantize_transformer=quantize_transformer,
         quantize_text_encoder=quantize_text_encoder,
+        skip_quantize_for_lora=skip_quantize_for_lora,
     )
+    sync_lora_adapters(pipe, lora_specs)
 
     if progress is not None and needs_load:
         progress(0.02, desc="Loading model…")
@@ -386,6 +412,7 @@ def generate_image(
         progress(0.98, desc="Saving…")
     path = save_image(image, seed, outputs_dir=outputs_dir)
     status = _loaded_status(model_id, resolved, dtype_name)
+    status["loras"] = status_loras(lora_specs)
     status["saved"] = str(path)
     if progress is not None:
         progress(1.0, desc="Done")

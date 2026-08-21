@@ -24,16 +24,6 @@ def build_ui() -> gr.Blocks:
         title="Z-Image-Turbo Studio",
         fill_height=True,
     ) as demo:
-        gr.Markdown(
-            """
-# Z-Image-Turbo Studio
-Local Gradio UI for **Tongyi-MAI/Z-Image-Turbo** via `diffusers`.
-The model works best in English and Chinese; Russian is supported but weaker.
-Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during distillation.
-            """,
-            elem_classes=["studio-hero"],
-        )
-
         with gr.Row():
             with gr.Column(scale=5):
                 prompt = gr.Textbox(
@@ -68,9 +58,9 @@ Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during dist
                         )
                         dtype_name = gr.Radio(
                             choices=PRECISION_CHOICES,
-                            value=DEFAULT_DTYPE if DEFAULT_DTYPE in PRECISION_CHOICES else "bfloat16",
+                            value=DEFAULT_DTYPE if DEFAULT_DTYPE in PRECISION_CHOICES else "fp8",
                             label="Precision",
-                            info="fp8 / int8: torchao on the DiT (official checkpoint). fp8 needs Ada 8.9+ / Blackwell.",
+                            info="fp8 / int8: torchao on the DiT (official checkpoint). fp8 needs Ada 8.9+ / Blackwell and cannot use CPU offload.",
                         )
                     with gr.Row():
                         cpu_offload = gr.Checkbox(value=False, label="CPU offload (saves VRAM)")
@@ -130,8 +120,15 @@ Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during dist
         )
 
         gr.Markdown(
-            "Images are saved to `outputs/`. "
-            "**fp8** / **int8** quantize the official **Z-Image-Turbo** DiT with torchao — "
-            "not Disty0/SDNQ checkpoints."
+            """
+Local Gradio UI for **Tongyi-MAI/Z-Image-Turbo** via `diffusers`.
+The model works best in English and Chinese; Russian is supported but weaker.
+Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during distillation.
+
+Images are saved to `outputs/`.
+**fp8** / **int8** quantize the official **Z-Image-Turbo** DiT with torchao —
+not Disty0/SDNQ checkpoints.
+            """,
+            elem_classes=["studio-footer"],
         )
     return demo

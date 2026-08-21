@@ -27,12 +27,7 @@ CUSTOM_CSS = """
     font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.875rem;
 }
-.studio-hero h1 {
-    letter-spacing: -0.03em;
-    font-weight: 600;
-    margin-bottom: 0.35rem !important;
-}
-.studio-hero p {
+.studio-footer p {
     max-width: 64ch;
     color: var(--body-text-color-subdued);
 }

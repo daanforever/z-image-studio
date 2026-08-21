@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
+import logging
 from types import ModuleType
 from typing import Any
 
-INT8_PRECISION_NAMES = frozenset({"int8", "int8wo", "q8", "int8_weight_only"})
-FP8_PRECISION_NAMES = frozenset({"fp8", "float8", "float8dq", "fp8dq"})
+from zimage.config import canonical_precision
+
+log = logging.getLogger("zimage")
+
 FP8_MIN_CAPABILITY = (8, 9)
 
 
 def is_int8_precision(name: str | None) -> bool:
-    return (name or "").strip().lower() in INT8_PRECISION_NAMES
+    return canonical_precision(name) == "int8"
 
 
 def is_fp8_precision(name: str | None) -> bool:
-    return (name or "").strip().lower() in FP8_PRECISION_NAMES
+    return canonical_precision(name) == "fp8"
 
 
 def is_quantized_precision(name: str | None) -> bool:
-    return is_int8_precision(name) or is_fp8_precision(name)
+    return canonical_precision(name) in {"int8", "fp8"}
 
 
 def try_import_torchao() -> ModuleType | None:
@@ -75,7 +78,7 @@ def _int8_weight_only_scheme() -> Any:
         from torchao.quantization import Int8WeightOnlyConfig
 
         return Int8WeightOnlyConfig()
-    except Exception:  # noqa: BLE001 — older torchao uses a factory function
+    except ImportError:
         from torchao.quantization import int8_weight_only
 
         return int8_weight_only()
@@ -97,20 +100,30 @@ def _fp8_scheme() -> Any:
     try:
         from torchao.quantization import Float8WeightOnlyConfig
 
+        log.warning("torchao float8 dynamic config is unavailable; using weight-only fp8.")
         return Float8WeightOnlyConfig()
     except ImportError:
         pass
     from torchao.quantization import float8_weight_only
 
+    log.warning("torchao float8 dynamic config is unavailable; using weight-only fp8.")
     return float8_weight_only()
 
 
 def _scheme_for(dtype_name: str) -> Any:
-    if is_fp8_precision(dtype_name):
+    precision = canonical_precision(dtype_name)
+    if precision == "fp8":
         return _fp8_scheme()
-    if is_int8_precision(dtype_name):
+    if precision == "int8":
         return _int8_weight_only_scheme()
     raise RuntimeError(f"No torchao scheme for precision {dtype_name!r}.")
+
+
+def _scheme_label(scheme: Any) -> str:
+    name = getattr(scheme, "__name__", None)
+    if isinstance(name, str) and name:
+        return name
+    return type(scheme).__name__
 
 
 def apply_quantization(pipe: Any, dtype_name: str) -> str:
@@ -125,13 +138,17 @@ def apply_quantization(pipe: Any, dtype_name: str) -> str:
             "Install it with: pip install torchao"
         ) from exc
 
-    label = "fp8" if is_fp8_precision(dtype_name) else "int8"
+    precision = canonical_precision(dtype_name)
+    scheme = _scheme_for(precision)
+    if hasattr(module, "eval"):
+        module.eval()
     try:
-        quantize_(module, _scheme_for(dtype_name))
+        quantize_(module, scheme)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"Failed to apply torchao {label} quantization to `{name}`: {exc}"
+            f"Failed to apply torchao {precision} quantization to `{name}`: {exc}"
         ) from exc
+    log.info("Applied torchao %s to %s (%s)", precision, name, _scheme_label(scheme))
     return name
 
 

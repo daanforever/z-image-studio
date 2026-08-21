@@ -9,7 +9,7 @@ Turbo-рецепт по документации модели: **9 шагов** 
 - Промпт, пресеты разрешения, seed, шаги, time shift
 - Путь к модели: Hugging Face id **или** локальный snapshot
 - Автовыбор `cuda` / `cpu`, статус VRAM
-- Precision: `bfloat16` / `float16` / `float32` / `fp8` / `int8` (torchao на DiT)
+- Precision: **fp8** по умолчанию; также `bfloat16` / `float16` / `float32` / `int8` (torchao на DiT)
 - CPU offload и VAE tiling, если мало памяти
 - Сохранение PNG в `outputs/`
 - Демо-режим без весов и без GPU (чтобы открыть UI)
@@ -104,7 +104,7 @@ ZIMAGE_DEMO=1 python app.py --port 43127
 
 ## VRAM
 
-На 16 ГБ (RTX 5080) Turbo в `bfloat16` обычно помещается. Если нужно меньше VRAM или быстрее счёт — **fp8** (Ada 8.9+ / Blackwell, рекомендуемый 8-bit на 50xx) или **int8** (torchao, официальные веса), плюс **CPU offload** / **VAE tiling**. Это не Disty0/SDNQ-чекпоинты: квантуется тот же `Tongyi-MAI/Z-Image-Turbo`.
+По умолчанию Turbo грузится в **fp8** (Ada 8.9+ / Blackwell, в том числе RTX 5080; не сочетается с CPU offload). **bfloat16** — полный режим, если fp8 не нужен. **int8** — если нужен CPU offload. Плюс **VAE tiling**. Это не Disty0/SDNQ-чекпоинты: квантуется тот же `Tongyi-MAI/Z-Image-Turbo`.
 
 ## Тесты
 

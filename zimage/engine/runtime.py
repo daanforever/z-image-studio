@@ -80,17 +80,16 @@ def resolve_device(requested: str) -> str:
 def dtype_from_name(name: str):
     import torch
 
-    from zimage.engine.quantization import is_quantized_precision
+    from zimage.config import canonical_precision
 
-    if is_quantized_precision(name):
+    precision = canonical_precision(name)
+    if precision in {"int8", "fp8"}:
         # Compute dtype for torchao quantized weights (int8 / fp8).
         return torch.bfloat16
 
     mapping = {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
-        "fp16": torch.float16,
         "float32": torch.float32,
-        "fp32": torch.float32,
     }
-    return mapping.get((name or "bfloat16").lower(), torch.bfloat16)
+    return mapping.get(precision, torch.bfloat16)

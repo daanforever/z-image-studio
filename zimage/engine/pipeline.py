@@ -17,13 +17,13 @@ from zimage.config import (
     DEFAULT_MODEL,
     DEFAULT_SHIFT,
     OUTPUTS_DIR,
+    canonical_precision,
     is_truthy,
 )
 from zimage.engine.demo import demo_image
 from zimage.engine.quantization import (
     apply_quantization,
     is_fp8_precision,
-    is_int8_precision,
     is_quantized_precision,
     require_fp8_device,
     require_torchao,
@@ -61,13 +61,41 @@ def _instantiate_pipeline(model_id: str, kwargs: dict[str, Any]):
             ) from fallback_exc
 
 
+def _reclaim_memory() -> None:
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+def _loaded_status(model_id: str, device: str, dtype_name: str) -> dict[str, Any]:
+    status = runtime_status()
+    status["loaded"] = True
+    status["model"] = model_id
+    status["device"] = device
+    status["precision"] = canonical_precision(dtype_name)
+    return status
+
+
 def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool, vae_tiling: bool):
     import torch
 
+    dtype_name = canonical_precision(dtype_name)
     if is_quantized_precision(dtype_name):
         require_torchao()
     if is_fp8_precision(dtype_name):
         require_fp8_device(device)
+        if cpu_offload:
+            raise RuntimeError(
+                "fp8 cannot be combined with CPU offload. "
+                "Disable CPU offload, or use int8 if you need offload."
+            )
 
     dtype = dtype_from_name(dtype_name)
     if device == "cpu" and dtype in {torch.bfloat16, torch.float16}:
@@ -82,18 +110,32 @@ def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool
 
     pipe = _instantiate_pipeline(model_id, kwargs)
 
-    # int8: quantize on CPU so peak VRAM is already the reduced footprint.
-    if is_int8_precision(dtype_name):
-        apply_quantization(pipe, dtype_name)
+    # Prefer quantizing on CPU so peak VRAM is already the reduced footprint.
+    quantized = False
+    cpu_quant_error: Exception | None = None
+    if is_quantized_precision(dtype_name):
+        try:
+            apply_quantization(pipe, dtype_name)
+            quantized = True
+        except Exception as exc:  # noqa: BLE001 — fp8 may need CUDA tensors
+            if not (is_fp8_precision(dtype_name) and device == "cuda"):
+                raise
+            cpu_quant_error = exc
 
     if cpu_offload and device == "cuda":
         pipe.enable_model_cpu_offload()
     else:
         pipe.to(device)
 
-    # fp8 kernels expect CUDA (Ada 8.9+ / Blackwell); apply after placement.
-    if is_fp8_precision(dtype_name):
-        apply_quantization(pipe, dtype_name)
+    if is_quantized_precision(dtype_name) and not quantized:
+        try:
+            apply_quantization(pipe, dtype_name)
+        except Exception as exc:  # noqa: BLE001
+            if cpu_quant_error is not None:
+                raise RuntimeError(
+                    f"{exc} (CPU attempt: {cpu_quant_error})"
+                ) from exc
+            raise
 
     if vae_tiling and hasattr(pipe, "enable_vae_tiling"):
         pipe.enable_vae_tiling()
@@ -114,20 +156,17 @@ def ensure_pipeline(
     if resolved == "demo":
         return None, runtime_status()
 
+    dtype_name = canonical_precision(dtype_name)
     key = (model_id.strip(), resolved, dtype_name, cpu_offload, vae_tiling)
     with _lock:
         if _pipe is not None and _pipe_key == key:
-            status = runtime_status()
-            status["loaded"] = True
-            status["model"] = model_id
-            return _pipe, status
+            return _pipe, _loaded_status(model_id, resolved, dtype_name)
+        _pipe = None
+        _pipe_key = None
+        _reclaim_memory()
         _pipe = load_pipeline(model_id, resolved, dtype_name, cpu_offload, vae_tiling)
         _pipe_key = key
-        status = runtime_status()
-        status["loaded"] = True
-        status["model"] = model_id
-        status["device"] = resolved
-        return _pipe, status
+        return _pipe, _loaded_status(model_id, resolved, dtype_name)
 
 
 def unload_pipeline() -> None:
@@ -135,16 +174,7 @@ def unload_pipeline() -> None:
     with _lock:
         _pipe = None
         _pipe_key = None
-    try:
-        import gc
-
-        import torch
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except ImportError:
-        pass
+    _reclaim_memory()
 
 
 def save_image(image: Image.Image, seed: int, outputs_dir: Path | None = None) -> Path:
@@ -187,7 +217,7 @@ def generate_image(
     if progress is not None:
         progress(0.05, desc="Loading model…")
 
-    pipe, status = ensure_pipeline(model_id, resolved, dtype_name, cpu_offload, vae_tiling)
+    pipe, _status = ensure_pipeline(model_id, resolved, dtype_name, cpu_offload, vae_tiling)
 
     import torch
     from diffusers import FlowMatchEulerDiscreteScheduler
@@ -220,11 +250,8 @@ def generate_image(
 
     image = result.images[0]
     path = save_image(image, seed, outputs_dir=outputs_dir)
-    status = runtime_status()
-    status["loaded"] = True
-    status["model"] = model_id
+    status = _loaded_status(model_id, resolved, dtype_name)
     status["saved"] = str(path)
-    status["device"] = resolved
     if progress is not None:
         progress(1.0, desc="Done")
     return image, seed, status

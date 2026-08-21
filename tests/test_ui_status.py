@@ -28,12 +28,14 @@ def test_format_status_cuda_loaded():
             "vram": "1.0 / 15.9 GB",
             "loaded": True,
             "model": "Tongyi-MAI/Z-Image-Turbo",
+            "precision": "fp8",
             "saved": "outputs/zimage-1.png",
         }
     )
     assert "RTX 5080" in markdown
     assert "CUDA build: 13.0" in markdown
     assert "loaded" in markdown
+    assert "`fp8`" in markdown
     assert "outputs/zimage-1.png" in markdown
     assert "without CUDA" not in markdown
 

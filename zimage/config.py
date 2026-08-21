@@ -28,8 +28,28 @@ OUTPUTS_DIR = Path(os.environ.get("ZIMAGE_OUTPUTS", ROOT / "outputs"))
 
 DEFAULT_MODEL = os.environ.get("ZIMAGE_MODEL", "Tongyi-MAI/Z-Image-Turbo")
 DEFAULT_DEVICE = os.environ.get("ZIMAGE_DEVICE", "auto")
-PRECISION_CHOICES = ["bfloat16", "float16", "float32", "fp8", "int8"]
-DEFAULT_DTYPE = os.environ.get("ZIMAGE_DTYPE", "bfloat16")
+PRECISION_CHOICES = ["fp8", "bfloat16", "float16", "float32", "int8"]
+_PRECISION_ALIASES = {
+    "bf16": "bfloat16",
+    "fp16": "float16",
+    "half": "float16",
+    "fp32": "float32",
+    "float8": "fp8",
+    "float8dq": "fp8",
+    "fp8dq": "fp8",
+    "int8wo": "int8",
+    "q8": "int8",
+    "int8_weight_only": "int8",
+}
+
+
+def canonical_precision(name: str | None) -> str:
+    raw = (name or "").strip().lower() or "bfloat16"
+    mapped = _PRECISION_ALIASES.get(raw, raw)
+    return mapped if mapped in PRECISION_CHOICES else "bfloat16"
+
+
+DEFAULT_DTYPE = canonical_precision(os.environ.get("ZIMAGE_DTYPE", "fp8"))
 DEFAULT_PORT = int(os.environ.get("ZIMAGE_PORT", "43127"))
 
 # Official Turbo recipe: 9 scheduler steps → 8 DiT forwards, CFG baked in.

@@ -29,7 +29,11 @@ def format_status(status: dict | None = None, extra: str = "") -> str:
     if status.get("vram"):
         lines.append(f"**VRAM:** {status['vram']}")
     if status.get("loaded"):
-        lines.append(f"**Model:** `{status.get('model', DEFAULT_MODEL)}` · loaded")
+        precision = status.get("precision")
+        loaded = f"**Model:** `{status.get('model', DEFAULT_MODEL)}` · loaded"
+        if precision:
+            loaded += f" · `{precision}`"
+        lines.append(loaded)
     else:
         lines.append("**Model:** not in memory yet (loads on first generation)")
     if status.get("cpu_torch_on_nvidia"):

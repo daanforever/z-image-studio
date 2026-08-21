@@ -70,10 +70,35 @@ def test_ensure_pipeline_reuses_cached_pipe(monkeypatch):
         assert second is fake_pipe
         assert loads["n"] == 1
         assert status_a["loaded"] is True
+        assert status_a["precision"] == "float32"
         assert status_b["model"] == "model-a"
     finally:
         unload_pipeline()
     assert pipeline_mod._pipe is None
+
+
+def test_ensure_pipeline_reloads_on_precision_change(monkeypatch):
+    loads: list[str] = []
+
+    def fake_load(_model, _device, dtype_name, _cpu_offload, _vae_tiling):
+        loads.append(dtype_name)
+        return object()
+
+    monkeypatch.setattr("zimage.engine.pipeline.resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.runtime_status",
+        lambda: {"demo": False, "cuda": False},
+    )
+    monkeypatch.setattr("zimage.engine.pipeline.load_pipeline", fake_load)
+    monkeypatch.setattr("zimage.engine.pipeline._reclaim_memory", lambda: None)
+    pipeline_mod._pipe = None
+    pipeline_mod._pipe_key = None
+    try:
+        ensure_pipeline("model-a", "cpu", "float32", False, False)
+        ensure_pipeline("model-a", "cpu", "int8wo", False, False)
+        assert loads == ["float32", "int8"]
+    finally:
+        unload_pipeline()
 
 
 def test_load_pipeline_cpu_offload_and_tiling(monkeypatch):
@@ -144,7 +169,7 @@ def test_load_pipeline_int8_quantizes_before_device(monkeypatch):
     assert order == ["load", ("quant", "int8"), ("to", "cuda")]
 
 
-def test_load_pipeline_fp8_quantizes_after_device(monkeypatch):
+def test_load_pipeline_fp8_quantizes_before_device(monkeypatch):
     order = []
 
     class Pipe:
@@ -175,7 +200,50 @@ def test_load_pipeline_fp8_quantizes_after_device(monkeypatch):
 
     pipe = pipeline_mod.load_pipeline("model", "cuda", "fp8", False, False)
     assert pipe.moved_to == "cuda"
-    assert order == ["load", ("to", "cuda"), ("quant", "fp8")]
+    assert order == ["load", ("quant", "fp8"), ("to", "cuda")]
+
+
+def test_load_pipeline_fp8_retries_after_device(monkeypatch):
+    order = []
+    attempts = {"n": 0}
+
+    class Pipe:
+        def to(self, device):
+            order.append(("to", device))
+            return self
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            order.append("load")
+            return cls()
+
+    fake_diffusers = types.ModuleType("diffusers")
+    fake_diffusers.ZImagePipeline = Pipe
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
+    monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
+
+    def fake_apply(pipe, dtype_name):
+        attempts["n"] += 1
+        order.append(("quant", attempts["n"]))
+        if attempts["n"] == 1:
+            raise RuntimeError("fp8 needs CUDA tensors")
+        return "transformer"
+
+    monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
+
+    pipeline_mod.load_pipeline("model", "cuda", "fp8", False, False)
+    assert order == ["load", ("quant", 1), ("to", "cuda"), ("quant", 2)]
+
+
+def test_load_pipeline_fp8_rejects_cpu_offload(monkeypatch):
+    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
+    monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
+    try:
+        pipeline_mod.load_pipeline("model", "cuda", "fp8", True, False)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "CPU offload" in str(exc)
 
 
 def test_load_pipeline_fp8_rejects_cpu(monkeypatch):

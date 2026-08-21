@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from zimage.config import (
+    DEFAULT_DTYPE,
     DEFAULT_HEIGHT,
     DEFAULT_WIDTH,
     PRECISION_CHOICES,
+    canonical_precision,
     is_truthy,
     load_dotenv,
     parse_resolution,
@@ -13,7 +15,16 @@ from zimage.config import (
 
 
 def test_precision_choices_include_quantized():
-    assert PRECISION_CHOICES == ["bfloat16", "float16", "float32", "fp8", "int8"]
+    assert PRECISION_CHOICES == ["fp8", "bfloat16", "float16", "float32", "int8"]
+    assert DEFAULT_DTYPE == "fp8"
+
+
+def test_canonical_precision_aliases():
+    assert canonical_precision("INT8WO") == "int8"
+    assert canonical_precision("float8dq") == "fp8"
+    assert canonical_precision("fp16") == "float16"
+    assert canonical_precision("unknown") == "bfloat16"
+    assert canonical_precision(None) == "bfloat16"
 
 
 def test_parse_resolution_preset():

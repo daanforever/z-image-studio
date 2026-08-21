@@ -1,0 +1,53 @@
+---
+description: Conventional Commits format for git commit messages
+alwaysApply: true
+---
+
+# Git commits: Conventional Commits
+
+Create a commit only when the user explicitly asks. Follow the existing git safety protocol (no force push, no amend unless allowed, no `--no-verify`, HEREDOC for the message).
+
+## Format
+
+```
+<type>(<optional-scope>): <description>
+
+<optional body>
+```
+
+- `type` is required; `scope` is optional (module/area: `ui`, `engine`, `config`, `tests`)
+- Description: English, imperative mood, lowercase after the colon, no trailing period, ~50 characters, max 72
+- Body (optional): wrap at 72 chars; explain **why**, not what. Use a blank line after the subject
+- Breaking change: `type(scope)!: description` and/or a footer `BREAKING CHANGE: ...`
+
+## Types
+
+| type | when |
+|------|------|
+| `feat` | new user-facing capability |
+| `fix` | bug fix |
+| `docs` | README or comments only |
+| `style` | formatting, no logic change |
+| `refactor` | restructure without behavior change |
+| `perf` | performance |
+| `test` | add or update tests |
+| `build` | deps, packaging, `requirements*.txt` |
+| `ci` | CI config |
+| `chore` | tooling, gitignore, misc non-code |
+
+Pick **one** type that matches the primary intent. Prefer `feat`/`fix` over `chore` when behavior changes.
+
+## Examples
+
+```
+# ❌ BAD
+Update test suite to enhance coverage for precision handling.
+Fixed the bug.
+feat: Added FP8 support.
+
+# ✅ GOOD
+feat(engine): add fp8 precision as the default
+fix(ui): show current precision in the status bar
+test: cover env loading and precision error paths
+docs: document cu130 install for RTX 50xx
+```

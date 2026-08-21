@@ -53,24 +53,40 @@ CUSTOM_CSS = """
 }
 #studio-navbar-actions {
     display: flex !important;
-    flex: 1 1 auto !important;
+    flex: 0 0 auto !important;
     justify-content: flex-end !important;
     align-items: center !important;
     gap: 0.5rem;
-    min-height: 2.25rem;
-    min-width: 8rem;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
 }
-#studio-stop-btn {
-    min-width: 5.5rem;
-    font-weight: 500;
+#studio-navbar-actions > .block,
+#studio-navbar-actions > .form {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    max-width: none !important;
+}
+#studio-navbar-actions button {
+    box-sizing: border-box !important;
+    width: 2.25rem !important;
+    height: 2.25rem !important;
+    min-width: 2.25rem !important;
+    max-width: 2.25rem !important;
+    padding: 0 !important;
+    border-radius: 0.5rem !important;
+    font-size: 0 !important;
+    line-height: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
 }
 #studio-stop-btn::before {
     content: "";
-    display: inline-block;
+    display: block;
     width: 0.55em;
-    height: 0.85em;
-    margin-right: 0.45em;
-    vertical-align: -0.1em;
+    height: 0.9em;
+    font-size: 1rem;
     background:
         linear-gradient(currentColor, currentColor) left / 0.22em 100% no-repeat,
         linear-gradient(currentColor, currentColor) right / 0.22em 100% no-repeat;

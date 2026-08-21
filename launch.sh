@@ -27,13 +27,13 @@ else
         break
     done
     if [[ -z "$PYTHON" ]]; then
-        echo "Python не найден. Установите Python или создайте .venv" >&2
+        echo "Python not found. Install Python or create a .venv" >&2
         exit 1
     fi
 fi
 
 if ! "$PYTHON" -c "import gradio, torch, diffusers, transformers, accelerate, safetensors, huggingface_hub, PIL, sentencepiece" >/dev/null 2>&1; then
-    echo "Зависимости не найдены — ставлю из requirements.txt"
+    echo "Dependencies missing — installing from requirements.txt"
     "$PYTHON" -m pip install -r requirements.txt
 fi
 

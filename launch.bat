@@ -2,15 +2,15 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-REM --- Hugging Face cache (ваши локальные веса) ---
+REM --- Hugging Face cache (local weights) ---
 if not defined HF_HUB_CACHE set "HF_HUB_CACHE=E:\Backup\huggingface\hub"
 if not defined HF_HOME set "HF_HOME=E:\Backup\huggingface"
 set "HF_HUB_OFFLINE=0"
 set "TRANSFORMERS_OFFLINE=0"
 set "HF_DATASETS_OFFLINE=0"
 
-REM Модель: HF id или полный путь к snapshot.
-REM Раскомментируйте, чтобы не ходить в Hub и грузить конкретный snapshot:
+REM Model: HF id or full snapshot path.
+REM Uncomment to skip the Hub and load a specific snapshot:
 REM set "ZIMAGE_MODEL=E:\Backup\huggingface\hub\models--Tongyi-MAI--Z-Image-Turbo\snapshots\0e36c2b379e66fa531d01cc531c44919e5f1c6fd"
 if not defined ZIMAGE_MODEL set "ZIMAGE_MODEL=Tongyi-MAI/Z-Image-Turbo"
 

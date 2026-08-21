@@ -23,6 +23,8 @@ DEFAULT_HEIGHT = 768
 DEFAULT_RESOLUTION = "1024x768 (4:3)"
 
 RESOLUTION_PRESETS = [
+    "512x384 (4:3)",
+    "768x576 (4:3)",
     "1024x768 (4:3)",
     "1280x720 (16:9)",
 ]
@@ -35,7 +37,7 @@ EXAMPLE_PROMPTS = [
         "A sunlit kitchen still life: a chipped enamel kettle, sliced blood oranges on a wooden board, steam catching the morning light. Photorealistic, shallow depth of field, 35mm."
     ],
     [
-        "Кинокадр: пожилой часовщик в маленькой мастерской на Арбате, тёплый вольфрамовый свет, пыль в луче, макро циферблата с кириллической гравировкой «Время»."
+        "Cinematic still: an elderly watchmaker in a small workshop on the Arbat, warm tungsten light, dust in the beam, macro of a watch face with Cyrillic engraving «Время»."
     ],
     [
         "Poster title «Z-IMAGE TURBO» in bold condensed type across a foggy Shanghai Bund at blue hour, neon reflections on wet granite, cinematic 2.39:1."

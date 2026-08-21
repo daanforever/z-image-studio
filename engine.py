@@ -41,14 +41,14 @@ def runtime_status() -> dict[str, Any]:
 
     if is_truthy(os.environ.get("ZIMAGE_DEMO")):
         info["demo"] = True
-        info["demo_reason"] = "Включён ZIMAGE_DEMO=1"
+        info["demo_reason"] = "ZIMAGE_DEMO=1 is enabled"
         return info
 
     try:
         import torch
     except ImportError:
         info["demo"] = True
-        info["demo_reason"] = "PyTorch не установлен"
+        info["demo_reason"] = "PyTorch is not installed"
         return info
 
     info["torch"] = True
@@ -61,14 +61,14 @@ def runtime_status() -> dict[str, Any]:
         info["device_name"] = torch.cuda.get_device_name(0)
         total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         allocated = torch.cuda.memory_allocated(0) / (1024**3)
-        info["vram"] = f"{allocated:.1f} / {total:.1f} ГБ"
+        info["vram"] = f"{allocated:.1f} / {total:.1f} GB"
     else:
         info["device"] = "cpu"
         info["device_name"] = "CPU"
         if "+cpu" in torch.__version__ or not info["cuda_built"]:
             info["cpu_torch_on_nvidia"] = True
             info["demo_reason"] = (
-                "Установлен CPU-PyTorch без CUDA. Для RTX 50xx: "
+                "CPU-only PyTorch is installed (no CUDA). For RTX 50xx: "
                 "pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130"
             )
 
@@ -129,11 +129,11 @@ def _load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: boo
             hint = ""
             if "ZImagePipeline" in type(last_error).__name__ or "ZImagePipeline" in str(last_error):
                 hint = (
-                    " Установите свежий diffusers: "
+                    " Install a recent diffusers: "
                     "pip install git+https://github.com/huggingface/diffusers"
                 )
             raise RuntimeError(
-                f"Не удалось загрузить модель {model_id}: {fallback_exc}.{hint}"
+                f"Failed to load model {model_id}: {fallback_exc}.{hint}"
             ) from fallback_exc
 
     if cpu_offload and device == "cuda":
@@ -216,15 +216,15 @@ def _demo_image(prompt: str, width: int, height: int, seed: int, reason: str) ->
         title_font = body_font = small_font = ImageFont.load_default()
 
     margin = 48
-    draw.text((margin, margin), "Z-Image-Turbo · демо", font=title_font, fill=accent)
+    draw.text((margin, margin), "Z-Image-Turbo · demo", font=title_font, fill=accent)
     draw.text(
         (margin, margin + 56),
-        reason or "Модель не загружена — интерфейс работает без весов.",
+        reason or "Model not loaded — UI is running without weights.",
         font=small_font,
         fill="#c9bba8",
     )
 
-    wrapped = _wrap_text(prompt.strip() or "(пустой промпт)", body_font, width - margin * 2, draw)
+    wrapped = _wrap_text(prompt.strip() or "(empty prompt)", body_font, width - margin * 2, draw)
     draw.multiline_text((margin, margin + 110), wrapped, font=body_font, fill="#f4efe6", spacing=8)
     draw.text(
         (margin, height - 72),
@@ -292,7 +292,7 @@ def generate_image(
         return image, seed, status
 
     if progress is not None:
-        progress(0.05, desc="Загрузка модели…")
+        progress(0.05, desc="Loading model…")
 
     pipe, status = ensure_pipeline(model_id, resolved, dtype_name, cpu_offload, vae_tiling)
 
@@ -309,7 +309,7 @@ def generate_image(
     generator = torch.Generator(device=gen_device).manual_seed(int(seed))
 
     if progress is not None:
-        progress(0.2, desc="Генерация…")
+        progress(0.2, desc="Generating…")
 
     kwargs: dict[str, Any] = {
         "prompt": prompt,
@@ -333,5 +333,5 @@ def generate_image(
     status["saved"] = str(path)
     status["device"] = resolved
     if progress is not None:
-        progress(1.0, desc="Готово")
+        progress(1.0, desc="Done")
     return image, seed, status

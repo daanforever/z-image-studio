@@ -36,33 +36,33 @@ footer { display: none !important; }
 def format_status(status: dict | None = None, extra: str = "") -> str:
     status = status or runtime_status()
     if status.get("demo"):
-        reason = status.get("demo_reason") or "демо-режим"
+        reason = status.get("demo_reason") or "demo mode"
         return (
-            f"**Режим:** демо (модель не загружена)\n\n"
+            f"**Mode:** demo (model not loaded)\n\n"
             f"{reason}\n\n"
-            f"Для настоящей генерации поставьте CUDA-PyTorch и укажите путь "
-            f"к `Tongyi-MAI/Z-Image-Turbo`."
+            f"For real generation, install CUDA-enabled PyTorch and set the path "
+            f"to `Tongyi-MAI/Z-Image-Turbo`."
         )
 
     device = status.get("device") or resolve_device(DEFAULT_DEVICE)
     name = status.get("device_name") or device
     lines = [
-        f"**Устройство:** `{device}` · {name}",
-        f"**PyTorch:** {status.get('torch_version') or '—'} · CUDA build: {status.get('cuda_built') or 'нет'}",
+        f"**Device:** `{device}` · {name}",
+        f"**PyTorch:** {status.get('torch_version') or '—'} · CUDA build: {status.get('cuda_built') or 'no'}",
     ]
     if status.get("vram"):
         lines.append(f"**VRAM:** {status['vram']}")
     if status.get("loaded"):
-        lines.append(f"**Модель:** `{status.get('model', DEFAULT_MODEL)}` · загружена")
+        lines.append(f"**Model:** `{status.get('model', DEFAULT_MODEL)}` · loaded")
     else:
-        lines.append("**Модель:** ещё не в памяти (загрузится при первой генерации)")
+        lines.append("**Model:** not in memory yet (loads on first generation)")
     if status.get("cpu_torch_on_nvidia"):
         lines.append(
-            "\n⚠ Сборка PyTorch **без CUDA**. На RTX 5080 нужна GPU-сборка:\n"
+            "\n⚠ PyTorch was built **without CUDA**. RTX 5080 needs a GPU build:\n"
             "`pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130`"
         )
     if status.get("saved"):
-        lines.append(f"**Файл:** `{status['saved']}`")
+        lines.append(f"**Saved:** `{status['saved']}`")
     if extra:
         lines.append(extra)
     return "\n".join(lines)
@@ -80,7 +80,7 @@ def unload_model():
     unload_pipeline()
     status = runtime_status()
     status["loaded"] = False
-    return format_status(status, extra="Модель выгружена из памяти.")
+    return format_status(status, extra="Model unloaded from memory.")
 
 
 def generate(
@@ -101,7 +101,7 @@ def generate(
 ):
     prompt = (prompt or "").strip()
     if not prompt:
-        raise gr.Error("Введите промпт.")
+        raise gr.Error("Enter a prompt.")
 
     used_seed = random.randint(1, 2_147_483_647) if random_seed else int(seed)
     width, height = parse_resolution(resolution)
@@ -126,8 +126,8 @@ def generate(
         message = str(exc)
         if "offline" in message.lower() or "local_files_only" in message.lower():
             message += (
-                " Сеть для Hugging Face выключена. Поставьте HF_HUB_OFFLINE=0 "
-                "или укажите полный локальный snapshot."
+                " Hugging Face network access is disabled. Set HF_HUB_OFFLINE=0 "
+                "or provide a full local snapshot."
             )
         raise gr.Error(message) from exc
 
@@ -149,78 +149,78 @@ def build_ui() -> gr.Blocks:
         gr.Markdown(
             """
 # Z-Image-Turbo Studio
-Локальный Gradio UI для **Tongyi-MAI/Z-Image-Turbo** через `diffusers`.
-Модель понимает английский и китайский; русский тоже можно, но слабее.
-Turbo: **9 шагов**, `guidance_scale = 0` — CFG уже «запечён» при дистилляции.
+Local Gradio UI for **Tongyi-MAI/Z-Image-Turbo** via `diffusers`.
+The model works best in English and Chinese; Russian is supported but weaker.
+Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during distillation.
             """
         )
 
         with gr.Row():
             with gr.Column(scale=5):
                 prompt = gr.Textbox(
-                    label="Промпт",
+                    label="Prompt",
                     lines=5,
-                    placeholder="Опишите кадр: свет, оптика, композиция, текст на картинке…",
+                    placeholder="Describe the shot: lighting, lens, composition, on-image text…",
                 )
                 with gr.Row():
                     resolution = gr.Dropdown(
                         choices=RESOLUTION_PRESETS,
                         value=DEFAULT_RESOLUTION,
-                        label="Разрешение",
+                        label="Resolution",
                     )
-                    steps = gr.Slider(1, 20, value=DEFAULT_STEPS, step=1, label="Шаги (Turbo = 9)")
+                    steps = gr.Slider(1, 20, value=DEFAULT_STEPS, step=1, label="Steps (Turbo = 9)")
                 with gr.Row():
                     seed = gr.Number(value=42, precision=0, label="Seed")
-                    random_seed = gr.Checkbox(value=True, label="Случайный seed")
-                generate_btn = gr.Button("Сгенерировать", variant="primary", elem_id="generate-btn")
-                gr.Examples(examples=EXAMPLE_PROMPTS, inputs=prompt, label="Примеры")
+                    random_seed = gr.Checkbox(value=True, label="Random seed")
+                generate_btn = gr.Button("Generate", variant="primary", elem_id="generate-btn")
+                gr.Examples(examples=EXAMPLE_PROMPTS, inputs=prompt, label="Examples")
 
-                with gr.Accordion("Модель и устройство", open=True):
+                with gr.Accordion("Model & device", open=True):
                     model_id = gr.Textbox(
                         value=DEFAULT_MODEL,
-                        label="Модель (Hugging Face id или путь к snapshot)",
-                        info="Например Tongyi-MAI/Z-Image-Turbo или E:\\Backup\\huggingface\\hub\\models--Tongyi-MAI--Z-Image-Turbo\\snapshots\\…",
+                        label="Model (Hugging Face ID or snapshot path)",
+                        info="e.g. Tongyi-MAI/Z-Image-Turbo or E:\\Backup\\huggingface\\hub\\models--Tongyi-MAI--Z-Image-Turbo\\snapshots\\…",
                     )
                     with gr.Row():
                         device = gr.Radio(
                             choices=["auto", "cuda", "cpu"],
                             value=DEFAULT_DEVICE if DEFAULT_DEVICE in {"auto", "cuda", "cpu"} else "auto",
-                            label="Устройство",
+                            label="Device",
                         )
                         dtype_name = gr.Radio(
                             choices=["bfloat16", "float16", "float32"],
                             value=DEFAULT_DTYPE if DEFAULT_DTYPE in {"bfloat16", "float16", "float32"} else "bfloat16",
-                            label="Точность",
+                            label="Precision",
                         )
                     with gr.Row():
-                        cpu_offload = gr.Checkbox(value=False, label="CPU offload (экономия VRAM)")
+                        cpu_offload = gr.Checkbox(value=False, label="CPU offload (saves VRAM)")
                         vae_tiling = gr.Checkbox(value=False, label="VAE tiling")
                     with gr.Row():
-                        load_btn = gr.Button("Загрузить модель")
-                        unload_btn = gr.Button("Выгрузить")
+                        load_btn = gr.Button("Load model")
+                        unload_btn = gr.Button("Unload")
 
-                with gr.Accordion("Дополнительно", open=False):
+                with gr.Accordion("Advanced", open=False):
                     guidance = gr.Slider(
                         0.0,
                         8.0,
                         value=DEFAULT_GUIDANCE,
                         step=0.1,
                         label="Guidance scale",
-                        info="Для Turbo оставляйте 0. Для полной Z-Image обычно 3–5.",
+                        info="Keep at 0 for Turbo. For full Z-Image, 3–5 is typical.",
                     )
                     time_shift = gr.Slider(1.0, 10.0, value=3.0, step=0.1, label="Time shift")
 
             with gr.Column(scale=6):
                 status = gr.Markdown(format_status(), elem_id="status-md")
                 gallery = gr.Gallery(
-                    label="Результат",
+                    label="Output",
                     columns=1,
                     height=640,
                     object_fit="contain",
                     preview=True,
                     format="png",
                 )
-                used_seed = gr.Textbox(label="Использованный seed", interactive=False)
+                used_seed = gr.Textbox(label="Used seed", interactive=False)
 
         load_btn.click(
             load_model,
@@ -249,8 +249,8 @@ Turbo: **9 шагов**, `guidance_scale = 0` — CFG уже «запечён» 
         )
 
         gr.Markdown(
-            "Картинки сохраняются в папку `outputs/`. "
-            "Это не квантованные Disty0/q8 — только официальный **Z-Image-Turbo**."
+            "Images are saved to `outputs/`. "
+            "This is not Disty0/q8 quantized weights — official **Z-Image-Turbo** only."
         )
     return demo
 
@@ -279,5 +279,5 @@ if __name__ == "__main__":
     try:
         main()
     except OSError as exc:
-        print(f"Не удалось запустить сервер: {exc}", file=sys.stderr)
+        print(f"Failed to start server: {exc}", file=sys.stderr)
         raise

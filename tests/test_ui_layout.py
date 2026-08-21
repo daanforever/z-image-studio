@@ -54,3 +54,24 @@ def test_generate_event_show_progress_minimal(monkeypatch):
 def test_generate_progress_default_disables_track_tqdm():
     default = inspect.signature(generate).parameters["progress"].default
     assert getattr(default, "track_tqdm", None) is False
+
+
+def _block_by_elem_id(demo, elem_id: str):
+    return next(
+        block
+        for block in demo.blocks.values()
+        if getattr(block, "elem_id", None) == elem_id
+    )
+
+
+def test_examples_follow_status_in_output_column(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    ids = _elem_ids(demo)
+    assert "studio-examples" in ids
+    assert "status-md" in ids
+    status = _block_by_elem_id(demo, "status-md")
+    examples = _block_by_elem_id(demo, "studio-examples")
+    assert status.parent is examples.parent
+    siblings = list(status.parent.children)
+    assert siblings.index(status) < siblings.index(examples)

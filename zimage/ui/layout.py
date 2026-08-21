@@ -70,7 +70,6 @@ def build_ui() -> gr.Blocks:
                     seed = gr.Number(value=42, precision=0, label="Seed")
                     random_seed = gr.Checkbox(value=True, label="Random seed")
                 generate_btn = gr.Button("Generate", variant="primary", elem_id="generate-btn")
-                gr.Examples(examples=EXAMPLE_PROMPTS, inputs=prompt, label="Examples")
 
                 with gr.Accordion("Model & device", open=True):
                     model_id = gr.Textbox(
@@ -127,6 +126,12 @@ def build_ui() -> gr.Blocks:
                 )
                 used_seed = gr.Textbox(label="Used seed", interactive=False)
                 status = gr.Markdown(format_status(), elem_id="status-md")
+                gr.Examples(
+                    examples=EXAMPLE_PROMPTS,
+                    inputs=prompt,
+                    label="Examples",
+                    elem_id="studio-examples",
+                )
 
         load_btn.click(
             load_model,

@@ -1,5 +1,5 @@
 ---
-description: Create a git commit using Conventional Commits
+description: Create a single git commit using Conventional Commits with a detailed description of all changes
 ---
 
 # commit
@@ -32,20 +32,17 @@ Run these in parallel:
 
 Then:
 
-1. Pick **one** `type` and optional `scope` from the rule that matches the primary intent. Prefer `feat`/`fix` over `chore` when behavior changes.
-2. Draft the message from the rule: English, imperative, lowercase after the colon, no trailing period, ~50 characters, max 72. Optional body: blank line after the subject, wrap at 72, explain **why** not what.
-3. Stage only the relevant files for this commit. Do not dump unrelated dirty files into it.
+1. Pick **one** primary `type` and optional `scope` from the rule that matches the most impactful change. Since this will be a single commit for all current changes, choose the type that best represents the overall update (prefer `feat`/`fix` over `chore`).
+2. Draft the message: 
+   - **Subject:** English, imperative, lowercase after the colon, no trailing period, ~50 chars, max 72.
+   - **Body (REQUIRED):** Must have a blank line after the subject. You **MUST** write a highly detailed explanation covering **all** modifications included in this commit. Use bullet points to list the changes. Explain both **what** was changed and **why**. Wrap text at 72 characters.
+3. Stage **all** modified, added, and deleted files (e.g., using `git add .`). Do not split changes into multiple commits; group everything into exactly ONE commit.
 4. Commit with a HEREDOC (no `-i`, no `--no-verify`):
 
 ```bash
 git commit -m "$(cat <<'EOF'
 <type>(<optional-scope>): <description>
 
-<optional body>
+<detailed body with bullet points explaining ALL changes: what and why>
 EOF
 )"
-```
-
-5. Run `git status` after the commit and confirm it succeeded.
-
-If the working tree is clean, say so and stop.

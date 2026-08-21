@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import gradio as gr
+
+COLOR_SCHEME_HEAD = '<meta name="color-scheme" content="dark light">'
 
 CUSTOM_CSS = """
 .gradio-container { max-width: 1240px !important; }
@@ -41,6 +45,15 @@ CUSTOM_CSS = """
 }
 footer { display: none !important; }
 """
+
+
+def appearance_kwargs() -> dict[str, Any]:
+    """App-level Gradio 6 launch() parameters (theme, css, head)."""
+    return {
+        "theme": build_theme(),
+        "css": CUSTOM_CSS,
+        "head": COLOR_SCHEME_HEAD,
+    }
 
 
 def build_theme() -> gr.themes.Base:

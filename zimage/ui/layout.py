@@ -16,16 +16,12 @@ from zimage.config import (
 )
 from zimage.ui.handlers import generate, load_model, unload_model
 from zimage.ui.status import format_status
-from zimage.ui.theme import CUSTOM_CSS, build_theme
 
 
 def build_ui() -> gr.Blocks:
     with gr.Blocks(
         title="Z-Image-Turbo Studio",
-        theme=build_theme(),
-        css=CUSTOM_CSS,
         fill_height=True,
-        head='<meta name="color-scheme" content="dark light">',
     ) as demo:
         gr.Markdown(
             """

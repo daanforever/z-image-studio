@@ -1,4 +1,4 @@
-gradio>=5.29.0
+gradio>=6.0.0
 torch>=2.5.0
 diffusers>=0.35.0
 transformers>=4.46.0

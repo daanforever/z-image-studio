@@ -7,6 +7,7 @@ import argparse
 from zimage.config import DEFAULT_PORT, load_dotenv
 from zimage.ui.layout import build_ui
 from zimage.ui.log import ensure_console_logging, log, log_error
+from zimage.ui.theme import appearance_kwargs
 
 load_dotenv()
 
@@ -28,6 +29,7 @@ def main(argv: list[str] | None = None) -> None:
         server_name=args.host,
         server_port=args.port,
         share=args.share,
+        **appearance_kwargs(),
     )
 
 

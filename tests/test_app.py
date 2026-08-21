@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import warnings
+
 from PIL import Image
 
 import gradio as gr
 import pytest
 
-from app import parse_args
+from app import main, parse_args
 from zimage.ui.handlers import generate, load_model, unload_model
 from zimage.ui.layout import build_ui
-from zimage.ui.theme import CUSTOM_CSS, build_theme
+from zimage.ui.theme import CUSTOM_CSS, appearance_kwargs, build_theme
 
 
 def test_parse_args_defaults():
@@ -141,9 +143,39 @@ def test_build_theme_and_css():
     assert theme is not None
     assert "#generate-btn" in CUSTOM_CSS
     assert "#status-md" in CUSTOM_CSS
+    appearance = appearance_kwargs()
+    assert appearance["css"] == CUSTOM_CSS
+    assert "color-scheme" in appearance["head"]
 
 
 def test_build_ui_constructs(monkeypatch):
     monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
-    demo = build_ui()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "error",
+            message="The parameters have been moved from the Blocks constructor",
+            category=UserWarning,
+        )
+        demo = build_ui()
     assert demo is not None
+
+
+def test_main_launches_with_appearance(monkeypatch):
+    captured = {}
+
+    def fake_launch(*_args, **kwargs):
+        captured.update(kwargs)
+        return None, "", ""
+
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    monkeypatch.setattr("gradio.blocks.Blocks.launch", fake_launch)
+    monkeypatch.setattr("app.ensure_console_logging", lambda: None)
+    monkeypatch.setattr("app.log.info", lambda *_args, **_kwargs: None)
+
+    main(["--host", "127.0.0.1", "--port", "8000"])
+
+    assert captured["server_name"] == "127.0.0.1"
+    assert captured["server_port"] == 8000
+    assert captured["theme"] is not None
+    assert captured["css"] == CUSTOM_CSS
+    assert "color-scheme" in captured["head"]

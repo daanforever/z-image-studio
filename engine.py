@@ -69,7 +69,8 @@ def runtime_status() -> dict[str, Any]:
             info["cpu_torch_on_nvidia"] = True
             info["demo_reason"] = (
                 "CPU-only PyTorch is installed (no CUDA). For RTX 50xx: "
-                "pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130"
+                "pip install --force-reinstall torch torchvision "
+                "--index-url https://download.pytorch.org/whl/cu130"
             )
 
     return info

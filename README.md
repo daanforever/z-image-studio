@@ -23,10 +23,10 @@ Turbo-рецепт по документации модели: **9 шагов** 
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu130
 ```
 
-`pip install torch` с PyPI ставит **CPU-сборку**. На RTX 5080 её недостаточно — нужна колесо `cu128`/`cu130` с `download.pytorch.org`.
+`pip install torch` с PyPI ставит **CPU-сборку**. На RTX 5080 её недостаточно — нужна колесо `cu128`/`cu130` с `download.pytorch.org`. Если CPU-версия уже стоит, обычный `pip install` ничего не меняет: нужен `--force-reinstall` (или сначала `pip uninstall torch torchvision`).
 
 Если `from diffusers import ZImagePipeline` падает, поставьте diffusers из git:
 

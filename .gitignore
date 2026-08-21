@@ -17,3 +17,5 @@ outputs/*
 !assets/**
 .DS_Store
 Thumbs.db
+.coverage
+coverage.json

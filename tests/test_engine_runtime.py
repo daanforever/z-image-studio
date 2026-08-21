@@ -2,7 +2,20 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from zimage.engine.runtime import dtype_from_name, resolve_device, runtime_status
+from zimage.engine.runtime import dtype_from_name, resolve_device, runtime_status, try_import_torch
+
+
+def test_try_import_torch_available():
+    module = try_import_torch()
+    assert module is not None
+    assert hasattr(module, "cuda")
+
+
+def test_try_import_torch_missing(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "torch", None)
+    assert try_import_torch() is None
 
 
 def test_runtime_status_demo_env(monkeypatch):
@@ -89,6 +102,7 @@ def test_dtype_from_name():
     import torch
 
     assert dtype_from_name("float16") is torch.float16
+    assert dtype_from_name("bfloat16") is torch.bfloat16
     assert dtype_from_name("fp32") is torch.float32
     assert dtype_from_name("int8") is torch.bfloat16
     assert dtype_from_name("int8wo") is torch.bfloat16

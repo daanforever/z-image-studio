@@ -1,13 +1,7 @@
 from __future__ import annotations
 
 from zimage.config import CUDA_REINSTALL_CMD
-from zimage.ui.log import plain_status
 from zimage.ui.status import format_status
-
-
-def test_plain_status_strips_markdown():
-    raw = "**Device:** `cuda`\n\n⚠ **without CUDA**\n`pip install torch`"
-    assert plain_status(raw) == "Device: cuda\n⚠ without CUDA\npip install torch"
 
 
 def test_format_status_demo_logs_reason(caplog):

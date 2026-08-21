@@ -9,13 +9,56 @@ import gradio as gr
 COLOR_SCHEME_HEAD = '<meta name="color-scheme" content="dark light">'
 
 CUSTOM_CSS = """
-.gradio-container { max-width: 1240px !important; }
-.gradio-container::before {
-    content: "";
-    display: block;
-    height: 1px;
-    margin: 0 0 1.15rem;
-    background: var(--border-color-primary);
+.gradio-container {
+    max-width: 1240px !important;
+    width: 100%;
+    margin: 0 auto !important;
+}
+.gradio-container .app {
+    max-width: 100% !important;
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+}
+#studio-navbar {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 1rem;
+    width: 100%;
+    min-height: 3.25rem;
+    margin: 0 0 1.15rem !important;
+    padding: 0.15rem 0 0.85rem !important;
+    border-bottom: 1px solid var(--border-color-primary);
+    background: transparent;
+}
+#studio-navbar .block,
+#studio-navbar .form,
+#studio-navbar .html-container {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    min-width: 0;
+}
+.studio-brand {
+    display: inline-block;
+    font-size: 1.125rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    color: var(--body-text-color);
+    user-select: none;
+}
+#studio-navbar-actions {
+    display: flex !important;
+    flex: 1 1 auto !important;
+    justify-content: flex-end !important;
+    align-items: center !important;
+    gap: 0.5rem;
+    min-height: 2.25rem;
+    min-width: 8rem;
 }
 #generate-btn {
     min-height: 48px;

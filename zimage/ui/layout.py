@@ -19,11 +19,24 @@ from zimage.ui.handlers import generate, load_model, unload_model
 from zimage.ui.status import format_status
 
 
+def build_navbar() -> None:
+    """Bootstrap-style top bar: brand on the left, reserved actions on the right."""
+    with gr.Row(elem_id="studio-navbar", equal_height=True, min_height=52):
+        gr.HTML(
+            '<span class="studio-brand">Studio</span>',
+            elem_id="studio-brand",
+        )
+        with gr.Row(elem_id="studio-navbar-actions", equal_height=True):
+            # Reserved for future action buttons.
+            pass
+
+
 def build_ui() -> gr.Blocks:
     with gr.Blocks(
         title="Z-Image-Turbo Studio",
         fill_height=True,
     ) as demo:
+        build_navbar()
         with gr.Row():
             with gr.Column(scale=5):
                 prompt = gr.Textbox(
@@ -81,7 +94,6 @@ def build_ui() -> gr.Blocks:
                     time_shift = gr.Slider(1.0, 10.0, value=3.0, step=0.1, label="Time shift")
 
             with gr.Column(scale=6):
-                status = gr.Markdown(format_status(), elem_id="status-md")
                 gallery = gr.Gallery(
                     label="Output",
                     columns=1,
@@ -92,6 +104,7 @@ def build_ui() -> gr.Blocks:
                     elem_id="output-gallery",
                 )
                 used_seed = gr.Textbox(label="Used seed", interactive=False)
+                status = gr.Markdown(format_status(), elem_id="status-md")
 
         load_btn.click(
             load_model,

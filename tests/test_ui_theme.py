@@ -8,6 +8,11 @@ def test_build_theme_and_css():
     assert theme is not None
     assert "#generate-btn" in CUSTOM_CSS
     assert "#status-md" in CUSTOM_CSS
+    assert "#studio-navbar" in CUSTOM_CSS
+    assert "#studio-navbar-actions" in CUSTOM_CSS
+    assert ".studio-brand" in CUSTOM_CSS
+    assert "margin: 0 auto" in CUSTOM_CSS
+    assert ".gradio-container .app" in CUSTOM_CSS
     appearance = appearance_kwargs()
     assert appearance["css"] == CUSTOM_CSS
     assert appearance["theme"] is not None

@@ -52,6 +52,20 @@ def canonical_precision(name: str | None) -> str:
 DEFAULT_DTYPE = canonical_precision(os.environ.get("ZIMAGE_DTYPE", "fp8"))
 DEFAULT_PORT = int(os.environ.get("ZIMAGE_PORT", "43127"))
 
+QUANTIZE_TRANSFORMER = "transformer"
+QUANTIZE_TEXT_ENCODER = "text encoder"
+QUANTIZE_CHOICES = [QUANTIZE_TRANSFORMER, QUANTIZE_TEXT_ENCODER]
+DEFAULT_QUANTIZE_MODULES = list(QUANTIZE_CHOICES)
+
+
+def parse_quantize_modules(selected) -> tuple[bool, bool]:
+    if selected is None:
+        return True, True
+    if isinstance(selected, str):
+        selected = [selected]
+    values = {str(item).strip().lower() for item in selected}
+    return QUANTIZE_TRANSFORMER in values, QUANTIZE_TEXT_ENCODER in values
+
 # Official Turbo recipe: 9 scheduler steps → 8 DiT forwards, CFG baked in.
 DEFAULT_STEPS = 9
 DEFAULT_GUIDANCE = 0.0

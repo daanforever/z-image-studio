@@ -10,11 +10,13 @@ from zimage.config import (
     DEFAULT_DTYPE,
     DEFAULT_GUIDANCE,
     DEFAULT_MODEL,
+    DEFAULT_QUANTIZE_MODULES,
     DEFAULT_RESOLUTION,
     DEFAULT_STEPS,
     EXAMPLE_PROMPTS,
     MAX_BATCH,
     PRECISION_CHOICES,
+    QUANTIZE_CHOICES,
     RESOLUTION_PRESETS,
 )
 from zimage.ui.handlers import generate, load_model, request_stop, unload_model
@@ -87,8 +89,14 @@ def build_ui() -> gr.Blocks:
                             choices=PRECISION_CHOICES,
                             value=DEFAULT_DTYPE if DEFAULT_DTYPE in PRECISION_CHOICES else "fp8",
                             label="Precision",
-                            info="fp8 / int8: torchao on the DiT (official checkpoint). fp8 needs Ada 8.9+ / Blackwell and cannot use CPU offload.",
+                            info="fp8 / int8: torchao on the checked modules (official checkpoint). fp8 needs Ada 8.9+ / Blackwell and cannot use CPU offload.",
                         )
+                    quantize_modules = gr.CheckboxGroup(
+                        choices=QUANTIZE_CHOICES,
+                        value=DEFAULT_QUANTIZE_MODULES,
+                        label="quantize",
+                        elem_id="studio-quantize",
+                    )
                     with gr.Row():
                         cpu_offload = gr.Checkbox(value=False, label="CPU offload (saves VRAM)")
                         vae_tiling = gr.Checkbox(value=False, label="VAE tiling")
@@ -135,7 +143,7 @@ def build_ui() -> gr.Blocks:
 
         load_btn.click(
             load_model,
-            inputs=[model_id, device, dtype_name, cpu_offload, vae_tiling],
+            inputs=[model_id, device, dtype_name, cpu_offload, vae_tiling, quantize_modules],
             outputs=status,
         )
         unload_btn.click(unload_model, outputs=status)
@@ -154,11 +162,13 @@ def build_ui() -> gr.Blocks:
                 dtype_name,
                 cpu_offload,
                 vae_tiling,
+                quantize_modules,
                 batch_count,
                 gallery,
             ],
             outputs=[gallery, used_seed, seed, status],
             show_progress="minimal",
+            show_progress_on=status,
         )
         stop_btn.click(request_stop, cancels=[generate_event])
 
@@ -169,8 +179,8 @@ The model works best in English and Chinese; Russian is supported but weaker.
 Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during distillation.
 
 Images are saved to `outputs/`.
-**fp8** / **int8** quantize the official **Z-Image-Turbo** DiT with torchao —
-not Disty0/SDNQ checkpoints.
+**fp8** / **int8** quantize the checked modules of official **Z-Image-Turbo**
+with torchao — not Disty0/SDNQ checkpoints.
             """,
             elem_classes=["studio-footer"],
         )

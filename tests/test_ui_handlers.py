@@ -37,6 +37,7 @@ def _generate(
     dtype_name="float32",
     cpu_offload=False,
     vae_tiling=False,
+    quantize_modules=None,
     batch_count=1,
     gallery=None,
     progress=None,
@@ -55,6 +56,7 @@ def _generate(
             dtype_name,
             cpu_offload,
             vae_tiling,
+            quantize_modules,
             batch_count,
             gallery,
             progress=progress,
@@ -258,6 +260,7 @@ def test_generate_mid_batch_error_keeps_frames(monkeypatch):
         "float32",
         False,
         False,
+        None,
         3,
         None,
         progress=None,
@@ -294,6 +297,34 @@ def test_load_model_success(monkeypatch):
     )
     monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "loaded-ok")
     assert load_model("model", "cpu", "float32", False, False) == "loaded-ok"
+
+
+def test_load_model_passes_quantize_flags(monkeypatch):
+    captured = {}
+
+    def fake_ensure(*_args, **kwargs):
+        captured.update(kwargs)
+        return object(), {"loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.ensure_pipeline", fake_ensure)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+    load_model("model", "cpu", "int8", False, False, ["text encoder"])
+    assert captured["quantize_transformer"] is False
+    assert captured["quantize_text_encoder"] is True
+
+
+def test_generate_passes_quantize_flags(monkeypatch):
+    captured = {}
+
+    def fake_generate_image(*_args, **kwargs):
+        captured.update(kwargs)
+        return Image.new("RGB", (2, 2), "white"), 1, {"loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+    _generate(quantize_modules=["transformer"])
+    assert captured["quantize_transformer"] is True
+    assert captured["quantize_text_encoder"] is False
 
 
 def test_load_model_error(monkeypatch):

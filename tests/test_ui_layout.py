@@ -39,7 +39,7 @@ def test_build_ui_has_navbar(monkeypatch):
     assert "Studio" in str(brand.value)
 
 
-def test_generate_event_show_progress_minimal(monkeypatch):
+def test_generate_event_show_progress_on_status(monkeypatch):
     monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
     demo = build_ui()
     generate_fns = [
@@ -48,7 +48,10 @@ def test_generate_event_show_progress_minimal(monkeypatch):
         if getattr(getattr(fn, "fn", None), "__name__", None) == "generate"
     ]
     assert len(generate_fns) == 1
-    assert generate_fns[0].show_progress == "minimal"
+    generate_fn = generate_fns[0]
+    status = _block_by_elem_id(demo, "status-md")
+    assert generate_fn.show_progress == "minimal"
+    assert generate_fn.show_progress_on == [status]
 
 
 def test_generate_progress_default_disables_track_tqdm():
@@ -75,3 +78,22 @@ def test_examples_follow_status_in_output_column(monkeypatch):
     assert status.parent is examples.parent
     siblings = list(status.parent.children)
     assert siblings.index(status) < siblings.index(examples)
+
+
+def _choice_labels(choices) -> list[str]:
+    labels = []
+    for choice in choices:
+        if isinstance(choice, (list, tuple)):
+            labels.append(str(choice[0]))
+        else:
+            labels.append(str(choice))
+    return labels
+
+
+def test_model_device_quantize_checkboxes(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    quant = _block_by_elem_id(demo, "studio-quantize")
+    assert quant.label == "quantize"
+    assert _choice_labels(quant.choices) == ["transformer", "text encoder"]
+    assert list(quant.value) == ["transformer", "text encoder"]

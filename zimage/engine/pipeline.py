@@ -27,6 +27,7 @@ from zimage.engine.quantization import (
     is_quantized_precision,
     require_fp8_device,
     require_torchao,
+    should_quantize,
 )
 from zimage.engine.runtime import dtype_from_name, resolve_device, runtime_status
 
@@ -83,13 +84,49 @@ def _loaded_status(model_id: str, device: str, dtype_name: str) -> dict[str, Any
     return status
 
 
-def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool, vae_tiling: bool):
+def _pipeline_key(
+    model_id: str,
+    device: str,
+    dtype_name: str,
+    cpu_offload: bool,
+    vae_tiling: bool,
+    quantize_transformer: bool,
+    quantize_text_encoder: bool,
+) -> tuple:
+    dtype_name = canonical_precision(dtype_name)
+    if is_quantized_precision(dtype_name):
+        quantize_transformer = bool(quantize_transformer)
+        quantize_text_encoder = bool(quantize_text_encoder)
+    else:
+        quantize_transformer = False
+        quantize_text_encoder = False
+    return (
+        model_id.strip(),
+        device,
+        dtype_name,
+        cpu_offload,
+        vae_tiling,
+        quantize_transformer,
+        quantize_text_encoder,
+    )
+
+
+def load_pipeline(
+    model_id: str,
+    device: str,
+    dtype_name: str,
+    cpu_offload: bool,
+    vae_tiling: bool,
+    quantize_transformer: bool = True,
+    quantize_text_encoder: bool = True,
+):
     import torch
 
     dtype_name = canonical_precision(dtype_name)
-    if is_quantized_precision(dtype_name):
+    quantize = should_quantize(dtype_name, quantize_transformer, quantize_text_encoder)
+    if quantize:
         require_torchao()
-    if is_fp8_precision(dtype_name):
+    if quantize and is_fp8_precision(dtype_name):
         require_fp8_device(device)
         if cpu_offload:
             raise RuntimeError(
@@ -113,9 +150,14 @@ def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool
     # Prefer quantizing on CPU so peak VRAM is already the reduced footprint.
     quantized = False
     cpu_quant_error: Exception | None = None
-    if is_quantized_precision(dtype_name):
+    if quantize:
         try:
-            apply_quantization(pipe, dtype_name)
+            apply_quantization(
+                pipe,
+                dtype_name,
+                quantize_transformer=quantize_transformer,
+                quantize_text_encoder=quantize_text_encoder,
+            )
             quantized = True
         except Exception as exc:  # noqa: BLE001 — fp8 may need CUDA tensors
             if not (is_fp8_precision(dtype_name) and device == "cuda"):
@@ -127,9 +169,14 @@ def load_pipeline(model_id: str, device: str, dtype_name: str, cpu_offload: bool
     else:
         pipe.to(device)
 
-    if is_quantized_precision(dtype_name) and not quantized:
+    if quantize and not quantized:
         try:
-            apply_quantization(pipe, dtype_name)
+            apply_quantization(
+                pipe,
+                dtype_name,
+                quantize_transformer=quantize_transformer,
+                quantize_text_encoder=quantize_text_encoder,
+            )
         except Exception as exc:  # noqa: BLE001
             if cpu_quant_error is not None:
                 raise RuntimeError(
@@ -149,6 +196,8 @@ def ensure_pipeline(
     dtype_name: str = DEFAULT_DTYPE,
     cpu_offload: bool = False,
     vae_tiling: bool = False,
+    quantize_transformer: bool = True,
+    quantize_text_encoder: bool = True,
 ):
     global _pipe, _pipe_key
 
@@ -157,14 +206,30 @@ def ensure_pipeline(
         return None, runtime_status()
 
     dtype_name = canonical_precision(dtype_name)
-    key = (model_id.strip(), resolved, dtype_name, cpu_offload, vae_tiling)
+    key = _pipeline_key(
+        model_id,
+        resolved,
+        dtype_name,
+        cpu_offload,
+        vae_tiling,
+        quantize_transformer,
+        quantize_text_encoder,
+    )
     with _lock:
         if _pipe is not None and _pipe_key == key:
             return _pipe, _loaded_status(model_id, resolved, dtype_name)
         _pipe = None
         _pipe_key = None
         _reclaim_memory()
-        _pipe = load_pipeline(model_id, resolved, dtype_name, cpu_offload, vae_tiling)
+        _pipe = load_pipeline(
+            model_id,
+            resolved,
+            dtype_name,
+            cpu_offload,
+            vae_tiling,
+            quantize_transformer=quantize_transformer,
+            quantize_text_encoder=quantize_text_encoder,
+        )
         _pipe_key = key
         return _pipe, _loaded_status(model_id, resolved, dtype_name)
 
@@ -192,8 +257,18 @@ def _pipeline_cache_hit(
     dtype_name: str,
     cpu_offload: bool,
     vae_tiling: bool,
+    quantize_transformer: bool,
+    quantize_text_encoder: bool,
 ) -> bool:
-    key = (model_id.strip(), device, canonical_precision(dtype_name), cpu_offload, vae_tiling)
+    key = _pipeline_key(
+        model_id,
+        device,
+        dtype_name,
+        cpu_offload,
+        vae_tiling,
+        quantize_transformer,
+        quantize_text_encoder,
+    )
     return _pipe is not None and _pipe_key == key
 
 
@@ -218,6 +293,8 @@ def generate_image(
     time_shift: float = DEFAULT_SHIFT,
     cpu_offload: bool = False,
     vae_tiling: bool = False,
+    quantize_transformer: bool = True,
+    quantize_text_encoder: bool = True,
     progress=None,
     outputs_dir: Path | None = None,
 ) -> tuple[Image.Image, int, dict[str, Any]]:
@@ -238,11 +315,27 @@ def generate_image(
             progress(1.0, desc="Done")
         return image, seed, status
 
-    needs_load = not _pipeline_cache_hit(model_id, resolved, dtype_name, cpu_offload, vae_tiling)
+    needs_load = not _pipeline_cache_hit(
+        model_id,
+        resolved,
+        dtype_name,
+        cpu_offload,
+        vae_tiling,
+        quantize_transformer,
+        quantize_text_encoder,
+    )
     if progress is not None and needs_load:
         progress(0.0, desc="Loading model…")
 
-    pipe, _status = ensure_pipeline(model_id, resolved, dtype_name, cpu_offload, vae_tiling)
+    pipe, _status = ensure_pipeline(
+        model_id,
+        resolved,
+        dtype_name,
+        cpu_offload,
+        vae_tiling,
+        quantize_transformer=quantize_transformer,
+        quantize_text_encoder=quantize_text_encoder,
+    )
 
     if progress is not None and needs_load:
         progress(0.02, desc="Loading model…")

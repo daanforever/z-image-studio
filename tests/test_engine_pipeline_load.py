@@ -108,7 +108,7 @@ def test_load_pipeline_int8_quantizes_before_device(monkeypatch):
     _install_pipe(monkeypatch, Pipe)
     monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
 
-    def fake_apply(pipe, dtype_name):
+    def fake_apply(pipe, dtype_name, **_kwargs):
         order.append(("quant", dtype_name))
         return "transformer"
 
@@ -137,7 +137,7 @@ def test_load_pipeline_fp8_quantizes_before_device(monkeypatch):
     monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
     monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
 
-    def fake_apply(pipe, dtype_name):
+    def fake_apply(pipe, dtype_name, **_kwargs):
         order.append(("quant", dtype_name))
         return "transformer"
 
@@ -166,7 +166,7 @@ def test_load_pipeline_fp8_retries_after_device(monkeypatch):
     monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
     monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
 
-    def fake_apply(pipe, dtype_name):
+    def fake_apply(pipe, dtype_name, **_kwargs):
         attempts["n"] += 1
         order.append(("quant", attempts["n"]))
         if attempts["n"] == 1:
@@ -185,7 +185,7 @@ def test_load_pipeline_fp8_retry_both_fail(monkeypatch):
     monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
     attempts = {"n": 0}
 
-    def fake_apply(_pipe, _dtype):
+    def fake_apply(_pipe, _dtype, **_kwargs):
         attempts["n"] += 1
         raise RuntimeError(f"fail-{attempts['n']}")
 
@@ -289,3 +289,52 @@ def test_load_pipeline_falls_back_to_diffusion_pipeline(monkeypatch):
 
     pipe = pipeline_mod.load_pipeline("some-model", "cpu", "float32", False, False)
     assert pipe.moved_to == "cpu"
+
+
+def test_load_pipeline_skips_quantization_when_unchecked(monkeypatch):
+    _install_pipe(monkeypatch, _BasePipe)
+    called = {"torchao": 0, "apply": 0}
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.require_torchao",
+        lambda: called.__setitem__("torchao", called["torchao"] + 1),
+    )
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.apply_quantization",
+        lambda *_args, **_kwargs: called.__setitem__("apply", called["apply"] + 1),
+    )
+    pipe = pipeline_mod.load_pipeline(
+        "model",
+        "cuda",
+        "int8",
+        False,
+        False,
+        quantize_transformer=False,
+        quantize_text_encoder=False,
+    )
+    assert called == {"torchao": 0, "apply": 0}
+    assert pipe.moved_to == "cuda"
+
+
+def test_load_pipeline_passes_quantize_flags(monkeypatch):
+    _install_pipe(monkeypatch, _BasePipe)
+    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
+    captured = {}
+
+    def fake_apply(_pipe, dtype_name, **kwargs):
+        captured["dtype"] = dtype_name
+        captured.update(kwargs)
+        return "text_encoder"
+
+    monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
+    pipeline_mod.load_pipeline(
+        "model",
+        "cuda",
+        "int8",
+        False,
+        False,
+        quantize_transformer=False,
+        quantize_text_encoder=True,
+    )
+    assert captured["dtype"] == "int8"
+    assert captured["quantize_transformer"] is False
+    assert captured["quantize_text_encoder"] is True

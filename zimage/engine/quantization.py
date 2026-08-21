@@ -1,4 +1,4 @@
-"""torchao quantization for the DiT transformer (int8 weight-only, fp8)."""
+"""torchao quantization for the DiT and text encoder (int8 weight-only, fp8)."""
 
 from __future__ import annotations
 
@@ -63,14 +63,51 @@ def require_fp8_device(device: str) -> None:
         )
 
 
-def _quantization_target(pipe: Any) -> tuple[str, Any]:
-    for name in ("transformer", "dit", "unet"):
-        module = getattr(pipe, name, None)
-        if module is not None:
-            return name, module
-    raise RuntimeError(
-        "Cannot apply quantization: pipeline has no transformer/DiT module."
+_DIT_MODULE_NAMES = ("transformer", "dit", "unet")
+_TEXT_ENCODER_MODULE_NAMES = ("text_encoder", "text_encoder_2", "text_encoder_3")
+
+
+def should_quantize(
+    dtype_name: str | None,
+    quantize_transformer: bool = True,
+    quantize_text_encoder: bool = True,
+) -> bool:
+    return is_quantized_precision(dtype_name) and bool(
+        quantize_transformer or quantize_text_encoder
     )
+
+
+def _quantization_targets(
+    pipe: Any,
+    *,
+    quantize_transformer: bool = True,
+    quantize_text_encoder: bool = True,
+) -> list[tuple[str, Any]]:
+    targets: list[tuple[str, Any]] = []
+    if quantize_transformer:
+        for name in _DIT_MODULE_NAMES:
+            module = getattr(pipe, name, None)
+            if module is not None:
+                targets.append((name, module))
+                break
+        else:
+            raise RuntimeError(
+                "Cannot apply quantization: pipeline has no transformer/DiT module."
+            )
+    if quantize_text_encoder:
+        found_encoder = False
+        for name in _TEXT_ENCODER_MODULE_NAMES:
+            module = getattr(pipe, name, None)
+            if module is not None:
+                targets.append((name, module))
+                found_encoder = True
+        if not found_encoder and not quantize_transformer:
+            raise RuntimeError(
+                "Cannot apply quantization: pipeline has no text encoder."
+            )
+    if not targets:
+        raise RuntimeError("Cannot apply quantization: no modules selected.")
+    return targets
 
 
 def _int8_weight_only_scheme() -> Any:
@@ -126,10 +163,22 @@ def _scheme_label(scheme: Any) -> str:
     return type(scheme).__name__
 
 
-def apply_quantization(pipe: Any, dtype_name: str) -> str:
-    """Quantize Linear layers of the DiT in-place. Returns the module name."""
+def apply_quantization(
+    pipe: Any,
+    dtype_name: str,
+    quantize_transformer: bool = True,
+    quantize_text_encoder: bool = True,
+) -> str:
+    """Quantize Linear layers of selected modules in-place.
+
+    Returns a comma-separated list of quantized module names.
+    """
     require_torchao()
-    name, module = _quantization_target(pipe)
+    targets = _quantization_targets(
+        pipe,
+        quantize_transformer=quantize_transformer,
+        quantize_text_encoder=quantize_text_encoder,
+    )
     try:
         from torchao.quantization import quantize_
     except ImportError as exc:
@@ -140,16 +189,19 @@ def apply_quantization(pipe: Any, dtype_name: str) -> str:
 
     precision = canonical_precision(dtype_name)
     scheme = _scheme_for(precision)
-    if hasattr(module, "eval"):
-        module.eval()
-    try:
-        quantize_(module, scheme)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"Failed to apply torchao {precision} quantization to `{name}`: {exc}"
-        ) from exc
-    log.info("Applied torchao %s to %s (%s)", precision, name, _scheme_label(scheme))
-    return name
+    applied: list[str] = []
+    for name, module in targets:
+        if hasattr(module, "eval"):
+            module.eval()
+        try:
+            quantize_(module, scheme)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"Failed to apply torchao {precision} quantization to `{name}`: {exc}"
+            ) from exc
+        log.info("Applied torchao %s to %s (%s)", precision, name, _scheme_label(scheme))
+        applied.append(name)
+    return ", ".join(applied)
 
 
 def apply_int8_quantization(pipe: Any) -> str:

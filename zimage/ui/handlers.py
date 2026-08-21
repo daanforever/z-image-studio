@@ -8,7 +8,7 @@ from collections.abc import Generator
 
 import gradio as gr
 
-from zimage.config import DEFAULT_BATCH, DEFAULT_MODEL, MAX_BATCH, parse_resolution
+from zimage.config import DEFAULT_BATCH, DEFAULT_MODEL, MAX_BATCH, parse_quantize_modules, parse_resolution
 from zimage.engine import ensure_pipeline, generate_image, runtime_status, unload_pipeline
 from zimage.ui.log import log_error
 from zimage.ui.status import format_status
@@ -68,9 +68,25 @@ def _image_progress(progress, index: int, count: int):
     return report
 
 
-def load_model(model_id: str, device: str, dtype_name: str, cpu_offload: bool, vae_tiling: bool):
+def load_model(
+    model_id: str,
+    device: str,
+    dtype_name: str,
+    cpu_offload: bool,
+    vae_tiling: bool,
+    quantize_modules=None,
+):
+    quantize_transformer, quantize_text_encoder = parse_quantize_modules(quantize_modules)
     try:
-        _, status = ensure_pipeline(model_id, device, dtype_name, cpu_offload, vae_tiling)
+        _, status = ensure_pipeline(
+            model_id,
+            device,
+            dtype_name,
+            cpu_offload,
+            vae_tiling,
+            quantize_transformer=quantize_transformer,
+            quantize_text_encoder=quantize_text_encoder,
+        )
         return format_status(status)
     except Exception as exc:  # noqa: BLE001
         log_error(str(exc))
@@ -97,6 +113,7 @@ def generate(
     dtype_name: str,
     cpu_offload: bool,
     vae_tiling: bool,
+    quantize_modules=None,
     batch_count=DEFAULT_BATCH,
     gallery: list | None = None,
     progress=gr.Progress(),
@@ -107,6 +124,7 @@ def generate(
         raise gr.Error("Enter a prompt.")
 
     count = _parse_batch_count(batch_count)
+    quantize_transformer, quantize_text_encoder = parse_quantize_modules(quantize_modules)
     _stop_event.clear()
 
     base_seed = random.randint(1, 2_147_483_647) if random_seed else int(seed)
@@ -140,6 +158,8 @@ def generate(
                 time_shift=float(time_shift),
                 cpu_offload=cpu_offload,
                 vae_tiling=vae_tiling,
+                quantize_transformer=quantize_transformer,
+                quantize_text_encoder=quantize_text_encoder,
                 progress=image_progress,
             )
         except Exception as exc:  # noqa: BLE001

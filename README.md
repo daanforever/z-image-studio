@@ -10,7 +10,7 @@ Official Turbo recipe from the model card: **9 steps** (8 DiT forwards) and **`g
 - Stop in the navbar cancels the rest of the batch without discarding images already generated
 - Model path: Hugging Face ID **or** a local snapshot
 - Auto-selects `cuda` / `cpu`, VRAM status
-- Precision: **fp8** by default; also `bfloat16` / `float16` / `float32` / `int8` (torchao on the DiT)
+- Precision: **fp8** by default; also `bfloat16` / `float16` / `float32` / `int8` (torchao on checked modules)
 - CPU offload and VAE tiling for low VRAM
 - Saves PNGs to `outputs/`
 - Demo mode with no weights and no GPU (to inspect the UI)

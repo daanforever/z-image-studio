@@ -6,11 +6,14 @@ from pathlib import Path
 from zimage.config import (
     DEFAULT_DTYPE,
     DEFAULT_HEIGHT,
+    DEFAULT_QUANTIZE_MODULES,
     DEFAULT_WIDTH,
     PRECISION_CHOICES,
+    QUANTIZE_CHOICES,
     canonical_precision,
     is_truthy,
     load_dotenv,
+    parse_quantize_modules,
     parse_resolution,
 )
 
@@ -18,6 +21,17 @@ from zimage.config import (
 def test_precision_choices_include_quantized():
     assert PRECISION_CHOICES == ["fp8", "bfloat16", "float16", "float32", "int8"]
     assert DEFAULT_DTYPE == "fp8"
+
+
+def test_parse_quantize_modules():
+    assert QUANTIZE_CHOICES == ["transformer", "text encoder"]
+    assert DEFAULT_QUANTIZE_MODULES == ["transformer", "text encoder"]
+    assert parse_quantize_modules(None) == (True, True)
+    assert parse_quantize_modules(["transformer", "text encoder"]) == (True, True)
+    assert parse_quantize_modules(["transformer"]) == (True, False)
+    assert parse_quantize_modules(["text encoder"]) == (False, True)
+    assert parse_quantize_modules([]) == (False, False)
+    assert parse_quantize_modules("transformer") == (True, False)
 
 
 def test_canonical_precision_aliases():

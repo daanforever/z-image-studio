@@ -186,6 +186,24 @@ def save_image(image: Image.Image, seed: int, outputs_dir: Path | None = None) -
     return path
 
 
+def _pipeline_cache_hit(
+    model_id: str,
+    device: str,
+    dtype_name: str,
+    cpu_offload: bool,
+    vae_tiling: bool,
+) -> bool:
+    key = (model_id.strip(), device, canonical_precision(dtype_name), cpu_offload, vae_tiling)
+    return _pipe is not None and _pipe_key == key
+
+
+def _invoke_pipe(pipe, kwargs: dict[str, Any]):
+    try:
+        return pipe(**kwargs, max_sequence_length=DEFAULT_MAX_SEQ)
+    except TypeError:
+        return pipe(**kwargs)
+
+
 def generate_image(
     prompt: str,
     *,
@@ -207,17 +225,30 @@ def generate_image(
     resolved = resolve_device(device)
 
     if resolved == "demo" or status["demo"]:
+        if progress is not None:
+            progress(0.5, desc="Demo…")
         image = demo_image(prompt, width, height, seed, status.get("demo_reason", ""))
+        if progress is not None:
+            progress(0.98, desc="Saving…")
         path = save_image(image, seed, outputs_dir=outputs_dir)
         status["saved"] = str(path)
         status["loaded"] = False
         status["demo"] = True
+        if progress is not None:
+            progress(1.0, desc="Done")
         return image, seed, status
 
-    if progress is not None:
-        progress(0.05, desc="Loading model…")
+    needs_load = not _pipeline_cache_hit(model_id, resolved, dtype_name, cpu_offload, vae_tiling)
+    if progress is not None and needs_load:
+        progress(0.0, desc="Loading model…")
 
     pipe, _status = ensure_pipeline(model_id, resolved, dtype_name, cpu_offload, vae_tiling)
+
+    if progress is not None and needs_load:
+        progress(0.02, desc="Loading model…")
+
+    if hasattr(pipe, "set_progress_bar_config"):
+        pipe.set_progress_bar_config(disable=True)
 
     import torch
     from diffusers import FlowMatchEulerDiscreteScheduler
@@ -231,8 +262,16 @@ def generate_image(
     gen_device = "cuda" if resolved == "cuda" else "cpu"
     generator = torch.Generator(device=gen_device).manual_seed(int(seed))
 
+    total_steps = max(int(steps), 1)
+
+    def on_step_end(_pipe, step_index, _timestep, callback_kwargs):
+        if progress is not None:
+            frac = min(0.05 + 0.90 * ((step_index + 1) / total_steps), 0.95)
+            progress(frac, desc=f"Generating… {step_index + 1}/{total_steps}")
+        return callback_kwargs
+
     if progress is not None:
-        progress(0.2, desc="Generating…")
+        progress(0.05, desc="Generating…")
 
     kwargs: dict[str, Any] = {
         "prompt": prompt,
@@ -244,11 +283,14 @@ def generate_image(
     }
     # Turbo ignores CFG; keep the arg for API compatibility.
     try:
-        result = pipe(**kwargs, max_sequence_length=DEFAULT_MAX_SEQ)
+        result = _invoke_pipe(pipe, {**kwargs, "callback_on_step_end": on_step_end})
     except TypeError:
-        result = pipe(**kwargs)
+        # Pipeline rejected callback_on_step_end; keep a coarse "Generating…" until return.
+        result = _invoke_pipe(pipe, kwargs)
 
     image = result.images[0]
+    if progress is not None:
+        progress(0.98, desc="Saving…")
     path = save_image(image, seed, outputs_dir=outputs_dir)
     status = _loaded_status(model_id, resolved, dtype_name)
     status["saved"] = str(path)

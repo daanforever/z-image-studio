@@ -153,6 +153,7 @@ def build_ui() -> gr.Blocks:
                 gallery,
             ],
             outputs=[gallery, used_seed, seed, status],
+            show_progress="minimal",
         )
         stop_btn.click(request_stop, cancels=[generate_event])
 

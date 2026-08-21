@@ -6,7 +6,13 @@ import gradio as gr
 import pytest
 
 from zimage.config import DEFAULT_MODEL
-from zimage.ui.handlers import generate, load_model, request_stop, unload_model
+from zimage.ui.handlers import (
+    _image_progress,
+    generate,
+    load_model,
+    request_stop,
+    unload_model,
+)
 import zimage.ui.handlers as handlers
 
 
@@ -320,3 +326,119 @@ def test_unload_model(monkeypatch):
     text = unload_model()
     assert called["n"] == 1
     assert "unloaded" in text.lower()
+
+
+def test_image_progress_maps_fraction_into_batch():
+    recorded = []
+
+    def progress(value, desc=""):
+        recorded.append((value, desc))
+
+    report = _image_progress(progress, index=1, count=4)
+    report(0.5, desc="Generating…")
+    assert recorded == [(0.375, "Image 2 / 4 — Generating…")]
+
+
+def test_image_progress_none_returns_none():
+    assert _image_progress(None, 0, 1) is None
+
+
+def test_generate_batch1_progress_monotone_ends_at_one(monkeypatch):
+    recorded = []
+
+    def fake_generate_image(*_args, **kwargs):
+        progress = kwargs["progress"]
+        assert progress is not None
+        progress(0.5, desc="mid")
+        progress(1.0, desc="Done")
+        return Image.new("RGB", (2, 2), "white"), 1, {"loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+
+    def progress(value, desc=""):
+        recorded.append(value)
+
+    _generate(seed=1, batch_count=1, progress=progress)
+    assert recorded == [0.5, 1.0]
+    assert all(recorded[i] <= recorded[i + 1] for i in range(len(recorded) - 1))
+
+
+def test_generate_batch3_progress_no_early_one(monkeypatch):
+    recorded = []
+
+    def fake_generate_image(*_args, **kwargs):
+        progress = kwargs["progress"]
+        progress(0.5, desc="mid")
+        progress(1.0, desc="Done")
+        return Image.new("RGB", (2, 2), "white"), kwargs["seed"], {"loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+
+    def progress(value, desc=""):
+        recorded.append((value, desc))
+
+    _generate(seed=10, batch_count=3, progress=progress)
+
+    values = [v for v, _ in recorded]
+    # Per image: 0.5 and 1.0 mapped into thirds, plus mid-batch re-set after yields.
+    assert (1 / 6) in values
+    assert (1 / 3) in values
+    assert 0.5 in values
+    assert (2 / 3) in values
+    assert (5 / 6) in values
+    assert 1.0 in values
+    # 1.0 only after the last image finishes (may appear once at the end).
+    assert values.count(1.0) == 1
+    assert values[-1] == 1.0
+    assert all(v < 1.0 for v in values[:-1])
+
+
+def test_generate_stop_progress_stays_below_one(monkeypatch):
+    recorded = []
+    call_n = {"n": 0}
+
+    def fake_generate_image(*_args, **kwargs):
+        call_n["n"] += 1
+        progress = kwargs["progress"]
+        progress(1.0, desc="Done")
+        if call_n["n"] == 2:
+            request_stop()
+        return Image.new("RGB", (2, 2), "white"), kwargs["seed"], {"loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr(
+        "zimage.ui.handlers.format_status",
+        lambda status, extra="": extra or "ok",
+    )
+    handlers._stop_event.clear()
+
+    def progress(value, desc=""):
+        recorded.append(value)
+
+    _generate(seed=7, batch_count=5, progress=progress)
+    assert call_n["n"] == 2
+    assert recorded
+    assert recorded[-1] < 1.0
+    assert 1.0 not in recorded
+
+
+def test_generate_passes_progress_wrapper(monkeypatch):
+    captured = {}
+
+    def fake_generate_image(*_args, **kwargs):
+        captured["progress"] = kwargs.get("progress")
+        if kwargs["progress"] is not None:
+            kwargs["progress"](1.0, desc="Done")
+        return Image.new("RGB", (2, 2), "white"), 1, {}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+
+    def progress(value, desc=""):
+        pass
+
+    _generate(progress=progress)
+    assert captured["progress"] is not None
+    assert captured["progress"] is not progress

@@ -52,6 +52,22 @@ def _offline_hint(message: str) -> str:
     return message
 
 
+def _image_progress(progress, index: int, count: int):
+    """Map a per-image 0..1 fraction onto the overall batch progress bar."""
+    if progress is None:
+        return None
+
+    def report(fraction, desc="") -> None:
+        clamped = max(0.0, min(1.0, float(fraction)))
+        overall = (index + clamped) / count
+        label = f"Image {index + 1} / {count}"
+        if desc:
+            label = f"{label} — {desc}"
+        progress(overall, desc=label)
+
+    return report
+
+
 def load_model(model_id: str, device: str, dtype_name: str, cpu_offload: bool, vae_tiling: bool):
     try:
         _, status = ensure_pipeline(model_id, device, dtype_name, cpu_offload, vae_tiling)
@@ -83,7 +99,7 @@ def generate(
     vae_tiling: bool,
     batch_count=DEFAULT_BATCH,
     gallery: list | None = None,
-    progress=gr.Progress(track_tqdm=True),
+    progress=gr.Progress(),
 ) -> Generator[tuple, None, None]:
     prompt = (prompt or "").strip()
     if not prompt:
@@ -108,8 +124,7 @@ def generate(
             break
 
         current_seed = base_seed + i
-        if progress is not None:
-            progress((i / count), desc=f"Image {i + 1} / {count}")
+        image_progress = _image_progress(progress, i, count)
 
         try:
             image, used_seed, status = generate_image(
@@ -125,7 +140,7 @@ def generate(
                 time_shift=float(time_shift),
                 cpu_offload=cpu_offload,
                 vae_tiling=vae_tiling,
-                progress=progress,
+                progress=image_progress,
             )
         except Exception as exc:  # noqa: BLE001
             message = _offline_hint(str(exc))
@@ -151,8 +166,9 @@ def generate(
             format_status(status),
         )
 
-    if progress is not None and not stopped:
-        progress(1.0, desc="Done")
+        # Keep the bar visible between streamed gallery updates mid-batch.
+        if progress is not None and i + 1 < count and not _stop_event.is_set():
+            progress((i + 1) / count, desc=f"Image {i + 2} / {count}")
 
     if stopped:
         extra = f"Stopped after {produced} of {count}."

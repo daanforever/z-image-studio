@@ -10,7 +10,13 @@ import gradio as gr
 
 from zimage.config import DEFAULT_BATCH, DEFAULT_MODEL, MAX_BATCH, parse_quantize_modules, parse_resolution
 from zimage.engine import ensure_pipeline, generate_image, runtime_status, unload_pipeline
-from zimage.engine.lora import DEFAULT_STRENGTH, list_lora_files, parse_lora_specs, weights_map
+from zimage.engine.lora import (
+    DEFAULT_STRENGTH,
+    list_lora_files,
+    normalize_lora_dir,
+    parse_lora_specs,
+    weights_map,
+)
 from zimage.ui.log import log_error
 from zimage.ui.status import format_status
 
@@ -79,9 +85,14 @@ def _as_name_list(names) -> list[str]:
 
 
 def refresh_loras(directory, selected=None, current_df=None):
-    files = list_lora_files(directory)
+    normalized = normalize_lora_dir(directory)
+    files = list_lora_files(normalized)
     kept = [name for name in _as_name_list(selected) if name in files]
-    return gr.Dropdown(choices=files, value=kept, multiselect=True), sync_lora_weights(kept, current_df)
+    return (
+        normalized,
+        gr.Dropdown(choices=files, value=kept, multiselect=True),
+        sync_lora_weights(kept, current_df),
+    )
 
 
 def sync_lora_weights(selected, current_df=None):

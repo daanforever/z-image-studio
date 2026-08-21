@@ -4,6 +4,7 @@ import inspect
 import warnings
 
 from zimage.config import DEFAULT_LORA_DIR
+from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import generate
 from zimage.ui.layout import build_ui
 
@@ -133,7 +134,7 @@ def test_lora_accordion_after_model_device(monkeypatch):
     assert siblings.index(model) < siblings.index(lora)
 
     directory = _block_by_elem_id(demo, "studio-lora-dir")
-    assert directory.value == DEFAULT_LORA_DIR
+    assert directory.value == normalize_lora_dir(DEFAULT_LORA_DIR)
 
     adapters = _block_by_elem_id(demo, "studio-lora-adapters")
     assert adapters.multiselect is True
@@ -160,5 +161,10 @@ def test_lora_events_wired(monkeypatch):
     refresh_fns = _fns_named(demo, "refresh_loras")
     assert len(refresh_fns) == 3
     assert {fn.fn.__name__ for fn in refresh_fns} == {"refresh_loras"}
+    for fn in refresh_fns:
+        output_ids = [getattr(block, "elem_id", None) for block in fn.outputs]
+        assert "studio-lora-dir" in output_ids
+        assert "studio-lora-adapters" in output_ids
+        assert "studio-lora-weights" in output_ids
     weight_fns = _fns_named(demo, "sync_lora_weights")
     assert len(weight_fns) == 1

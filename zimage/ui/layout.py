@@ -20,6 +20,7 @@ from zimage.config import (
     QUANTIZE_CHOICES,
     RESOLUTION_PRESETS,
 )
+from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import generate, load_model, refresh_loras, request_stop, sync_lora_weights, unload_model
 from zimage.ui.status import format_status
 
@@ -107,9 +108,13 @@ def build_ui() -> gr.Blocks:
 
                 with gr.Accordion("LoRA", open=True, elem_id="studio-lora"):
                     lora_dir = gr.Textbox(
-                        value=DEFAULT_LORA_DIR,
+                        value=normalize_lora_dir(DEFAULT_LORA_DIR),
                         label="Directory",
-                        info="Local folder of .safetensors / .pt adapters. Leave empty for the base model.",
+                        info=(
+                            "Local folder of .safetensors / .pt adapters "
+                            "(a pasted file path uses its parent folder). "
+                            "Leave empty for the base model."
+                        ),
                         elem_id="studio-lora-dir",
                     )
                     lora_refresh = gr.Button("Refresh", elem_id="studio-lora-refresh")
@@ -177,17 +182,17 @@ def build_ui() -> gr.Blocks:
         lora_refresh.click(
             refresh_loras,
             inputs=[lora_dir, lora_adapters, lora_weights],
-            outputs=[lora_adapters, lora_weights],
+            outputs=[lora_dir, lora_adapters, lora_weights],
         )
         lora_dir.submit(
             refresh_loras,
             inputs=[lora_dir, lora_adapters, lora_weights],
-            outputs=[lora_adapters, lora_weights],
+            outputs=[lora_dir, lora_adapters, lora_weights],
         )
         lora_dir.blur(
             refresh_loras,
             inputs=[lora_dir, lora_adapters, lora_weights],
-            outputs=[lora_adapters, lora_weights],
+            outputs=[lora_dir, lora_adapters, lora_weights],
         )
         lora_adapters.change(
             sync_lora_weights,

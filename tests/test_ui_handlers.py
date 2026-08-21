@@ -489,11 +489,12 @@ def test_generate_passes_progress_wrapper(monkeypatch):
 def test_refresh_loras_keeps_existing_files(tmp_path: Path):
     (tmp_path / "alpha.safetensors").write_bytes(b"")
     (tmp_path / "beta.safetensors").write_bytes(b"")
-    dropdown, weights = refresh_loras(
+    normalized, dropdown, weights = refresh_loras(
         str(tmp_path),
         ["alpha.safetensors", "gone.safetensors"],
         [["alpha.safetensors", 0.8], ["gone.safetensors", 0.5]],
     )
+    assert normalized == Path(tmp_path).as_posix()
     labels = []
     for choice in dropdown.choices:
         if isinstance(choice, (list, tuple)):
@@ -503,6 +504,52 @@ def test_refresh_loras_keeps_existing_files(tmp_path: Path):
     assert labels == ["alpha.safetensors", "beta.safetensors"]
     assert dropdown.value == ["alpha.safetensors"]
     assert weights == [["alpha.safetensors", 0.8]]
+
+
+def test_refresh_loras_normalizes_windows_file_path(tmp_path: Path):
+    (tmp_path / "alpha.safetensors").write_bytes(b"")
+    windows_like = str(tmp_path / "alpha.safetensors").replace("/", "\\")
+    normalized, dropdown, weights = refresh_loras(windows_like, None, None)
+    assert normalized == Path(tmp_path).as_posix()
+    labels = []
+    for choice in dropdown.choices:
+        if isinstance(choice, (list, tuple)):
+            labels.append(str(choice[0]))
+        else:
+            labels.append(str(choice))
+    assert labels == ["alpha.safetensors"]
+    assert weights == []
+
+
+def test_refresh_loras_normalizes_windows_dir_path(tmp_path: Path):
+    (tmp_path / "alpha.safetensors").write_bytes(b"")
+    windows_like = str(tmp_path).replace("/", "\\")
+    normalized, dropdown, weights = refresh_loras(windows_like, ["alpha.safetensors"], None)
+    assert normalized == Path(tmp_path).as_posix()
+    labels = []
+    for choice in dropdown.choices:
+        if isinstance(choice, (list, tuple)):
+            labels.append(str(choice[0]))
+        else:
+            labels.append(str(choice))
+    assert labels == ["alpha.safetensors"]
+    assert dropdown.value == ["alpha.safetensors"]
+    assert weights == [["alpha.safetensors", 1.0]]
+
+
+def test_refresh_loras_normalizes_windows_dir_path_trailing_slash(tmp_path: Path):
+    (tmp_path / "alpha.safetensors").write_bytes(b"")
+    windows_like = str(tmp_path).replace("/", "\\") + "\\"
+    normalized, dropdown, weights = refresh_loras(windows_like, None, None)
+    assert normalized == Path(tmp_path).as_posix()
+    labels = []
+    for choice in dropdown.choices:
+        if isinstance(choice, (list, tuple)):
+            labels.append(str(choice[0]))
+        else:
+            labels.append(str(choice))
+    assert labels == ["alpha.safetensors"]
+    assert weights == []
 
 
 def test_sync_lora_weights_preserves_and_defaults():
@@ -550,7 +597,8 @@ def test_generate_lora_error_is_gr_error(monkeypatch, tmp_path: Path):
 
 
 def test_refresh_loras_from_fixture(tiny_lora_dir: Path):
-    dropdown, weights = refresh_loras(str(tiny_lora_dir), None, None)
+    normalized, dropdown, weights = refresh_loras(str(tiny_lora_dir), None, None)
+    assert normalized == Path(tiny_lora_dir).as_posix()
     labels = []
     for choice in dropdown.choices:
         if isinstance(choice, (list, tuple)):

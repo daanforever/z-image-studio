@@ -30,10 +30,27 @@ def reset_lora_adapters() -> None:
     _applied_pipe_id = None
 
 
+def normalize_lora_dir(directory: str | None) -> str:
+    """Strip quotes, convert backslashes to `/`, and use parent if a LoRA file was pasted."""
+    if directory is None:
+        return ""
+    text = str(directory).strip().strip('"').strip("'").strip()
+    if not text:
+        return ""
+    text = text.replace("\\", "/")
+    path = Path(text)
+    if path.suffix.lower() in LORA_SUFFIXES or path.is_file():
+        path = path.parent
+    if not str(path).strip() or str(path) == ".":
+        return ""
+    return path.as_posix()
+
+
 def list_lora_files(directory: str | None) -> list[str]:
-    if directory is None or not str(directory).strip():
+    normalized = normalize_lora_dir(directory)
+    if not normalized:
         return []
-    path = Path(str(directory).strip())
+    path = Path(normalized)
     if not path.is_dir():
         return []
     names = [
@@ -45,12 +62,13 @@ def list_lora_files(directory: str | None) -> list[str]:
 
 
 def parse_lora_specs(directory, names, weights=None) -> tuple[LoraSpec, ...]:
-    available = set(list_lora_files(directory))
+    normalized = normalize_lora_dir(directory)
+    available = set(list_lora_files(normalized))
     selected = _as_name_list(names)
     weight_map = weights_map(weights)
-    if not directory or not str(directory).strip():
+    if not normalized:
         return ()
-    root = Path(str(directory).strip())
+    root = Path(normalized)
     used_names: set[str] = set()
     specs: list[LoraSpec] = []
     for name in selected:

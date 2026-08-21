@@ -8,6 +8,7 @@ from safetensors import safe_open
 from zimage.engine.lora import (
     LoraSpec,
     list_lora_files,
+    normalize_lora_dir,
     parse_lora_specs,
     reset_lora_adapters,
     sync_lora_adapters,
@@ -60,6 +61,59 @@ def test_list_lora_files_empty_and_missing(tmp_path: Path):
     assert list_lora_files(str(tmp_path / "missing")) == []
     assert list_lora_files(str(tmp_path)) == []
 
+
+def test_normalize_lora_dir_slashes_and_quotes():
+    assert normalize_lora_dir(None) == ""
+    assert normalize_lora_dir("   ") == ""
+    assert normalize_lora_dir(r"D:\loras\style") == "D:/loras/style"
+    assert normalize_lora_dir(r'"D:\loras\style"') == "D:/loras/style"
+    assert normalize_lora_dir(r"'D:\loras\style'") == "D:/loras/style"
+    assert normalize_lora_dir(r"D:\\loras\\style") == "D:/loras/style"
+    assert normalize_lora_dir("D:/loras/style") == "D:/loras/style"
+    assert normalize_lora_dir("D:\\loras\\style\\") == "D:/loras/style"
+    assert normalize_lora_dir("D:/loras/style/") == "D:/loras/style"
+
+
+def test_normalize_lora_dir_file_uses_parent():
+    assert (
+        normalize_lora_dir(r"d:\Projects\DeepSeek\c\output\b\a.safetensors")
+        == "d:/Projects/DeepSeek/c/output/b"
+    )
+    assert normalize_lora_dir("D:/loras/style.pt") == "D:/loras"
+    assert normalize_lora_dir(r'"E:\adapters\char.safetensors"') == "E:/adapters"
+
+
+def test_list_and_parse_accept_windows_file_path(tmp_path: Path):
+    _touch_loras(tmp_path, "a.safetensors", "b.pt")
+    file_path = tmp_path / "a.safetensors"
+    # Force backslash form regardless of OS Path str()
+    windows_like = str(file_path).replace("/", "\\")
+    assert list_lora_files(windows_like) == ["a.safetensors", "b.pt"]
+    specs = parse_lora_specs(windows_like, ["a.safetensors"], [["a.safetensors", 0.7]])
+    assert len(specs) == 1
+    assert specs[0].path == tmp_path / "a.safetensors"
+    assert specs[0].scale == 0.7
+
+
+def test_list_and_parse_accept_windows_dir_path(tmp_path: Path):
+    _touch_loras(tmp_path, "a.safetensors", "b.pt")
+    windows_like = str(tmp_path).replace("/", "\\")
+    assert list_lora_files(windows_like) == ["a.safetensors", "b.pt"]
+    specs = parse_lora_specs(windows_like, ["b.pt"], [["b.pt", 0.5]])
+    assert len(specs) == 1
+    assert specs[0].path == tmp_path / "b.pt"
+    assert specs[0].scale == 0.5
+    assert normalize_lora_dir(windows_like) == Path(tmp_path).as_posix()
+
+
+def test_list_and_parse_accept_windows_dir_path_trailing_slash(tmp_path: Path):
+    _touch_loras(tmp_path, "a.safetensors", "b.pt")
+    windows_like = str(tmp_path).replace("/", "\\") + "\\"
+    assert normalize_lora_dir(windows_like) == Path(tmp_path).as_posix()
+    assert list_lora_files(windows_like) == ["a.safetensors", "b.pt"]
+    specs = parse_lora_specs(windows_like, ["a.safetensors"], None)
+    assert len(specs) == 1
+    assert specs[0].path == tmp_path / "a.safetensors"
 
 def test_list_lora_files_filters_and_sorts(tmp_path: Path):
     _touch_loras(tmp_path, "zeta.safetensors", "alpha.pt", "notes.txt")

@@ -11,7 +11,7 @@ Official Turbo recipe from the model card: **9 steps** (8 DiT forwards) and **`g
 - Model path: Hugging Face ID **or** a local snapshot
 - Auto-selects `cuda` / `cpu`, VRAM status
 - Precision: **fp8** by default; also `bfloat16` / `float16` / `float32` / `int8` (torchao on checked modules)
-- LoRA: local directory (`ZIMAGE_LORA_DIR`), multi-select `.safetensors` / `.pt`, per-adapter strength
+- LoRA: local directory (`ZIMAGE_LORA_DIR`), multi-select `.safetensors` / `.pt`, per-adapter strength (fused into base weights before quantization so VRAM stays near the base model; changing adapters/strength reloads)
 - CPU offload and VAE tiling for low VRAM
 - Saves PNGs to `outputs/`
 - Demo mode with no weights and no GPU (to inspect the UI)
@@ -108,6 +108,8 @@ This app is tuned for Turbo. You can point the model field at full Z-Image, but 
 ## VRAM
 
 By default Turbo loads in **fp8** (Ada 8.9+ / Blackwell, including RTX 5080; incompatible with CPU offload). **bfloat16** is the full-precision path if you do not need fp8. **int8** if you need CPU offload. Plus **VAE tiling**. These are not Disty0/SDNQ checkpoints: the same `Tongyi-MAI/Z-Image-Turbo` is quantized in-process.
+
+**LoRA:** adapters are fused into the base weights on CPU, then the pipeline is quantized as usual. Steady-state VRAM with LoRA should match the same precision without LoRA (aside from activation memory during a step). Changing the selected adapters or strength requires a full model reload.
 
 ## Tests
 

@@ -113,7 +113,10 @@ def build_ui() -> gr.Blocks:
                         info=(
                             "Local folder of .safetensors / .pt adapters "
                             "(a pasted file path uses its parent folder). "
-                            "Leave empty for the base model."
+                            "Leave empty for the base model. "
+                            "Adapters are fused into the base weights before "
+                            "quantization (VRAM ≈ base model); changing adapters "
+                            "or strength reloads the model."
                         ),
                         elem_id="studio-lora-dir",
                     )

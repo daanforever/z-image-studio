@@ -340,16 +340,50 @@ def test_load_pipeline_passes_quantize_flags(monkeypatch):
     assert captured["quantize_text_encoder"] is True
 
 
-def test_load_pipeline_skips_quantization_for_lora(monkeypatch):
-    _install_pipe(monkeypatch, _BasePipe)
+def test_load_pipeline_fuses_lora_before_quantization(monkeypatch, tmp_path):
+    from zimage.engine.lora import LoraSpec, reset_lora_adapters
+
+    reset_lora_adapters()
+    order: list[str] = []
+
+    class FusePipe(_BasePipe):
+        def load_lora_weights(self, state_dict, weight_name=None, adapter_name=None):
+            order.append(f"load:{adapter_name}")
+
+        def set_adapters(self, names, adapter_weights=None):
+            order.append(f"set:{names}:{adapter_weights}")
+
+        def fuse_lora(self, adapter_names=None, lora_scale=None):
+            order.append(f"fuse:{adapter_names}:{lora_scale}")
+
+        def unload_lora_weights(self):
+            order.append("unload")
+
+    _install_pipe(monkeypatch, FusePipe)
     called = {"torchao": 0, "apply": 0}
+
+    def fake_apply(*_args, **_kwargs):
+        order.append("quantize")
+        called["apply"] += 1
+
     monkeypatch.setattr(
         "zimage.engine.pipeline.require_torchao",
         lambda: called.__setitem__("torchao", called["torchao"] + 1),
     )
+    monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
+    monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
     monkeypatch.setattr(
-        "zimage.engine.pipeline.apply_quantization",
-        lambda *_args, **_kwargs: called.__setitem__("apply", called["apply"] + 1),
+        "zimage.engine.lora._load_lora_state_dict",
+        lambda _path: {"diffusion_model.layers.0.attention.to_q.lora_A.weight": None},
+    )
+
+    path = tmp_path / "style.safetensors"
+    path.write_bytes(b"")
+    spec = LoraSpec(
+        path=path,
+        filename="style.safetensors",
+        adapter_name="style",
+        scale=0.8,
     )
     pipe = pipeline_mod.load_pipeline(
         "model",
@@ -359,7 +393,16 @@ def test_load_pipeline_skips_quantization_for_lora(monkeypatch):
         False,
         quantize_transformer=True,
         quantize_text_encoder=True,
-        skip_quantize_for_lora=True,
+        loras=(spec,),
     )
-    assert called == {"torchao": 0, "apply": 0}
+    assert called == {"torchao": 1, "apply": 1}
+    assert order[:4] == [
+        "load:style",
+        "set:['style']:[0.8]",
+        "fuse:['style']:0.8",
+        "unload",
+    ]
+    assert "quantize" in order
+    assert order.index("quantize") > order.index("unload")
     assert pipe.moved_to == "cuda"
+    reset_lora_adapters()

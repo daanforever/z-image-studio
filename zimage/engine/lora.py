@@ -16,8 +16,11 @@ MAX_STRENGTH = 2.0
 _INNER_DIT_SEGMENT = "._inner_dit."
 _INNER_DIT_PREFIX = "_inner_dit."
 _INNER_DIT_DOTTED = "inner.dit."
+# Kohya encodes dots as underscores, so training wrappers become *_inner_dit_* / *inner_dit_*.
+_INNER_DIT_UNDERSCORE = re.compile(r"_?_inner_dit_|inner_dit_")
 _DIFFUSION_PREFIX = "diffusion_model."
 _TRANSFORMER_PREFIX = "transformer."
+_LORA_UNET_PREFIX = "lora_unet_"
 
 _applied_key: tuple | None = None
 _applied_pipe_id: int | None = None
@@ -134,17 +137,27 @@ def rewrite_lora_inner_dit_keys(state_dict: dict) -> dict:
     return rewritten
 
 
+def lora_identity_key(specs: tuple[LoraSpec, ...] | list[LoraSpec] | None) -> tuple:
+    """Stable cache identity: path, adapter name, and strength per LoRA."""
+    return tuple((str(spec.path), spec.adapter_name, spec.scale) for spec in specs or ())
+
+
 def sync_lora_adapters(pipe, specs: tuple[LoraSpec, ...] | list[LoraSpec] | None) -> None:
+    """Load each LoRA, fuse it into base weights, then unload adapter matrices.
+
+    Fusing before quantization keeps VRAM at the base-model footprint. Once fused,
+    changing adapters or strength requires a fresh pipeline load (no unfuse).
+    """
     global _applied_key, _applied_pipe_id
 
     specs = tuple(specs or ())
-    key = tuple((str(spec.path), spec.adapter_name, spec.scale) for spec in specs)
+    key = lora_identity_key(specs)
     pipe_id = id(pipe)
     if _applied_key == key and _applied_pipe_id == pipe_id:
         return
 
     if not specs:
-        _unload_loras(pipe)
+        # Fresh pipe: no PEFT adapters to remove. Rollback to base is a new load.
         _applied_key = key
         _applied_pipe_id = pipe_id
         return
@@ -152,22 +165,59 @@ def sync_lora_adapters(pipe, specs: tuple[LoraSpec, ...] | list[LoraSpec] | None
     if not hasattr(pipe, "load_lora_weights"):
         raise RuntimeError("Pipeline does not support LoRA adapters.")
 
-    _unload_loras(pipe)
     try:
-        names: list[str] = []
-        scales: list[float] = []
+        # One adapter at a time so peak memory never holds several A/B sets.
         for spec in specs:
             state_dict = rewrite_lora_inner_dit_keys(_load_lora_state_dict(spec.path))
             pipe.load_lora_weights(state_dict, adapter_name=spec.adapter_name)
-            names.append(spec.adapter_name)
-            scales.append(spec.scale)
-        pipe.set_adapters(names, adapter_weights=scales)
+            if hasattr(pipe, "set_adapters"):
+                pipe.set_adapters([spec.adapter_name], adapter_weights=[spec.scale])
+            _fuse_and_unload(pipe, adapter_name=spec.adapter_name, scale=spec.scale)
     except Exception:
         _applied_key = None
         _applied_pipe_id = None
         raise
     _applied_key = key
     _applied_pipe_id = pipe_id
+
+
+def _fuse_and_unload(pipe, *, adapter_name: str, scale: float) -> None:
+    """Merge active LoRA into base weights and drop adapter tensors."""
+    if hasattr(pipe, "fuse_lora"):
+        try:
+            pipe.fuse_lora(adapter_names=[adapter_name], lora_scale=scale)
+        except TypeError:
+            try:
+                pipe.fuse_lora(lora_scale=scale)
+            except TypeError:
+                pipe.fuse_lora()
+        _unload_loras(pipe)
+        return
+
+    _merge_and_unload_modules(pipe)
+    _unload_loras(pipe)
+
+
+def _merge_and_unload_modules(pipe) -> None:
+    """PEFT fallback when the pipeline has no fuse_lora()."""
+    for attr in ("transformer", "dit", "unet"):
+        module = getattr(pipe, attr, None)
+        if module is None:
+            continue
+        if hasattr(module, "merge_and_unload"):
+            merged = module.merge_and_unload()
+            if merged is not None and merged is not module:
+                setattr(pipe, attr, merged)
+            return
+        peft = getattr(module, "base_model", None)
+        if peft is not None and hasattr(peft, "merge_and_unload"):
+            merged = peft.merge_and_unload()
+            if merged is not None:
+                setattr(pipe, attr, merged)
+            return
+    raise RuntimeError(
+        "Pipeline cannot fuse LoRA weights (no fuse_lora / merge_and_unload)."
+    )
 
 
 def _load_lora_state_dict(path: Path) -> dict:
@@ -186,17 +236,27 @@ def _load_lora_state_dict(path: Path) -> dict:
 
 def _rewrite_lora_inner_dit_key(key: str) -> str:
     rewritten = key.replace(_INNER_DIT_SEGMENT, ".")
-    stripped_leading = False
+    stripped = False
     if rewritten.startswith(_INNER_DIT_PREFIX):
         rewritten = rewritten[len(_INNER_DIT_PREFIX) :]
-        stripped_leading = True
+        stripped = True
     if _INNER_DIT_DOTTED in rewritten:
         rewritten = rewritten.replace(_INNER_DIT_DOTTED, "")
-        if rewritten.startswith("."):
-            rewritten = rewritten[1:]
-        stripped_leading = True
-    if stripped_leading and not rewritten.startswith(_DIFFUSION_PREFIX) and not rewritten.startswith(
-        _TRANSFORMER_PREFIX
+        stripped = True
+    if _INNER_DIT_UNDERSCORE.search(rewritten):
+        rewritten = _INNER_DIT_UNDERSCORE.sub("_", rewritten)
+        stripped = True
+    if stripped:
+        while ".." in rewritten:
+            rewritten = rewritten.replace("..", ".")
+        while "__" in rewritten:
+            rewritten = rewritten.replace("__", "_")
+        rewritten = rewritten.lstrip("._")
+    if (
+        stripped
+        and not rewritten.startswith(_DIFFUSION_PREFIX)
+        and not rewritten.startswith(_TRANSFORMER_PREFIX)
+        and not rewritten.startswith(_LORA_UNET_PREFIX)
     ):
         rewritten = f"{_DIFFUSION_PREFIX}{rewritten}"
     return rewritten

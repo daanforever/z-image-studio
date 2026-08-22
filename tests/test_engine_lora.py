@@ -41,6 +41,7 @@ class _LoraPipe:
     def __init__(self):
         self.loads = []
         self.adapters = None
+        self.fuses = []
         self.unloads = 0
         self.disables = 0
 
@@ -48,7 +49,37 @@ class _LoraPipe:
         self.loads.append((state_dict, adapter_name))
 
     def set_adapters(self, names, adapter_weights=None):
-        self.adapters = (list(names), list(adapter_weights))
+        self.adapters = (list(names), list(adapter_weights or []))
+
+    def fuse_lora(self, adapter_names=None, lora_scale=None):
+        self.fuses.append((list(adapter_names or []), lora_scale))
+
+    def unload_lora_weights(self):
+        self.unloads += 1
+        self.adapters = None
+
+
+class _MergeOnlyModule:
+    def __init__(self):
+        self.merged = 0
+
+    def merge_and_unload(self):
+        self.merged += 1
+        return self
+
+
+class _MergeOnlyPipe:
+    def __init__(self):
+        self.transformer = _MergeOnlyModule()
+        self.loads = []
+        self.adapters = None
+        self.unloads = 0
+
+    def load_lora_weights(self, state_dict, weight_name=None, adapter_name=None):
+        self.loads.append((state_dict, adapter_name))
+
+    def set_adapters(self, names, adapter_weights=None):
+        self.adapters = (list(names), list(adapter_weights or []))
 
     def unload_lora_weights(self):
         self.unloads += 1
@@ -208,6 +239,39 @@ def test_rewrite_lora_inner_dit_keys_strips_dotted_and_leading_prefix():
         assert rewritten[expected] is tensor
 
 
+def test_rewrite_lora_inner_dit_keys_strips_kohya_underscore_wrapper():
+    tensor = torch.zeros((1, 1), dtype=torch.float16)
+    portable = "lora_unet_layers_0_attention_to_q.lora_down.weight"
+    cases = [
+        "lora_unet__inner_dit_layers_0_attention_to_q.lora_down.weight",
+        "lora_unet_inner_dit_layers_0_attention_to_q.lora_down.weight",
+    ]
+    for source in cases:
+        rewritten = rewrite_lora_inner_dit_keys({source: tensor})
+        assert list(rewritten) == [portable], source
+        assert rewritten[portable] is tensor
+
+
+def test_rewrite_kohya_inner_dit_converts_for_zimage():
+    pytest.importorskip("diffusers")
+    from diffusers.loaders.lora_pipeline import ZImageLoraLoaderMixin
+
+    tensor_a = torch.zeros((1, 4), dtype=torch.float16)
+    tensor_b = torch.zeros((4, 1), dtype=torch.float16)
+    raw = {
+        "lora_unet__inner_dit_layers_0_attention_to_q.lora_down.weight": tensor_a,
+        "lora_unet__inner_dit_layers_0_attention_to_q.lora_up.weight": tensor_b,
+        "lora_unet__inner_dit_layers_0_attention_to_q.alpha": torch.tensor(1.0),
+    }
+    rewritten = rewrite_lora_inner_dit_keys(raw)
+    converted = ZImageLoraLoaderMixin.lora_state_dict(rewritten)
+    assert converted
+    assert all(key.startswith("transformer.layers.") for key in converted)
+    assert all("inner.dit" not in key and "_inner_dit" not in key for key in converted)
+    assert any("to_q.lora_A.weight" in key for key in converted)
+    assert any("to_q.lora_B.weight" in key for key in converted)
+
+
 def test_rewrite_lora_inner_dit_keys_collision_raises():
     wrapped = "diffusion_model._inner_dit.layers.0.attention.to_q.lora_A.weight"
     portable = "diffusion_model.layers.0.attention.to_q.lora_A.weight"
@@ -227,14 +291,17 @@ def test_sync_lora_adapters_loads_and_sets(tmp_path: Path, reset_lora):
     )
     pipe = _LoraPipe()
     sync_lora_adapters(pipe, specs)
-    assert pipe.unloads == 1
     assert [name for _state, name in pipe.loads] == ["style", "char"]
     assert all(isinstance(state, dict) for state, _name in pipe.loads)
-    assert pipe.adapters == (["style", "char"], [0.8, 1.0])
+    # One fuse+unload per adapter; last set_adapters cleared by unload.
+    assert pipe.fuses == [(["style"], 0.8), (["char"], 1.0)]
+    assert pipe.unloads == 2
+    assert pipe.adapters is None
 
     sync_lora_adapters(pipe, specs)
     assert len(pipe.loads) == 2
-    assert pipe.unloads == 1
+    assert pipe.unloads == 2
+    assert len(pipe.fuses) == 2
 
 
 def test_sync_lora_adapters_loads_pt(tmp_path: Path, reset_lora):
@@ -248,7 +315,9 @@ def test_sync_lora_adapters_loads_pt(tmp_path: Path, reset_lora):
     loaded, name = pipe.loads[0]
     assert name == "style"
     assert "diffusion_model.layers.0.attention.to_q.lora_A.weight" in loaded
-    assert pipe.adapters == (["style"], [0.9])
+    assert pipe.fuses == [(["style"], 0.9)]
+    assert pipe.unloads == 1
+    assert pipe.adapters is None
 
 
 def test_sync_lora_adapters_retries_after_load_failure(tmp_path: Path, reset_lora):
@@ -273,24 +342,27 @@ def test_sync_lora_adapters_retries_after_load_failure(tmp_path: Path, reset_lor
     pipe.load_lora_weights = flaky_load
     with pytest.raises(RuntimeError, match="boom"):
         sync_lora_adapters(pipe, (spec,))
-    assert pipe.unloads == 1
+    assert pipe.unloads == 0
     assert len(pipe.loads) == 0
+    assert pipe.fuses == []
 
     sync_lora_adapters(pipe, (spec,))
-    assert pipe.unloads == 2
+    assert pipe.unloads == 1
     assert len(pipe.loads) == 1
-    assert pipe.adapters == (["style"], [1.0])
+    assert pipe.fuses == [(["style"], 1.0)]
+    assert pipe.adapters is None
 
 
-def test_sync_lora_adapters_empty_unloads(tmp_path: Path, reset_lora):
+def test_sync_lora_adapters_empty_is_noop(tmp_path: Path, reset_lora):
     _write_lora(tmp_path / "style.safetensors")
     specs = parse_lora_specs(str(tmp_path), ["style.safetensors"], None)
     pipe = _LoraPipe()
     sync_lora_adapters(pipe, specs)
     sync_lora_adapters(pipe, ())
-    assert pipe.unloads == 2
+    # Empty specs on a fresh/fused pipe does not call unload (no PEFT left).
+    assert pipe.unloads == 1
     assert len(pipe.loads) == 1
-    assert pipe.adapters is None
+    assert pipe.fuses == [(["style"], 1.0)]
 
 
 def test_sync_lora_adapters_without_api_empty_is_noop(reset_lora):
@@ -308,10 +380,27 @@ def test_sync_lora_adapters_without_api_raises(tmp_path: Path, reset_lora):
         sync_lora_adapters(object(), (spec,))
 
 
-def test_sync_lora_adapters_disable_fallback(reset_lora):
+def test_sync_lora_adapters_merge_and_unload_fallback(tmp_path: Path, reset_lora):
+    path = tmp_path / "style.safetensors"
+    _write_lora(path)
+    spec = LoraSpec(
+        path=path,
+        filename="style.safetensors",
+        adapter_name="style",
+        scale=0.7,
+    )
+    pipe = _MergeOnlyPipe()
+    sync_lora_adapters(pipe, (spec,))
+    assert len(pipe.loads) == 1
+    assert pipe.adapters is None
+    assert pipe.transformer.merged == 1
+    assert pipe.unloads == 1
+
+
+def test_sync_lora_adapters_disable_fallback_unused_for_empty(reset_lora):
     pipe = _DisableOnlyPipe()
     sync_lora_adapters(pipe, ())
-    assert pipe.disables == 1
+    assert pipe.disables == 0
 
 
 def test_fixture_tiny_lora_is_valid_safetensors(tiny_lora_dir: Path):
@@ -371,7 +460,9 @@ def test_sync_real_fixture_loads_state_dict(tiny_lora_dir: Path, reset_lora):
     assert isinstance(state, dict)
     assert state
     assert all("_inner_dit" not in key and "inner.dit." not in key for key in state)
-    assert pipe.adapters == (["tiny_zimage_lora"], [0.6])
+    assert pipe.fuses == [(["tiny_zimage_lora"], 0.6)]
+    assert pipe.unloads == 1
+    assert pipe.adapters is None
 
 
 def test_sync_lora_adapters_rewrites_wrapped_keys(tmp_path: Path, reset_lora):
@@ -396,3 +487,5 @@ def test_sync_lora_adapters_rewrites_wrapped_keys(tmp_path: Path, reset_lora):
     assert "diffusion_model.layers.0.attention.to_q.lora_A.weight" in state
     assert "diffusion_model.layers.0.attention.to_q.lora_B.weight" in state
     assert all("_inner_dit" not in key and "inner.dit." not in key for key in state)
+    assert pipe.fuses == [(["old"], 1.0)]
+    assert pipe.unloads == 1

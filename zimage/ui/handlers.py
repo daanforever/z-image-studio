@@ -8,8 +8,15 @@ from collections.abc import Generator
 
 import gradio as gr
 
-from zimage.config import DEFAULT_BATCH, DEFAULT_MODEL, MAX_BATCH, parse_quantize_modules, parse_resolution
-from zimage.engine import ensure_pipeline, generate_image, runtime_status, unload_pipeline
+from zimage.config import (
+    DEFAULT_BATCH,
+    DEFAULT_MODEL,
+    GALLERY_LIMIT,
+    MAX_BATCH,
+    parse_quantize_modules,
+    parse_resolution,
+)
+from zimage.engine import ensure_pipeline, generate_image, list_output_images, runtime_status, unload_pipeline
 from zimage.engine.lora import (
     DEFAULT_STRENGTH,
     list_lora_files,
@@ -26,6 +33,11 @@ _stop_event = threading.Event()
 def request_stop() -> None:
     """Signal the active batch to stop after the current image (no rollback)."""
     _stop_event.set()
+
+
+def load_gallery() -> list[str]:
+    """Populate the Output gallery from disk on page load."""
+    return list_output_images()
 
 
 def _parse_batch_count(batch_count) -> int:
@@ -208,7 +220,7 @@ def generate(
             if produced:
                 extra = f"Stopped after {produced} of {count}: {message}"
                 yield (
-                    items[:12],
+                    items[:GALLERY_LIMIT],
                     _format_used_seed(base_seed, last_seed),
                     int(last_seed),
                     format_status(last_status, extra=extra),
@@ -220,7 +232,7 @@ def generate(
         produced += 1
         items = [image] + items
         yield (
-            items[:12],
+            items[:GALLERY_LIMIT],
             _format_used_seed(base_seed, last_seed),
             int(last_seed),
             format_status(status),
@@ -233,7 +245,7 @@ def generate(
     if stopped:
         extra = f"Stopped after {produced} of {count}."
         yield (
-            items[:12],
+            items[:GALLERY_LIMIT],
             _format_used_seed(base_seed, last_seed) if produced else "",
             int(last_seed) if produced else int(seed) if seed is not None else base_seed,
             format_status(last_status, extra=extra),

@@ -12,6 +12,7 @@ from zimage.config import DEFAULT_MODEL
 from zimage.ui.handlers import (
     _image_progress,
     generate,
+    load_gallery,
     load_model,
     refresh_loras,
     request_stop,
@@ -19,6 +20,14 @@ from zimage.ui.handlers import (
     unload_model,
 )
 import zimage.ui.handlers as handlers
+
+
+def test_load_gallery_returns_disk_paths(monkeypatch):
+    monkeypatch.setattr(
+        "zimage.ui.handlers.list_output_images",
+        lambda: ["outputs/a.png", "outputs/b.png"],
+    )
+    assert load_gallery() == ["outputs/a.png", "outputs/b.png"]
 
 
 def _drain(gen):
@@ -207,7 +216,8 @@ def test_generate_batch_stop_keeps_frames(monkeypatch):
     assert "Stopped after 2 of 5" in status
 
 
-def test_generate_caps_gallery_at_twelve(monkeypatch):
+def test_generate_caps_gallery_at_limit(monkeypatch):
+    monkeypatch.setattr("zimage.ui.handlers.GALLERY_LIMIT", 12)
     fake = Image.new("RGB", (2, 2), "white")
     previous = [Image.new("RGB", (2, 2), "black") for _ in range(12)]
 
@@ -224,7 +234,8 @@ def test_generate_caps_gallery_at_twelve(monkeypatch):
     assert all(item is not previous[11] for item in items)
 
 
-def test_generate_batch_caps_gallery_at_twelve(monkeypatch):
+def test_generate_batch_caps_gallery_at_limit(monkeypatch):
+    monkeypatch.setattr("zimage.ui.handlers.GALLERY_LIMIT", 12)
     previous = [Image.new("RGB", (2, 2), "black") for _ in range(10)]
     created = []
 

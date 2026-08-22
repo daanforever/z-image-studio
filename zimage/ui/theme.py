@@ -121,6 +121,19 @@ CUSTOM_CSS = """
 .dark #output-gallery .empty {
     background: #0a0a0a !important;
 }
+#output-gallery .gallery-container {
+    height: 640px;
+    overflow: hidden;
+}
+#output-gallery .grid-wrap {
+    overflow-y: auto;
+    max-height: 640px;
+}
+#output-gallery .thumbnails {
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+}
 #output-gallery .media-button {
     cursor: zoom-in;
 }

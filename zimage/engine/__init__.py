@@ -4,6 +4,7 @@ from zimage.engine.demo import demo_image, wrap_text
 from zimage.engine.pipeline import (
     ensure_pipeline,
     generate_image,
+    list_output_images,
     save_image,
     unload_pipeline,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "is_fp8_precision",
     "is_int8_precision",
     "is_quantized_precision",
+    "list_output_images",
     "resolve_device",
     "runtime_status",
     "save_image",

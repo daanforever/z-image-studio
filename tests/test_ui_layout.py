@@ -161,6 +161,17 @@ def test_output_gallery_starts_in_preview(monkeypatch):
     gallery = _block_by_elem_id(demo, "output-gallery")
     assert gallery.preview is True
     assert gallery.allow_preview is True
+    assert gallery.height == 640
+
+
+def test_gallery_loads_on_demo_load(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    load_fns = _fns_named(demo, "load_gallery")
+    assert len(load_fns) == 1
+    load_fn = load_fns[0]
+    output_ids = [getattr(block, "elem_id", None) for block in load_fn.outputs]
+    assert output_ids == ["output-gallery"]
 
 
 def test_lora_events_wired(monkeypatch):

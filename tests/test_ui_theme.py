@@ -21,6 +21,12 @@ def test_build_theme_and_css():
     assert ".gradio-container .app" in CUSTOM_CSS
     assert "#output-gallery .media-button" in CUSTOM_CSS
     assert "cursor: zoom-in" in CUSTOM_CSS
+    assert "#output-gallery .gallery-container" in CUSTOM_CSS
+    assert "height: 640px" in CUSTOM_CSS
+    assert "#output-gallery .grid-wrap" in CUSTOM_CSS
+    assert "overflow-y: auto" in CUSTOM_CSS
+    assert "#output-gallery .thumbnails" in CUSTOM_CSS
+    assert "overflow-x: auto" in CUSTOM_CSS
     appearance = appearance_kwargs()
     assert appearance["css"] == CUSTOM_CSS
     assert appearance["js"] == CUSTOM_JS

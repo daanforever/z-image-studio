@@ -16,6 +16,7 @@ from zimage.config import (
     DEFAULT_MAX_SEQ,
     DEFAULT_MODEL,
     DEFAULT_SHIFT,
+    GALLERY_LIMIT,
     OUTPUTS_DIR,
     canonical_precision,
     is_truthy,
@@ -259,6 +260,24 @@ def save_image(image: Image.Image, seed: int, outputs_dir: Path | None = None) -
     path = directory / f"zimage-{stamp}-{seed}.png"
     image.save(path)
     return path
+
+
+def list_output_images(
+    outputs_dir: Path | None = None,
+    limit: int | None = None,
+) -> list[str]:
+    """Newest-first PNG paths under outputs_dir, capped at limit."""
+    directory = outputs_dir or OUTPUTS_DIR
+    if not directory.is_dir():
+        return []
+    cap = GALLERY_LIMIT if limit is None else int(limit)
+    paths = [
+        child
+        for child in directory.iterdir()
+        if child.is_file() and child.suffix.lower() == ".png"
+    ]
+    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return [str(path) for path in paths[: max(0, cap)]]
 
 
 def _pipeline_cache_hit(

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from zimage.engine import ensure_pipeline, save_image, unload_pipeline
+from zimage.engine import ensure_pipeline, list_output_images, save_image, unload_pipeline
 from zimage.engine import pipeline as pipeline_mod
 
 
@@ -25,6 +25,57 @@ def test_save_image_uses_default_outputs_dir(tmp_path: Path, monkeypatch):
     assert path.parent == tmp_path
     assert path.exists()
 
+
+def test_list_output_images_missing_dir(tmp_path: Path):
+    missing = tmp_path / "no-such-outputs"
+    assert list_output_images(outputs_dir=missing) == []
+
+
+def test_list_output_images_empty_dir(tmp_path: Path):
+    assert list_output_images(outputs_dir=tmp_path) == []
+
+
+def test_list_output_images_newest_first_png_only(tmp_path: Path):
+    import os
+
+    older = tmp_path / "zimage-old.png"
+    newer = tmp_path / "zimage-new.png"
+    skip = tmp_path / "notes.txt"
+    older.write_bytes(b"\x89PNG\r\n\x1a\n")
+    newer.write_bytes(b"\x89PNG\r\n\x1a\n")
+    skip.write_text("ignore", encoding="utf-8")
+    older_mtime = 1_700_000_000.0
+    newer_mtime = 1_700_000_100.0
+    os.utime(older, (older_mtime, older_mtime))
+    os.utime(newer, (newer_mtime, newer_mtime))
+    paths = list_output_images(outputs_dir=tmp_path)
+    assert paths == [str(newer), str(older)]
+
+def test_list_output_images_respects_limit(tmp_path: Path):
+    import os
+    import time
+
+    base = time.time()
+    for i in range(5):
+        path = tmp_path / f"zimage-{i}.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        os.utime(path, (base + i, base + i))
+    paths = list_output_images(outputs_dir=tmp_path, limit=3)
+    assert len(paths) == 3
+    assert paths[0].endswith("zimage-4.png")
+    assert paths[-1].endswith("zimage-2.png")
+
+
+def test_list_output_images_caps_at_gallery_limit(tmp_path: Path, monkeypatch):
+    import os
+
+    monkeypatch.setattr("zimage.engine.pipeline.GALLERY_LIMIT", 3)
+    for i in range(5):
+        path = tmp_path / f"zimage-{i}.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        os.utime(path, (1_700_000_000 + i, 1_700_000_000 + i))
+    paths = list_output_images(outputs_dir=tmp_path)
+    assert len(paths) == 3
 
 def test_ensure_pipeline_demo_skips_load(monkeypatch):
     monkeypatch.setattr("zimage.engine.pipeline.resolve_device", lambda _device: "demo")

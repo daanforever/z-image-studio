@@ -21,7 +21,15 @@ from zimage.config import (
     RESOLUTION_PRESETS,
 )
 from zimage.engine.lora import normalize_lora_dir
-from zimage.ui.handlers import generate, load_model, refresh_loras, request_stop, sync_lora_weights, unload_model
+from zimage.ui.handlers import (
+    generate,
+    load_gallery,
+    load_model,
+    refresh_loras,
+    request_stop,
+    sync_lora_weights,
+    unload_model,
+)
 from zimage.ui.status import format_status
 
 
@@ -229,6 +237,7 @@ def build_ui() -> gr.Blocks:
             show_progress_on=status,
         )
         stop_btn.click(request_stop, cancels=[generate_event])
+        demo.load(load_gallery, outputs=gallery)
 
         gr.Markdown(
             """

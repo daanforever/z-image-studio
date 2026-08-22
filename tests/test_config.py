@@ -8,6 +8,7 @@ from zimage.config import (
     DEFAULT_HEIGHT,
     DEFAULT_QUANTIZE_MODULES,
     DEFAULT_WIDTH,
+    GALLERY_LIMIT,
     PRECISION_CHOICES,
     QUANTIZE_CHOICES,
     canonical_precision,
@@ -22,6 +23,10 @@ from zimage.config import (
 def test_precision_choices_include_quantized():
     assert PRECISION_CHOICES == ["fp8", "bfloat16", "float16", "float32", "int8"]
     assert DEFAULT_DTYPE == "fp8"
+
+
+def test_gallery_limit_default():
+    assert GALLERY_LIMIT == 1000
 
 
 def test_parse_quantize_modules():

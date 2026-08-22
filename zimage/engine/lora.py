@@ -179,7 +179,9 @@ def sync_lora_adapters(
             state_dict = rewrite_lora_inner_dit_keys(_load_lora_state_dict(spec.path))
             pipe.load_lora_weights(state_dict, adapter_name=spec.adapter_name)
             if hasattr(pipe, "set_adapters"):
-                pipe.set_adapters([spec.adapter_name], adapter_weights=[spec.scale])
+                # Activate at unit scale. fuse_lora(lora_scale=spec.scale) applies
+                # strength once; passing the same value to both squares it.
+                pipe.set_adapters([spec.adapter_name], adapter_weights=[1.0])
             _fuse_and_unload(pipe, adapter_name=spec.adapter_name, scale=spec.scale)
     except Exception:
         _applied_key = None

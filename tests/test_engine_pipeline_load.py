@@ -403,7 +403,7 @@ def test_load_pipeline_fuses_lora_before_quantization(monkeypatch, tmp_path):
     assert order[:5] == [
         ("module_to", "cuda"),
         "load:style",
-        "set:['style']:[0.8]",
+        "set:['style']:[1.0]",
         "fuse:['style']:0.8",
         "unload",
     ]

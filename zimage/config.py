@@ -102,6 +102,22 @@ DEFAULT_BATCH = 1
 MAX_BATCH = 9999
 GALLERY_LIMIT = 1000
 
+IMAGE_FORMAT_CHOICES = ["png", "jpeg"]
+_IMAGE_FORMAT_ALIASES = {
+    "jpg": "jpeg",
+    "jpe": "jpeg",
+}
+
+
+def canonical_image_format(name: str | None) -> str:
+    raw = (name or "").strip().lower() or "jpeg"
+    mapped = _IMAGE_FORMAT_ALIASES.get(raw, raw)
+    return mapped if mapped in IMAGE_FORMAT_CHOICES else "jpeg"
+
+
+DEFAULT_IMAGE_FORMAT = "jpeg"
+JPEG_QUALITY = 95
+
 CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu130"
 CUDA_REINSTALL_CMD = (
     f"pip install --force-reinstall torch torchvision --index-url {CUDA_INDEX_URL}"

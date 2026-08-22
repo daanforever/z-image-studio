@@ -232,6 +232,7 @@ def _generate(
     lora_dir="",
     lora_names=None,
     lora_weights=None,
+    image_format="jpeg",
     progress=None,
 ):
     return _drain(
@@ -255,6 +256,7 @@ def _generate(
             lora_dir,
             lora_names,
             lora_weights,
+            image_format,
             progress=progress,
         )
     )
@@ -290,6 +292,7 @@ def test_generate_success_prepends_gallery(monkeypatch):
         assert kwargs["height"] == 384
         assert kwargs["seed"] == 42
         assert kwargs["outputs_dir"] == Path("outputs")
+        assert kwargs["image_format"] == "jpeg"
         return fake, 42, {"device": "cpu", "device_name": "CPU", "loaded": True}
 
     monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
@@ -306,6 +309,19 @@ def test_generate_success_prepends_gallery(monkeypatch):
     assert used == "42"
     assert seed == 42
     assert status == "ok"
+
+
+def test_generate_forwards_image_format(monkeypatch):
+    captured = {}
+
+    def fake_generate_image(*_args, **kwargs):
+        captured["image_format"] = kwargs["image_format"]
+        return Image.new("RGB", (4, 4), "red"), 1, {"device": "cpu", "loaded": True}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+    _generate(image_format="png")
+    assert captured["image_format"] == "png"
 
 
 def test_generate_passes_windows_output_dir(monkeypatch):

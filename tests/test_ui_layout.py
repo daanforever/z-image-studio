@@ -5,7 +5,7 @@ import warnings
 
 import gradio as gr
 
-from zimage.config import DEFAULT_LORA_DIR, DEFAULT_OUTPUT_DIR
+from zimage.config import DEFAULT_IMAGE_FORMAT, DEFAULT_LORA_DIR, DEFAULT_OUTPUT_DIR
 from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import generate
 from zimage.ui.layout import build_ui
@@ -157,6 +157,7 @@ def test_generate_event_includes_lora_inputs(monkeypatch):
     assert "studio-lora-adapters" in input_ids
     assert "studio-lora-weights" in input_ids
     assert "studio-output-dir" in input_ids
+    assert "studio-image-format" in input_ids
 
 
 def test_output_dir_field_default(monkeypatch):
@@ -165,6 +166,19 @@ def test_output_dir_field_default(monkeypatch):
     field = _block_by_elem_id(demo, "studio-output-dir")
     assert field.value == DEFAULT_OUTPUT_DIR
     assert field.label == "Output dir"
+
+
+def test_image_format_field_defaults_to_jpeg(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    field = _block_by_elem_id(demo, "studio-image-format")
+    assert field.value == DEFAULT_IMAGE_FORMAT
+    assert DEFAULT_IMAGE_FORMAT == "jpeg"
+    choice_values = [
+        c[0] if isinstance(c, (list, tuple)) else c for c in (field.choices or [])
+    ]
+    assert choice_values == ["png", "jpeg"]
+    assert field.label == "Format"
 
 
 def test_output_gallery_starts_in_preview(monkeypatch):

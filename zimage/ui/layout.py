@@ -7,6 +7,7 @@ from zimage.config import (
     DEFAULT_DEVICE,
     DEFAULT_DTYPE,
     DEFAULT_GUIDANCE,
+    DEFAULT_IMAGE_FORMAT,
     DEFAULT_LORA_DIR,
     DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
@@ -14,6 +15,7 @@ from zimage.config import (
     DEFAULT_RESOLUTION,
     DEFAULT_STEPS,
     EXAMPLE_PROMPTS,
+    IMAGE_FORMAT_CHOICES,
     MAX_BATCH,
     PRECISION_CHOICES,
     QUANTIZE_CHOICES,
@@ -107,8 +109,15 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                     output_dir = gr.Textbox(
                         value=DEFAULT_OUTPUT_DIR,
                         label="Output dir",
-                        info="Folder for saved PNGs (Windows paths accepted).",
+                        info="Folder for saved images (Windows paths accepted).",
                         elem_id="studio-output-dir",
+                    )
+                    image_format = gr.Radio(
+                        choices=IMAGE_FORMAT_CHOICES,
+                        value=DEFAULT_IMAGE_FORMAT,
+                        label="Format",
+                        info="JPEG is smaller; PNG is lossless.",
+                        elem_id="studio-image-format",
                     )
                 with gr.Row():
                     seed = gr.Number(value=42, precision=0, label="Seed")
@@ -274,6 +283,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                 lora_dir,
                 lora_adapters,
                 lora_weights,
+                image_format,
             ],
             outputs=[gallery, used_seed, seed, status],
             show_progress="minimal",
@@ -306,7 +316,7 @@ Local Gradio UI for **Tongyi-MAI/Z-Image-Turbo** via `diffusers`.
 The model works best in English and Chinese; Russian is supported but weaker.<br>
 Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during distillation.
 
-Images are saved to the **Output dir** field (default `./outputs`).<br>
+Images are saved to the **Output dir** field (default `./outputs`) as **JPEG** by default (PNG optional).<br>
 **fp8** / **int8** quantize the checked modules of official **Z-Image-Turbo**
 with torchao.
             """,

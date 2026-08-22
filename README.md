@@ -15,7 +15,7 @@ Official Turbo recipe from the model card: **9 steps** (8 DiT forwards) and **`g
 - Precision: **fp8** by default; also `bfloat16` / `float16` / `float32` / `int8` (torchao on checked modules)
 - LoRA: local directory (`ZIMAGE_LORA_DIR`), multi-select `.safetensors` / `.pt`, per-adapter strength (fused into base weights before quantization so VRAM stays near the base model; changing adapters/strength reloads)
 - CPU offload and VAE tiling for low VRAM
-- Saves PNGs to the Output dir field (default `./outputs`; Windows paths accepted)
+- Saves JPEGs by default (PNG optional) to the Output dir field (default `./outputs`; Windows paths accepted)
 - Demo mode with no weights and no GPU (to inspect the UI)
 
 The UI does not use quantized `Disty0/Z-Image-Turbo-SDNQ-*` checkpoints. Use the official **Z-Image-Turbo**.
@@ -144,5 +144,5 @@ zimage/engine/         device status, demo frame, pipeline
 zimage/ui/             theme, status, handlers, Gradio layout
 tests/                 pytest
 launch.bat             Windows launcher with local paths
-outputs/               saved PNGs
+outputs/               saved JPEGs / PNGs
 ```

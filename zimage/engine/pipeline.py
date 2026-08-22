@@ -13,11 +13,14 @@ from PIL import Image
 from zimage.config import (
     DEFAULT_DTYPE,
     DEFAULT_GUIDANCE,
+    DEFAULT_IMAGE_FORMAT,
     DEFAULT_MAX_SEQ,
     DEFAULT_MODEL,
     DEFAULT_SHIFT,
     GALLERY_LIMIT,
+    JPEG_QUALITY,
     OUTPUTS_DIR,
+    canonical_image_format,
     canonical_precision,
     is_truthy,
 )
@@ -255,12 +258,36 @@ def unload_pipeline() -> None:
     _reclaim_memory()
 
 
-def save_image(image: Image.Image, seed: int, outputs_dir: Path | None = None) -> Path:
+def _image_for_jpeg(image: Image.Image) -> Image.Image:
+    """Convert to RGB for JPEG; composite alpha onto white if present."""
+    if image.mode == "RGB":
+        return image
+    if image.mode in {"RGBA", "LA"} or (
+        image.mode == "P" and "transparency" in image.info
+    ):
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[-1])
+        return background
+    return image.convert("RGB")
+
+
+def save_image(
+    image: Image.Image,
+    seed: int,
+    outputs_dir: Path | None = None,
+    image_format: str = DEFAULT_IMAGE_FORMAT,
+) -> Path:
     directory = outputs_dir or OUTPUTS_DIR
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = directory / f"zimage-{stamp}-{seed}.png"
-    image.save(path)
+    fmt = canonical_image_format(image_format)
+    if fmt == "jpeg":
+        path = directory / f"zimage-{stamp}-{seed}.jpg"
+        _image_for_jpeg(image).save(path, format="JPEG", quality=JPEG_QUALITY)
+    else:
+        path = directory / f"zimage-{stamp}-{seed}.png"
+        image.save(path, format="PNG")
     return path
 
 
@@ -268,7 +295,7 @@ def list_output_images(
     outputs_dir: Path | None = None,
     limit: int | None = None,
 ) -> list[str]:
-    """Newest-first PNG paths under outputs_dir, capped at limit."""
+    """Newest-first image paths under outputs_dir, capped at limit."""
     directory = outputs_dir or OUTPUTS_DIR
     if not directory.is_dir():
         return []
@@ -276,7 +303,7 @@ def list_output_images(
     paths = [
         child
         for child in directory.iterdir()
-        if child.is_file() and child.suffix.lower() == ".png"
+        if child.is_file() and child.suffix.lower() in OUTPUT_IMAGE_SUFFIXES
     ]
     paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return [str(path) for path in paths[: max(0, cap)]]
@@ -286,13 +313,13 @@ def delete_output_image(
     path: str | Path,
     outputs_dir: Path | None = None,
 ) -> Path | None:
-    """Unlink a PNG under outputs_dir. Returns the path, or None if refused."""
+    """Unlink an image under outputs_dir. Returns the path, or None if refused."""
     directory = (outputs_dir or OUTPUTS_DIR).resolve()
     try:
         target = Path(path).resolve()
     except (OSError, RuntimeError, ValueError):
         return None
-    if target.suffix.lower() != ".png":
+    if target.suffix.lower() not in OUTPUT_IMAGE_SUFFIXES:
         return None
     try:
         target.relative_to(directory)
@@ -383,10 +410,12 @@ def generate_image(
     loras: tuple[LoraSpec, ...] | list[LoraSpec] | None = (),
     progress=None,
     outputs_dir: Path | None = None,
+    image_format: str = DEFAULT_IMAGE_FORMAT,
 ) -> tuple[Image.Image, int, dict[str, Any]]:
     status = runtime_status()
     resolved = resolve_device(device)
     lora_specs = tuple(loras or ())
+    fmt = canonical_image_format(image_format)
 
     if resolved == "demo" or status["demo"]:
         if progress is not None:
@@ -394,7 +423,7 @@ def generate_image(
         image = demo_image(prompt, width, height, seed, status.get("demo_reason", ""))
         if progress is not None:
             progress(0.98, desc="Saving…")
-        path = save_image(image, seed, outputs_dir=outputs_dir)
+        path = save_image(image, seed, outputs_dir=outputs_dir, image_format=fmt)
         status["saved"] = str(path)
         status["loaded"] = False
         status["demo"] = True
@@ -473,7 +502,7 @@ def generate_image(
     image = result.images[0]
     if progress is not None:
         progress(0.98, desc="Saving…")
-    path = save_image(image, seed, outputs_dir=outputs_dir)
+    path = save_image(image, seed, outputs_dir=outputs_dir, image_format=fmt)
     status = _loaded_status(model_id, resolved, dtype_name)
     status["loras"] = status_loras(lora_specs)
     status["saved"] = str(path)

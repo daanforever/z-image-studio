@@ -77,8 +77,23 @@ def test_generate_image_demo_mode(monkeypatch, tmp_path: Path):
     assert status["demo"] is True
     assert status["loaded"] is False
     assert Path(status["saved"]).exists()
+    assert Path(status["saved"]).suffix == ".jpg"
     assert image.size == (512, 512)
     assert progress[-1][0] == 1.0
+
+
+def test_generate_image_demo_saves_png_when_requested(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("ZIMAGE_DEMO", "1")
+    _image, _seed, status = generate_image(
+        "studio test",
+        width=512,
+        height=512,
+        seed=123,
+        outputs_dir=tmp_path,
+        image_format="png",
+    )
+    assert Path(status["saved"]).suffix == ".png"
+    assert Path(status["saved"]).exists()
 
 
 def test_generate_image_demo_via_status_flag(monkeypatch, tmp_path: Path):

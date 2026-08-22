@@ -9,10 +9,12 @@ from pathlib import Path
 
 from zimage.config import (
     DEFAULT_BATCH,
+    DEFAULT_IMAGE_FORMAT,
     DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
     GALLERY_LIMIT,
     MAX_BATCH,
+    canonical_image_format,
     parse_output_dir,
     parse_quantize_modules,
     parse_resolution,
@@ -102,7 +104,7 @@ def set_gallery_index(evt: gr.SelectData) -> int | None:
 
 
 def delete_preview_image(gallery, selected_index, output_dir=None):
-    """Remove the previewed PNG from disk and refresh the gallery."""
+    """Remove the previewed image from disk and refresh the gallery."""
     items = list(gallery or [])
     outputs_path = parse_output_dir(output_dir)
 
@@ -302,6 +304,7 @@ def generate(
     lora_dir: str = "",
     lora_names=None,
     lora_weights=None,
+    image_format=DEFAULT_IMAGE_FORMAT,
     progress=gr.Progress(),
 ) -> Generator[tuple, None, None]:
     prompt = (prompt or "").strip()
@@ -312,6 +315,7 @@ def generate(
     count = _parse_batch_count(batch_count)
     outputs_path = parse_output_dir(output_dir)
     quantize_transformer, quantize_text_encoder = parse_quantize_modules(quantize_modules)
+    fmt = canonical_image_format(image_format)
     _stop_event.clear()
 
     base_seed = random.randint(1, 2_147_483_647) if random_seed else int(seed)
@@ -351,6 +355,7 @@ def generate(
                 loras=loras,
                 progress=image_progress,
                 outputs_dir=outputs_path,
+                image_format=fmt,
             )
         except Exception as exc:  # noqa: BLE001
             message = _offline_hint(str(exc))

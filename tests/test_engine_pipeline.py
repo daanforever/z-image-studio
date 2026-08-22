@@ -15,14 +15,33 @@ from zimage.engine import (
 from zimage.engine import pipeline as pipeline_mod
 
 
-def test_save_image_writes_png(tmp_path: Path):
+def test_save_image_writes_jpeg_by_default(tmp_path: Path):
     image = Image.new("RGB", (16, 16), "red")
     path = save_image(image, seed=99, outputs_dir=tmp_path)
     assert path.exists()
-    assert path.suffix == ".png"
+    assert path.suffix == ".jpg"
     assert "99" in path.name
     loaded = Image.open(path)
+    assert loaded.format == "JPEG"
     assert loaded.size == (16, 16)
+
+
+def test_save_image_writes_png_when_requested(tmp_path: Path):
+    image = Image.new("RGB", (16, 16), "red")
+    path = save_image(image, seed=99, outputs_dir=tmp_path, image_format="png")
+    assert path.exists()
+    assert path.suffix == ".png"
+    loaded = Image.open(path)
+    assert loaded.format == "PNG"
+    assert loaded.size == (16, 16)
+
+
+def test_save_image_jpeg_composites_rgba(tmp_path: Path):
+    image = Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+    path = save_image(image, seed=1, outputs_dir=tmp_path, image_format="jpeg")
+    loaded = Image.open(path)
+    assert loaded.mode == "RGB"
+    assert loaded.size == (8, 8)
 
 
 def test_save_image_uses_default_outputs_dir(tmp_path: Path, monkeypatch):
@@ -30,6 +49,7 @@ def test_save_image_uses_default_outputs_dir(tmp_path: Path, monkeypatch):
     image = Image.new("RGB", (8, 8), "blue")
     path = save_image(image, seed=7)
     assert path.parent == tmp_path
+    assert path.suffix == ".jpg"
     assert path.exists()
 
 
@@ -42,14 +62,14 @@ def test_list_output_images_empty_dir(tmp_path: Path):
     assert list_output_images(outputs_dir=tmp_path) == []
 
 
-def test_list_output_images_newest_first_png_only(tmp_path: Path):
+def test_list_output_images_newest_first_mixed_formats(tmp_path: Path):
     import os
 
     older = tmp_path / "zimage-old.png"
-    newer = tmp_path / "zimage-new.png"
+    newer = tmp_path / "zimage-new.jpg"
     skip = tmp_path / "notes.txt"
     older.write_bytes(b"\x89PNG\r\n\x1a\n")
-    newer.write_bytes(b"\x89PNG\r\n\x1a\n")
+    Image.new("RGB", (4, 4), "blue").save(newer, format="JPEG")
     skip.write_text("ignore", encoding="utf-8")
     older_mtime = 1_700_000_000.0
     newer_mtime = 1_700_000_100.0
@@ -93,6 +113,14 @@ def test_delete_output_image_removes_png(tmp_path: Path):
     assert not path.exists()
 
 
+def test_delete_output_image_removes_jpg(tmp_path: Path):
+    path = tmp_path / "zimage-1.jpg"
+    Image.new("RGB", (4, 4), "green").save(path, format="JPEG")
+    deleted = delete_output_image(path, outputs_dir=tmp_path)
+    assert deleted == path.resolve()
+    assert not path.exists()
+
+
 def test_delete_output_image_missing_file_succeeds(tmp_path: Path):
     missing = tmp_path / "gone.png"
     deleted = delete_output_image(missing, outputs_dir=tmp_path)
@@ -110,7 +138,7 @@ def test_delete_output_image_refuses_outside_dir(tmp_path: Path):
         outside.unlink(missing_ok=True)
 
 
-def test_delete_output_image_refuses_non_png(tmp_path: Path):
+def test_delete_output_image_refuses_non_image(tmp_path: Path):
     path = tmp_path / "notes.txt"
     path.write_text("keep", encoding="utf-8")
     assert delete_output_image(path, outputs_dir=tmp_path) is None

@@ -6,14 +6,18 @@ from pathlib import Path
 from zimage.config import (
     DEFAULT_DTYPE,
     DEFAULT_HEIGHT,
+    DEFAULT_IMAGE_FORMAT,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_QUANTIZE_MODULES,
     DEFAULT_WIDTH,
     GALLERY_LIMIT,
+    IMAGE_FORMAT_CHOICES,
+    JPEG_QUALITY,
     OUTPUTS_DIR,
     PRECISION_CHOICES,
     QUANTIZE_CHOICES,
     apply_telemetry_defaults,
+    canonical_image_format,
     canonical_precision,
     default_lora_dir,
     is_truthy,
@@ -57,6 +61,21 @@ def test_canonical_precision_aliases():
     assert canonical_precision("unknown") == "bfloat16"
     assert canonical_precision(None) == "bfloat16"
     assert canonical_precision("   ") == "bfloat16"
+
+
+def test_image_format_defaults():
+    assert IMAGE_FORMAT_CHOICES == ["png", "jpeg"]
+    assert DEFAULT_IMAGE_FORMAT == "jpeg"
+    assert JPEG_QUALITY == 95
+
+
+def test_canonical_image_format():
+    assert canonical_image_format("JPEG") == "jpeg"
+    assert canonical_image_format("jpg") == "jpeg"
+    assert canonical_image_format("PNG") == "png"
+    assert canonical_image_format("unknown") == "jpeg"
+    assert canonical_image_format(None) == "jpeg"
+    assert canonical_image_format("   ") == "jpeg"
 
 
 def test_parse_resolution_preset():

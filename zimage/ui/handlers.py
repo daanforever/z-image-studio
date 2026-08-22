@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import threading
 from collections.abc import Generator
+from pathlib import Path
 
 import gradio as gr
 
@@ -18,7 +19,14 @@ from zimage.config import (
     parse_quantize_modules,
     parse_resolution,
 )
-from zimage.engine import ensure_pipeline, generate_image, list_output_images, runtime_status, unload_pipeline
+from zimage.engine import (
+    delete_output_image,
+    ensure_pipeline,
+    generate_image,
+    list_output_images,
+    runtime_status,
+    unload_pipeline,
+)
 from zimage.engine.lora import (
     DEFAULT_STRENGTH,
     list_lora_files,
@@ -40,6 +48,100 @@ def request_stop() -> None:
 def load_gallery(output_dir=None) -> list[str]:
     """Populate the Output gallery from disk on page load."""
     return list_output_images(outputs_dir=parse_output_dir(output_dir))
+
+
+def load_gallery_with_index(output_dir=None) -> tuple[list[str], int | None]:
+    """Populate the Output gallery and reset selection to the newest item."""
+    items = load_gallery(output_dir)
+    return items, 0 if items else None
+
+
+def _gallery_item_path(item) -> str | None:
+    """Extract a filesystem path from a Gradio gallery item, if present."""
+    if item is None:
+        return None
+    if isinstance(item, (str, Path)):
+        text = str(item).strip()
+        return text or None
+    if isinstance(item, dict):
+        for key in ("path", "name", "orig_name"):
+            value = item.get(key)
+            if value:
+                return str(value)
+        image = item.get("image")
+        if isinstance(image, dict):
+            for key in ("path", "name", "orig_name"):
+                value = image.get(key)
+                if value:
+                    return str(value)
+        if isinstance(image, str) and image.strip():
+            return image.strip()
+    if isinstance(item, (list, tuple)) and item:
+        return _gallery_item_path(item[0])
+    return None
+
+
+def _path_under_dir(path: str | Path, directory: Path) -> bool:
+    try:
+        Path(path).resolve().relative_to(directory.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def set_gallery_index(evt: gr.SelectData) -> int | None:
+    """Track the previewed gallery index from select events."""
+    index = getattr(evt, "index", None)
+    if index is None:
+        return None
+    try:
+        return int(index)
+    except (TypeError, ValueError):
+        return None
+
+
+def delete_preview_image(gallery, selected_index, output_dir=None):
+    """Remove the previewed PNG from disk and refresh the gallery."""
+    items = list(gallery or [])
+    outputs_path = parse_output_dir(output_dir)
+
+    if not items:
+        gr.Warning("No image to delete.")
+        return items, None, format_status(extra="No image to delete.")
+
+    try:
+        index = 0 if selected_index is None else int(selected_index)
+    except (TypeError, ValueError):
+        index = -1
+    if index < 0 or index >= len(items):
+        gr.Warning("No image to delete.")
+        return items, selected_index, format_status(extra="No image to delete.")
+
+    candidate = _gallery_item_path(items[index])
+    if candidate is None or not _path_under_dir(candidate, outputs_path):
+        disk_paths = list_output_images(outputs_dir=outputs_path)
+        if index < len(disk_paths):
+            candidate = disk_paths[index]
+
+    if not candidate:
+        gr.Warning("No image to delete.")
+        return items, selected_index, format_status(extra="No image to delete.")
+
+    deleted = delete_output_image(candidate, outputs_dir=outputs_path)
+    if deleted is None:
+        log_error(f"Refused to delete path outside Output dir: {candidate}")
+        raise gr.Error("Cannot delete a file outside the Output dir.")
+
+    remaining = list_output_images(outputs_dir=outputs_path)
+    if remaining:
+        new_index = min(index, len(remaining) - 1)
+    else:
+        new_index = None
+    return (
+        remaining,
+        new_index,
+        format_status(extra=f"Deleted `{deleted}`."),
+    )
 
 
 def _parse_batch_count(batch_count) -> int:

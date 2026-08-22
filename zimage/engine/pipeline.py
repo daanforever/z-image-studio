@@ -280,6 +280,31 @@ def list_output_images(
     return [str(path) for path in paths[: max(0, cap)]]
 
 
+def delete_output_image(
+    path: str | Path,
+    outputs_dir: Path | None = None,
+) -> Path | None:
+    """Unlink a PNG under outputs_dir. Returns the path, or None if refused."""
+    directory = (outputs_dir or OUTPUTS_DIR).resolve()
+    try:
+        target = Path(path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if target.suffix.lower() != ".png":
+        return None
+    try:
+        target.relative_to(directory)
+    except ValueError:
+        return None
+    if target.exists() and not target.is_file():
+        return None
+    try:
+        target.unlink(missing_ok=True)
+    except OSError:
+        return None
+    return target
+
+
 def _pipeline_cache_hit(
     model_id: str,
     device: str,

@@ -4,7 +4,13 @@ from pathlib import Path
 
 from PIL import Image
 
-from zimage.engine import ensure_pipeline, list_output_images, save_image, unload_pipeline
+from zimage.engine import (
+    delete_output_image,
+    ensure_pipeline,
+    list_output_images,
+    save_image,
+    unload_pipeline,
+)
 from zimage.engine import pipeline as pipeline_mod
 
 
@@ -76,6 +82,39 @@ def test_list_output_images_caps_at_gallery_limit(tmp_path: Path, monkeypatch):
         os.utime(path, (1_700_000_000 + i, 1_700_000_000 + i))
     paths = list_output_images(outputs_dir=tmp_path)
     assert len(paths) == 3
+
+
+def test_delete_output_image_removes_png(tmp_path: Path):
+    path = tmp_path / "zimage-1.png"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    deleted = delete_output_image(path, outputs_dir=tmp_path)
+    assert deleted == path.resolve()
+    assert not path.exists()
+
+
+def test_delete_output_image_missing_file_succeeds(tmp_path: Path):
+    missing = tmp_path / "gone.png"
+    deleted = delete_output_image(missing, outputs_dir=tmp_path)
+    assert deleted == missing.resolve()
+    assert not missing.exists()
+
+
+def test_delete_output_image_refuses_outside_dir(tmp_path: Path):
+    outside = tmp_path.parent / "outside.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+    try:
+        assert delete_output_image(outside, outputs_dir=tmp_path) is None
+        assert outside.exists()
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_delete_output_image_refuses_non_png(tmp_path: Path):
+    path = tmp_path / "notes.txt"
+    path.write_text("keep", encoding="utf-8")
+    assert delete_output_image(path, outputs_dir=tmp_path) is None
+    assert path.exists()
+
 
 def test_ensure_pipeline_demo_skips_load(monkeypatch):
     monkeypatch.setattr("zimage.engine.pipeline.resolve_device", lambda _device: "demo")

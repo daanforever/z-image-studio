@@ -23,11 +23,13 @@ from zimage.config import (
 )
 from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import (
+    delete_preview_image,
     generate,
-    load_gallery,
+    load_gallery_with_index,
     load_model,
     refresh_loras,
     request_stop,
+    set_gallery_index,
     sync_lora_weights,
     unload_model,
 )
@@ -174,6 +176,12 @@ def build_ui() -> gr.Blocks:
                     )
 
             with gr.Column(scale=6):
+                gallery_index = gr.State(0)
+                delete_btn = gr.Button(
+                    "Delete",
+                    render=False,
+                    elem_id="studio-gallery-delete",
+                )
                 gallery = gr.Gallery(
                     label="Output",
                     columns=1,
@@ -182,6 +190,13 @@ def build_ui() -> gr.Blocks:
                     preview=True,
                     format="png",
                     elem_id="output-gallery",
+                    buttons=[
+                        "share",
+                        "download",
+                        "download_all",
+                        "fullscreen",
+                        delete_btn,
+                    ],
                 )
                 used_seed = gr.Textbox(label="Used seed", interactive=False)
                 status = gr.Markdown(format_status(), elem_id="status-md")
@@ -246,7 +261,14 @@ def build_ui() -> gr.Blocks:
             show_progress_on=status,
         )
         stop_btn.click(request_stop, cancels=[generate_event])
-        demo.load(load_gallery, inputs=[output_dir], outputs=gallery)
+        generate_event.then(lambda: 0, outputs=gallery_index)
+        delete_btn.click(
+            delete_preview_image,
+            inputs=[gallery, gallery_index, output_dir],
+            outputs=[gallery, gallery_index, status],
+        )
+        gallery.select(set_gallery_index, outputs=gallery_index)
+        demo.load(load_gallery_with_index, inputs=[output_dir], outputs=[gallery, gallery_index])
 
         gr.Markdown(
             """

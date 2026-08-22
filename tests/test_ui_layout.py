@@ -176,13 +176,50 @@ def test_output_gallery_starts_in_preview(monkeypatch):
 def test_gallery_loads_on_demo_load(monkeypatch):
     monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
     demo = build_ui()
-    load_fns = _fns_named(demo, "load_gallery")
+    load_fns = _fns_named(demo, "load_gallery_with_index")
     assert len(load_fns) == 1
     load_fn = load_fns[0]
     input_ids = [getattr(block, "elem_id", None) for block in load_fn.inputs]
     output_ids = [getattr(block, "elem_id", None) for block in load_fn.outputs]
     assert input_ids == ["studio-output-dir"]
-    assert output_ids == ["output-gallery"]
+    assert output_ids == ["output-gallery", None]
+
+
+def test_output_gallery_has_delete_button(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    gallery = _block_by_elem_id(demo, "output-gallery")
+    buttons = list(getattr(gallery, "buttons", None) or [])
+    assert "share" in buttons
+    assert "download" in buttons
+    assert "download_all" in buttons
+    assert "fullscreen" in buttons
+    custom = [b for b in buttons if not isinstance(b, str)]
+    assert len(custom) == 1
+    delete_btn = custom[0]
+    assert getattr(delete_btn, "elem_id", None) == "studio-gallery-delete"
+    assert delete_btn.value == "Delete"
+
+
+def test_delete_preview_image_event_wired(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    delete_fns = _fns_named(demo, "delete_preview_image")
+    assert len(delete_fns) == 1
+    delete_fn = delete_fns[0]
+    input_ids = [getattr(block, "elem_id", None) for block in delete_fn.inputs]
+    output_ids = [getattr(block, "elem_id", None) for block in delete_fn.outputs]
+    assert "output-gallery" in input_ids
+    assert "studio-output-dir" in input_ids
+    assert "output-gallery" in output_ids
+    assert "status-md" in output_ids
+
+
+def test_gallery_select_updates_index(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    select_fns = _fns_named(demo, "set_gallery_index")
+    assert len(select_fns) == 1
 
 
 def test_lora_events_wired(monkeypatch):

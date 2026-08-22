@@ -11,11 +11,14 @@ import pytest
 from zimage.config import DEFAULT_MODEL, DEFAULT_OUTPUT_DIR, OUTPUTS_DIR
 from zimage.ui.handlers import (
     _image_progress,
+    delete_preview_image,
     generate,
     load_gallery,
+    load_gallery_with_index,
     load_model,
     refresh_loras,
     request_stop,
+    set_gallery_index,
     sync_lora_weights,
     unload_model,
 )
@@ -44,6 +47,107 @@ def test_load_gallery_uses_output_dir(monkeypatch):
     monkeypatch.setattr("zimage.ui.handlers.list_output_images", fake_list)
     load_gallery(r"d:\Projects\DeepSeek\z-image-studio\outputs" + "\\")
     assert captured["outputs_dir"] == Path("d:/Projects/DeepSeek/z-image-studio/outputs")
+
+
+def test_load_gallery_with_index_empty(monkeypatch):
+    monkeypatch.setattr("zimage.ui.handlers.list_output_images", lambda outputs_dir=None: [])
+    items, index = load_gallery_with_index()
+    assert items == []
+    assert index is None
+
+
+def test_load_gallery_with_index_resets_to_zero(monkeypatch):
+    monkeypatch.setattr(
+        "zimage.ui.handlers.list_output_images",
+        lambda outputs_dir=None: ["a.png", "b.png"],
+    )
+    items, index = load_gallery_with_index()
+    assert items == ["a.png", "b.png"]
+    assert index == 0
+
+
+def test_set_gallery_index_from_select():
+    class Evt:
+        index = 2
+
+    assert set_gallery_index(Evt()) == 2
+
+
+def test_delete_preview_image_removes_selected(tmp_path: Path, monkeypatch):
+    newer = tmp_path / "zimage-new.png"
+    older = tmp_path / "zimage-old.png"
+    newer.write_bytes(b"\x89PNG\r\n\x1a\n")
+    older.write_bytes(b"\x89PNG\r\n\x1a\n")
+    import os
+
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    os.utime(newer, (1_700_000_100, 1_700_000_100))
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status=None, extra="": extra)
+
+    items, index, status = delete_preview_image(
+        [str(newer), str(older)],
+        0,
+        str(tmp_path),
+    )
+    assert items == [str(older)]
+    assert index == 0
+    assert not newer.exists()
+    assert older.exists()
+    assert "Deleted" in status
+    assert "zimage-new.png" in status
+
+
+def test_delete_preview_image_empty_gallery(monkeypatch):
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status=None, extra="": extra)
+    items, index, status = delete_preview_image([], 0, "./outputs")
+    assert items == []
+    assert index is None
+    assert "No image to delete" in status
+
+
+def test_delete_preview_image_falls_back_to_disk_list(tmp_path: Path, monkeypatch):
+    disk = [str(tmp_path / "a.png"), str(tmp_path / "b.png")]
+    for path in disk:
+        Path(path).write_bytes(b"\x89PNG\r\n\x1a\n")
+    captured = {}
+
+    def fake_list(outputs_dir=None):
+        captured["outputs_dir"] = outputs_dir
+        return list(disk)
+
+    def fake_delete(path, outputs_dir=None):
+        captured["deleted"] = (str(path), outputs_dir)
+        Path(path).unlink()
+        disk[:] = [p for p in disk if p != str(path)]
+        return Path(path).resolve()
+
+    monkeypatch.setattr("zimage.ui.handlers.list_output_images", fake_list)
+    monkeypatch.setattr("zimage.ui.handlers.delete_output_image", fake_delete)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status=None, extra="": extra)
+
+    # PIL images have no path — fall back to disk listing by index.
+    items, index, status = delete_preview_image(
+        [Image.new("RGB", (2, 2), "red"), Image.new("RGB", (2, 2), "blue")],
+        1,
+        str(tmp_path),
+    )
+    assert captured["deleted"][0] == str(tmp_path / "b.png")
+    assert captured["deleted"][1] == tmp_path
+    assert items == [str(tmp_path / "a.png")]
+    assert index == 0
+    assert "Deleted" in status
+
+
+def test_delete_preview_image_refuses_outside_path(tmp_path: Path, monkeypatch):
+    outside = tmp_path.parent / "outside.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr("zimage.ui.handlers.list_output_images", lambda outputs_dir=None: [])
+    monkeypatch.setattr("zimage.ui.handlers.delete_output_image", lambda *_a, **_k: None)
+    try:
+        with pytest.raises(gr.Error, match="Output dir"):
+            delete_preview_image([str(outside)], 0, str(tmp_path))
+    finally:
+        outside.unlink(missing_ok=True)
 
 
 def _drain(gen):

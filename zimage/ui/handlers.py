@@ -11,8 +11,10 @@ import gradio as gr
 from zimage.config import (
     DEFAULT_BATCH,
     DEFAULT_MODEL,
+    DEFAULT_OUTPUT_DIR,
     GALLERY_LIMIT,
     MAX_BATCH,
+    parse_output_dir,
     parse_quantize_modules,
     parse_resolution,
 )
@@ -35,9 +37,9 @@ def request_stop() -> None:
     _stop_event.set()
 
 
-def load_gallery() -> list[str]:
+def load_gallery(output_dir=None) -> list[str]:
     """Populate the Output gallery from disk on page load."""
-    return list_output_images()
+    return list_output_images(outputs_dir=parse_output_dir(output_dir))
 
 
 def _parse_batch_count(batch_count) -> int:
@@ -162,6 +164,7 @@ def generate(
     vae_tiling: bool,
     quantize_modules=None,
     batch_count=DEFAULT_BATCH,
+    output_dir=DEFAULT_OUTPUT_DIR,
     gallery: list | None = None,
     lora_dir: str = "",
     lora_names=None,
@@ -174,6 +177,7 @@ def generate(
         raise gr.Error("Enter a prompt.")
 
     count = _parse_batch_count(batch_count)
+    outputs_path = parse_output_dir(output_dir)
     quantize_transformer, quantize_text_encoder = parse_quantize_modules(quantize_modules)
     _stop_event.clear()
 
@@ -213,6 +217,7 @@ def generate(
                 quantize_text_encoder=quantize_text_encoder,
                 loras=loras,
                 progress=image_progress,
+                outputs_dir=outputs_path,
             )
         except Exception as exc:  # noqa: BLE001
             message = _offline_hint(str(exc))

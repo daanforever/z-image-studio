@@ -8,7 +8,7 @@ from PIL import Image
 import gradio as gr
 import pytest
 
-from zimage.config import DEFAULT_MODEL
+from zimage.config import DEFAULT_MODEL, DEFAULT_OUTPUT_DIR, OUTPUTS_DIR
 from zimage.ui.handlers import (
     _image_progress,
     generate,
@@ -23,11 +23,27 @@ import zimage.ui.handlers as handlers
 
 
 def test_load_gallery_returns_disk_paths(monkeypatch):
-    monkeypatch.setattr(
-        "zimage.ui.handlers.list_output_images",
-        lambda: ["outputs/a.png", "outputs/b.png"],
-    )
+    captured = {}
+
+    def fake_list(outputs_dir=None):
+        captured["outputs_dir"] = outputs_dir
+        return ["outputs/a.png", "outputs/b.png"]
+
+    monkeypatch.setattr("zimage.ui.handlers.list_output_images", fake_list)
     assert load_gallery() == ["outputs/a.png", "outputs/b.png"]
+    assert captured["outputs_dir"] == OUTPUTS_DIR
+
+
+def test_load_gallery_uses_output_dir(monkeypatch):
+    captured = {}
+
+    def fake_list(outputs_dir=None):
+        captured["outputs_dir"] = outputs_dir
+        return []
+
+    monkeypatch.setattr("zimage.ui.handlers.list_output_images", fake_list)
+    load_gallery(r"d:\Projects\DeepSeek\z-image-studio\outputs" + "\\")
+    assert captured["outputs_dir"] == Path("d:/Projects/DeepSeek/z-image-studio/outputs")
 
 
 def _drain(gen):
@@ -53,6 +69,7 @@ def _generate(
     vae_tiling=False,
     quantize_modules=None,
     batch_count=1,
+    output_dir=DEFAULT_OUTPUT_DIR,
     gallery=None,
     lora_dir="",
     lora_names=None,
@@ -75,6 +92,7 @@ def _generate(
             vae_tiling,
             quantize_modules,
             batch_count,
+            output_dir,
             gallery,
             lora_dir,
             lora_names,
@@ -113,6 +131,7 @@ def test_generate_success_prepends_gallery(monkeypatch):
         assert kwargs["width"] == 512
         assert kwargs["height"] == 384
         assert kwargs["seed"] == 42
+        assert kwargs["outputs_dir"] == Path("outputs")
         return fake, 42, {"device": "cpu", "device_name": "CPU", "loaded": True}
 
     monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
@@ -129,6 +148,34 @@ def test_generate_success_prepends_gallery(monkeypatch):
     assert used == "42"
     assert seed == 42
     assert status == "ok"
+
+
+def test_generate_passes_windows_output_dir(monkeypatch):
+    captured = {}
+
+    def fake_generate_image(*_args, **kwargs):
+        captured["outputs_dir"] = kwargs["outputs_dir"]
+        return Image.new("RGB", (2, 2), "white"), kwargs["seed"], {}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+
+    _generate(output_dir=r"d:\Projects\DeepSeek\z-image-studio\outputs" + "\\")
+    assert captured["outputs_dir"] == Path("d:/Projects/DeepSeek/z-image-studio/outputs")
+
+
+def test_generate_empty_output_dir_falls_back(monkeypatch):
+    captured = {}
+
+    def fake_generate_image(*_args, **kwargs):
+        captured["outputs_dir"] = kwargs["outputs_dir"]
+        return Image.new("RGB", (2, 2), "white"), kwargs["seed"], {}
+
+    monkeypatch.setattr("zimage.ui.handlers.generate_image", fake_generate_image)
+    monkeypatch.setattr("zimage.ui.handlers.format_status", lambda status, extra="": "ok")
+
+    _generate(output_dir="")
+    assert captured["outputs_dir"] == OUTPUTS_DIR
 
 
 def test_generate_random_seed_and_default_model(monkeypatch):

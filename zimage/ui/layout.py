@@ -11,6 +11,7 @@ from zimage.config import (
     DEFAULT_GUIDANCE,
     DEFAULT_LORA_DIR,
     DEFAULT_MODEL,
+    DEFAULT_OUTPUT_DIR,
     DEFAULT_QUANTIZE_MODULES,
     DEFAULT_RESOLUTION,
     DEFAULT_STEPS,
@@ -70,14 +71,21 @@ def build_ui() -> gr.Blocks:
                         label="Resolution",
                     )
                     steps = gr.Slider(1, 20, value=DEFAULT_STEPS, step=1, label="Steps (Turbo = 9)")
-                batch_count = gr.Number(
-                    value=DEFAULT_BATCH,
-                    precision=0,
-                    minimum=1,
-                    maximum=MAX_BATCH,
-                    label="Batch",
-                    info="Images to generate with incremental seeds (seed, seed+1, …).",
-                )
+                with gr.Row():
+                    batch_count = gr.Number(
+                        value=DEFAULT_BATCH,
+                        precision=0,
+                        minimum=1,
+                        maximum=MAX_BATCH,
+                        label="Batch",
+                        info="Images to generate with incremental seeds (seed, seed+1, …).",
+                    )
+                    output_dir = gr.Textbox(
+                        value=DEFAULT_OUTPUT_DIR,
+                        label="Output dir",
+                        info="Folder for saved PNGs (Windows paths accepted).",
+                        elem_id="studio-output-dir",
+                    )
                 with gr.Row():
                     seed = gr.Number(value=42, precision=0, label="Seed")
                     random_seed = gr.Checkbox(value=True, label="Random seed")
@@ -227,6 +235,7 @@ def build_ui() -> gr.Blocks:
                 vae_tiling,
                 quantize_modules,
                 batch_count,
+                output_dir,
                 gallery,
                 lora_dir,
                 lora_adapters,
@@ -237,7 +246,7 @@ def build_ui() -> gr.Blocks:
             show_progress_on=status,
         )
         stop_btn.click(request_stop, cancels=[generate_event])
-        demo.load(load_gallery, outputs=gallery)
+        demo.load(load_gallery, inputs=[output_dir], outputs=gallery)
 
         gr.Markdown(
             """
@@ -245,7 +254,7 @@ Local Gradio UI for **Tongyi-MAI/Z-Image-Turbo** via `diffusers`.
 The model works best in English and Chinese; Russian is supported but weaker.<br>
 Turbo: **9 steps**, `guidance_scale = 0` — CFG is already baked in during distillation.
 
-Images are saved to `outputs/`.<br>
+Images are saved to the **Output dir** field (default `./outputs`).<br>
 **fp8** / **int8** quantize the checked modules of official **Z-Image-Turbo**
 with torchao.
             """,

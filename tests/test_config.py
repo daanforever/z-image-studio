@@ -6,15 +6,18 @@ from pathlib import Path
 from zimage.config import (
     DEFAULT_DTYPE,
     DEFAULT_HEIGHT,
+    DEFAULT_OUTPUT_DIR,
     DEFAULT_QUANTIZE_MODULES,
     DEFAULT_WIDTH,
     GALLERY_LIMIT,
+    OUTPUTS_DIR,
     PRECISION_CHOICES,
     QUANTIZE_CHOICES,
     canonical_precision,
     default_lora_dir,
     is_truthy,
     load_dotenv,
+    parse_output_dir,
     parse_quantize_modules,
     parse_resolution,
 )
@@ -121,3 +124,27 @@ def test_default_lora_dir_empty_without_env(monkeypatch):
 def test_default_lora_dir_from_env(monkeypatch):
     monkeypatch.setenv("ZIMAGE_LORA_DIR", r"D:\loras")
     assert default_lora_dir() == r"D:\loras"
+
+
+def test_default_output_dir_literal():
+    assert DEFAULT_OUTPUT_DIR == "./outputs"
+
+
+def test_parse_output_dir_empty_falls_back():
+    assert parse_output_dir(None) == OUTPUTS_DIR
+    assert parse_output_dir("") == OUTPUTS_DIR
+    assert parse_output_dir("   ") == OUTPUTS_DIR
+
+
+def test_parse_output_dir_relative():
+    assert parse_output_dir("./outputs") == Path("outputs")
+    assert parse_output_dir("outputs") == Path("outputs")
+
+
+def test_parse_output_dir_windows_path():
+    assert parse_output_dir(r"d:\Projects\DeepSeek\z-image-studio\outputs" + "\\") == Path(
+        "d:/Projects/DeepSeek/z-image-studio/outputs"
+    )
+    assert parse_output_dir('"D:\\Projects\\DeepSeek\\z-image-studio\\outputs\\"') == Path(
+        "D:/Projects/DeepSeek/z-image-studio/outputs"
+    )

@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from zimage.paths import normalize_dir
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -25,6 +27,15 @@ def load_dotenv(path: Path | None = None) -> None:
 load_dotenv()
 
 OUTPUTS_DIR = Path(os.environ.get("ZIMAGE_OUTPUTS", ROOT / "outputs"))
+DEFAULT_OUTPUT_DIR = "./outputs"
+
+
+def parse_output_dir(value: str | None = None) -> Path:
+    """Resolve a UI output directory; empty falls back to OUTPUTS_DIR."""
+    normalized = normalize_dir(value)
+    if not normalized:
+        return OUTPUTS_DIR
+    return Path(normalized)
 
 DEFAULT_MODEL = os.environ.get("ZIMAGE_MODEL", "Tongyi-MAI/Z-Image-Turbo")
 DEFAULT_DEVICE = os.environ.get("ZIMAGE_DEVICE", "auto")

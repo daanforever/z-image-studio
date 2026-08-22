@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import warnings
 
-from zimage.config import DEFAULT_LORA_DIR
+from zimage.config import DEFAULT_LORA_DIR, DEFAULT_OUTPUT_DIR
 from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import generate
 from zimage.ui.layout import build_ui
@@ -153,6 +153,15 @@ def test_generate_event_includes_lora_inputs(monkeypatch):
     assert "studio-lora-dir" in input_ids
     assert "studio-lora-adapters" in input_ids
     assert "studio-lora-weights" in input_ids
+    assert "studio-output-dir" in input_ids
+
+
+def test_output_dir_field_default(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    field = _block_by_elem_id(demo, "studio-output-dir")
+    assert field.value == DEFAULT_OUTPUT_DIR
+    assert field.label == "Output dir"
 
 
 def test_output_gallery_starts_in_preview(monkeypatch):
@@ -170,7 +179,9 @@ def test_gallery_loads_on_demo_load(monkeypatch):
     load_fns = _fns_named(demo, "load_gallery")
     assert len(load_fns) == 1
     load_fn = load_fns[0]
+    input_ids = [getattr(block, "elem_id", None) for block in load_fn.inputs]
     output_ids = [getattr(block, "elem_id", None) for block in load_fn.outputs]
+    assert input_ids == ["studio-output-dir"]
     assert output_ids == ["output-gallery"]
 
 

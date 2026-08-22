@@ -9,6 +9,8 @@ from typing import Any
 
 from safetensors.torch import load_file
 
+from zimage.paths import normalize_dir
+
 LORA_SUFFIXES = {".safetensors", ".pt"}
 DEFAULT_STRENGTH = 1.0
 MIN_STRENGTH = 0.0
@@ -43,18 +45,7 @@ def reset_lora_adapters() -> None:
 
 def normalize_lora_dir(directory: str | None) -> str:
     """Strip quotes, convert backslashes to `/`, and use parent if a LoRA file was pasted."""
-    if directory is None:
-        return ""
-    text = str(directory).strip().strip('"').strip("'").strip()
-    if not text:
-        return ""
-    text = text.replace("\\", "/")
-    path = Path(text)
-    if path.suffix.lower() in LORA_SUFFIXES or path.is_file():
-        path = path.parent
-    if not str(path).strip() or str(path) == ".":
-        return ""
-    return path.as_posix()
+    return normalize_dir(directory, file_suffixes=LORA_SUFFIXES)
 
 
 def list_lora_files(directory: str | None) -> list[str]:

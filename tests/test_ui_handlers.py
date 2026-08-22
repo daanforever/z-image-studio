@@ -11,6 +11,7 @@ import pytest
 from zimage.config import DEFAULT_MODEL, DEFAULT_OUTPUT_DIR, OUTPUTS_DIR
 from zimage.ui.handlers import (
     _image_progress,
+    clear_preview_images,
     delete_preview_image,
     generate,
     load_gallery,
@@ -150,6 +151,57 @@ def test_delete_preview_image_refuses_outside_path(tmp_path: Path, monkeypatch):
             delete_preview_image([str(outside)], 0, str(tmp_path))
     finally:
         outside.unlink(missing_ok=True)
+
+
+def test_clear_preview_images_clears_and_resets_gallery(tmp_path: Path, monkeypatch):
+    captured = {}
+
+    def fake_clear(outputs_dir=None):
+        captured["outputs_dir"] = outputs_dir
+        return 4
+
+    monkeypatch.setattr("zimage.ui.handlers.clear_output_images", fake_clear)
+    monkeypatch.setattr(
+        "zimage.ui.handlers.format_status",
+        lambda status=None, extra="": extra or "ready",
+    )
+    items, index, status = clear_preview_images(str(tmp_path))
+    assert items == []
+    assert index is None
+    assert captured["outputs_dir"] == tmp_path
+    assert "Cleared 4 images" in status
+    assert str(tmp_path) in status
+
+
+def test_clear_preview_images_empty_warns(monkeypatch):
+    monkeypatch.setattr("zimage.ui.handlers.clear_output_images", lambda outputs_dir=None: 0)
+    monkeypatch.setattr(
+        "zimage.ui.handlers.format_status",
+        lambda status=None, extra="": extra or "ready",
+    )
+    warnings = []
+    monkeypatch.setattr(gr, "Warning", lambda msg: warnings.append(msg))
+    items, index, status = clear_preview_images("./outputs")
+    assert items == []
+    assert index is None
+    assert status == "No images to clear."
+    assert warnings == ["No images to clear."]
+
+
+def test_clear_preview_images_uses_default_output_dir(monkeypatch):
+    captured = {}
+
+    def fake_clear(outputs_dir=None):
+        captured["outputs_dir"] = outputs_dir
+        return 1
+
+    monkeypatch.setattr("zimage.ui.handlers.clear_output_images", fake_clear)
+    monkeypatch.setattr(
+        "zimage.ui.handlers.format_status",
+        lambda status=None, extra="": extra or "ready",
+    )
+    clear_preview_images(None)
+    assert captured["outputs_dir"] == OUTPUTS_DIR
 
 
 def _drain(gen):

@@ -20,6 +20,7 @@ from zimage.config import (
 import gradio as gr
 
 from zimage.engine import (
+    clear_output_images,
     delete_output_image,
     ensure_pipeline,
     generate_image,
@@ -141,6 +142,20 @@ def delete_preview_image(gallery, selected_index, output_dir=None):
         remaining,
         new_index,
         format_status(extra=f"Deleted `{deleted}`."),
+    )
+
+
+def clear_preview_images(output_dir=None):
+    """Remove all generated images from the Output dir and refresh the gallery."""
+    outputs_path = parse_output_dir(output_dir)
+    deleted = clear_output_images(outputs_dir=outputs_path)
+    if deleted == 0:
+        gr.Warning("No images to clear.")
+        return [], None, format_status(extra="No images to clear.")
+    return (
+        [],
+        None,
+        format_status(extra=f"Cleared {deleted} images from `{outputs_path}`."),
     )
 
 

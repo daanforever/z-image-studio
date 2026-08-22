@@ -5,6 +5,7 @@ from pathlib import Path
 from PIL import Image
 
 from zimage.engine import (
+    clear_output_images,
     delete_output_image,
     ensure_pipeline,
     list_output_images,
@@ -114,6 +115,56 @@ def test_delete_output_image_refuses_non_png(tmp_path: Path):
     path.write_text("keep", encoding="utf-8")
     assert delete_output_image(path, outputs_dir=tmp_path) is None
     assert path.exists()
+
+
+def test_clear_output_images_missing_dir(tmp_path: Path):
+    missing = tmp_path / "no-such-outputs"
+    assert clear_output_images(outputs_dir=missing) == 0
+
+
+def test_clear_output_images_empty_dir(tmp_path: Path):
+    assert clear_output_images(outputs_dir=tmp_path) == 0
+
+
+def test_clear_output_images_removes_image_suffixes_keeps_others(tmp_path: Path):
+    png = tmp_path / "a.png"
+    jpg = tmp_path / "b.JPG"
+    jpeg = tmp_path / "c.jpeg"
+    txt = tmp_path / "notes.txt"
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    nested_png = nested / "nested.png"
+    for path in (png, jpg, jpeg, nested_png):
+        path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    txt.write_text("keep", encoding="utf-8")
+
+    deleted = clear_output_images(outputs_dir=tmp_path)
+    assert deleted == 3
+    assert not png.exists()
+    assert not jpg.exists()
+    assert not jpeg.exists()
+    assert txt.exists()
+    assert nested_png.exists()
+
+
+def test_clear_output_images_skips_symlink_outside(tmp_path: Path):
+    outside = tmp_path.parent / "outside-clear.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+    link = tmp_path / "linked.png"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        # Symlinks may require elevated privileges on Windows.
+        outside.unlink(missing_ok=True)
+        return
+    try:
+        deleted = clear_output_images(outputs_dir=tmp_path)
+        assert deleted == 0
+        assert outside.exists()
+        assert link.exists()
+    finally:
+        link.unlink(missing_ok=True)
+        outside.unlink(missing_ok=True)
 
 
 def test_ensure_pipeline_demo_skips_load(monkeypatch):

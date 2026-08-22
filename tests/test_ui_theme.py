@@ -10,6 +10,7 @@ def test_build_theme_and_css():
     assert "#status-md" in CUSTOM_CSS
     assert "#studio-navbar" in CUSTOM_CSS
     assert "#studio-navbar-actions" in CUSTOM_CSS
+    assert "#studio-clear-btn" in CUSTOM_CSS
     assert "#studio-stop-btn" in CUSTOM_CSS
     assert "#studio-navbar-actions button" in CUSTOM_CSS
     assert "border-radius: 0.5rem" in CUSTOM_CSS

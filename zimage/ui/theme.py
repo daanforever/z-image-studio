@@ -91,6 +91,37 @@ CUSTOM_CSS = """
     background: currentColor;
     border-radius: 0.08em;
 }
+#studio-clear-btn {
+    position: relative !important;
+}
+#studio-clear-btn::before {
+    content: "";
+    display: block;
+    width: 0.72em;
+    height: 0.72em;
+    font-size: 1rem;
+    margin-top: 0.18em;
+    box-sizing: border-box;
+    border: 0.12em solid currentColor;
+    border-top-width: 0.18em;
+    border-radius: 0.06em 0.06em 0.12em 0.12em;
+    background:
+        linear-gradient(currentColor, currentColor) center 0.18em / 0.1em 0.36em no-repeat,
+        linear-gradient(currentColor, currentColor) 0.16em 0.18em / 0.1em 0.36em no-repeat,
+        linear-gradient(currentColor, currentColor) calc(100% - 0.16em) 0.18em / 0.1em 0.36em no-repeat;
+}
+#studio-clear-btn::after {
+    content: "";
+    display: block;
+    position: absolute;
+    top: 0.38em;
+    left: 50%;
+    width: 0.95em;
+    height: 0.12em;
+    transform: translateX(-50%);
+    background: currentColor;
+    border-radius: 0.06em;
+}
 #generate-btn {
     min-height: 48px;
     font-size: 1rem;

@@ -34,6 +34,7 @@ def test_build_ui_has_navbar(monkeypatch):
     assert "studio-navbar" in ids
     assert "studio-brand" in ids
     assert "studio-navbar-actions" in ids
+    assert "studio-clear-btn" in ids
     assert "studio-stop-btn" in ids
     brand = next(
         block
@@ -221,6 +222,19 @@ def test_delete_preview_image_event_wired(monkeypatch):
     input_ids = [getattr(block, "elem_id", None) for block in delete_fn.inputs]
     output_ids = [getattr(block, "elem_id", None) for block in delete_fn.outputs]
     assert "output-gallery" in input_ids
+    assert "studio-output-dir" in input_ids
+    assert "output-gallery" in output_ids
+    assert "status-md" in output_ids
+
+
+def test_clear_preview_images_event_wired(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    clear_fns = _fns_named(demo, "clear_preview_images")
+    assert len(clear_fns) == 1
+    clear_fn = clear_fns[0]
+    input_ids = [getattr(block, "elem_id", None) for block in clear_fn.inputs]
+    output_ids = [getattr(block, "elem_id", None) for block in clear_fn.outputs]
     assert "studio-output-dir" in input_ids
     assert "output-gallery" in output_ids
     assert "status-md" in output_ids

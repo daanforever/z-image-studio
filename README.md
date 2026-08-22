@@ -9,6 +9,7 @@ Official Turbo recipe from the model card: **9 steps** (8 DiT forwards) and **`g
 - Prompt, resolution presets, seed, batch (incremental seeds), steps, time shift
 - Prompt and LoRA Directory persist in the browser across page reloads
 - Stop in the navbar cancels the rest of the batch without discarding images already generated
+- Clear in the navbar removes generated images (`.png` / `.jpg` / `.jpeg`) from the Output dir
 - Model path: Hugging Face ID **or** a local snapshot
 - Auto-selects `cuda` / `cpu`, VRAM status
 - Precision: **fp8** by default; also `bfloat16` / `float16` / `float32` / `int8` (torchao on checked modules)

@@ -43,6 +43,8 @@ _lock = threading.Lock()
 _pipe: Any = None
 _pipe_key: tuple | None = None
 
+OUTPUT_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
+
 
 def _instantiate_pipeline(model_id: str, kwargs: dict[str, Any]):
     last_error: Exception | None = None
@@ -303,6 +305,33 @@ def delete_output_image(
     except OSError:
         return None
     return target
+
+
+def clear_output_images(outputs_dir: Path | None = None) -> int:
+    """Unlink top-level png/jpg/jpeg files under outputs_dir. Returns count deleted."""
+    directory = outputs_dir or OUTPUTS_DIR
+    if not directory.is_dir():
+        return 0
+    resolved = directory.resolve()
+    deleted = 0
+    for child in directory.iterdir():
+        if not child.is_file():
+            continue
+        if child.suffix.lower() not in OUTPUT_IMAGE_SUFFIXES:
+            continue
+        try:
+            target = child.resolve()
+            target.relative_to(resolved)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if target.exists() and not target.is_file():
+            continue
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            continue
+        deleted += 1
+    return deleted
 
 
 def _pipeline_cache_hit(

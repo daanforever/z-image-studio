@@ -23,6 +23,7 @@ import gradio as gr
 
 from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import (
+    clear_preview_images,
     delete_preview_image,
     generate,
     load_gallery_with_index,
@@ -38,21 +39,26 @@ from zimage.ui.handlers import (
 from zimage.ui.status import format_status
 
 
-def build_navbar() -> gr.Button:
-    """Bootstrap-style top bar: brand on the left, Stop on the right."""
+def build_navbar() -> tuple[gr.Button, gr.Button]:
+    """Bootstrap-style top bar: brand on the left, Clear and Stop on the right."""
     with gr.Row(elem_id="studio-navbar", equal_height=True, min_height=52):
         gr.HTML(
             '<span class="studio-brand">Studio</span>',
             elem_id="studio-brand",
         )
         with gr.Row(elem_id="studio-navbar-actions", equal_height=True):
+            clear_btn = gr.Button(
+                "Clear",
+                elem_id="studio-clear-btn",
+                size="sm",
+            )
             stop_btn = gr.Button(
                 "Stop",
                 variant="stop",
                 elem_id="studio-stop-btn",
                 size="sm",
             )
-    return stop_btn
+    return clear_btn, stop_btn
 
 
 def _gallery_buttons(delete_btn, *, share: bool) -> list:
@@ -68,7 +74,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
         title="Z-Image-Turbo Studio",
         fill_height=True,
     ) as demo:
-        stop_btn = build_navbar()
+        clear_btn, stop_btn = build_navbar()
         ui_prefs = gr.BrowserState(
             {"prompt": "", "lora_dir": normalize_lora_dir(DEFAULT_LORA_DIR)},
             storage_key="zimage-studio-ui-prefs",
@@ -275,6 +281,11 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
         )
         generate_btn.click(save_ui_prefs, inputs=[prompt, lora_dir], outputs=ui_prefs)
         stop_btn.click(request_stop, cancels=[generate_event])
+        clear_btn.click(
+            clear_preview_images,
+            inputs=[output_dir],
+            outputs=[gallery, gallery_index, status],
+        )
         generate_event.then(lambda: 0, outputs=gallery_index)
         delete_btn.click(
             delete_preview_image,

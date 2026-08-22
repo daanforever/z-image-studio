@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from zimage.config import load_dotenv as _load_dotenv  # noqa: E402, F401
+
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 TINY_LORA_DIR = FIXTURES_DIR / "loras"
 TINY_LORA_FILE = TINY_LORA_DIR / "tiny_zimage_lora.safetensors"

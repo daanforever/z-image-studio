@@ -12,16 +12,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def load_dotenv(path: Path | None = None) -> None:
     env_path = path or ROOT / ".env"
-    if not env_path.is_file():
-        return
-    for raw in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+    if env_path.is_file():
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+    apply_telemetry_defaults()
+
+
+def apply_telemetry_defaults() -> None:
+    """Opt out of Gradio / Hub telemetry unless already set (e.g. in .env)."""
+    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 
 load_dotenv()
@@ -109,6 +115,9 @@ RESOLUTION_PRESETS = [
 ]
 
 EXAMPLE_PROMPTS = [
+    [
+        "Funny girl fights a cat"
+    ],
     [
         "Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights."
     ],

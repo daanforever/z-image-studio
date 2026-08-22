@@ -192,7 +192,7 @@ def test_output_gallery_has_delete_button(monkeypatch):
     demo = build_ui()
     gallery = _block_by_elem_id(demo, "output-gallery")
     buttons = list(getattr(gallery, "buttons", None) or [])
-    assert "share" in buttons
+    assert "share" not in buttons
     assert "download" in buttons
     assert "download_all" in buttons
     assert "fullscreen" in buttons
@@ -201,6 +201,15 @@ def test_output_gallery_has_delete_button(monkeypatch):
     delete_btn = custom[0]
     assert getattr(delete_btn, "elem_id", None) == "studio-gallery-delete"
     assert delete_btn.value == "Delete"
+
+
+def test_output_gallery_share_button_only_when_share(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui(share=True)
+    gallery = _block_by_elem_id(demo, "output-gallery")
+    buttons = list(getattr(gallery, "buttons", None) or [])
+    assert "share" in buttons
+    assert buttons[0] == "share"
 
 
 def test_delete_preview_image_event_wired(monkeypatch):

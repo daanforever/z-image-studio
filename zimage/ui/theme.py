@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from zimage import config as _config  # noqa: F401 — telemetry defaults before Gradio
 import gradio as gr
 
 COLOR_SCHEME_HEAD = '<meta name="color-scheme" content="dark light">'
@@ -97,7 +98,7 @@ CUSTOM_CSS = """
     letter-spacing: 0.01em;
 }
 #status-md {
-    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.875rem;
 }
 .studio-footer,
@@ -195,17 +196,8 @@ def build_theme() -> gr.themes.Base:
         primary_hue="neutral",
         secondary_hue="neutral",
         neutral_hue="neutral",
-        font=[
-            gr.themes.GoogleFont("Instrument Sans", weights=(400, 500, 600, 700)),
-            "ui-sans-serif",
-            "system-ui",
-            "sans-serif",
-        ],
-        font_mono=[
-            gr.themes.GoogleFont("IBM Plex Mono", weights=(400, 500)),
-            "ui-monospace",
-            "monospace",
-        ],
+        font=["ui-sans-serif", "system-ui", "sans-serif"],
+        font_mono=["ui-monospace", "monospace"],
     ).set(
         # Page — Material #121212, not #000 and not blue-tinted slate
         body_background_fill="*neutral_50",

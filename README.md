@@ -55,6 +55,8 @@ The simplest path on this machine is `launch.bat`. It sets:
 | `HF_HUB_CACHE` | `E:\Backup\huggingface\hub` |
 | `HF_HOME` | `E:\Backup\huggingface` |
 | `HF_HUB_OFFLINE` | `0` (Hub downloads allowed) |
+| `GRADIO_ANALYTICS_ENABLED` | `False` (opt in via `.env`) |
+| `HF_HUB_DISABLE_TELEMETRY` | `1` (set `0` in `.env` to enable) |
 | `ZIMAGE_MODEL` | `Tongyi-MAI/Z-Image-Turbo` |
 | `ZIMAGE_LORA_DIR` | (unset — set a local folder of LoRA files) |
 | port | `43127` |
@@ -78,7 +80,18 @@ set ZIMAGE_MODEL=E:\Backup\huggingface\hub\models--Tongyi-MAI--Z-Image-Turbo\sna
 python app.py
 ```
 
-Copy `.env.example` to `.env` — the app loads those variables on startup.
+Copy `.env.example` to `.env` — the app loads those variables on startup (existing env wins).
+
+**Telemetry.** After loading `.env`, the app sets `GRADIO_ANALYTICS_ENABLED=False` and `HF_HUB_DISABLE_TELEMETRY=1` if they are not already in the environment. Opt in via `.env` (existing variables are not overwritten):
+
+```
+GRADIO_ANALYTICS_ENABLED=True
+HF_HUB_DISABLE_TELEMETRY=0
+```
+
+Gradio only treats the literal value `True` as enabled.
+
+Gallery **Share** (upload to Hugging Face) is hidden unless you pass `--share`.
 
 ## Linux / macOS
 

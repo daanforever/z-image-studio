@@ -23,7 +23,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     ensure_console_logging()
     args = parse_args(argv)
-    demo = build_ui()
+    demo = build_ui(share=args.share)
     log.info("Starting server at http://%s:%s", args.host, args.port)
     demo.queue(max_size=4).launch(
         server_name=args.host,

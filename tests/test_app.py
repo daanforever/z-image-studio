@@ -37,10 +37,39 @@ def test_main_launches_with_appearance(monkeypatch):
 
     assert captured["server_name"] == "127.0.0.1"
     assert captured["server_port"] == 8000
+    assert captured["share"] is False
     assert captured["theme"] is not None
     assert captured["css"] == CUSTOM_CSS
     assert captured["js"] == CUSTOM_JS
     assert "color-scheme" in captured["head"]
+
+
+def test_main_forwards_share_to_build_ui(monkeypatch):
+    captured = {}
+
+    class FakeDemo:
+        def queue(self, max_size=4):
+            return self
+
+        def launch(self, **kwargs):
+            captured["launch"] = kwargs
+            return None, "", ""
+
+    def fake_build_ui(*, share=False):
+        captured["share"] = share
+        return FakeDemo()
+
+    monkeypatch.setattr("app.build_ui", fake_build_ui)
+    monkeypatch.setattr("app.ensure_console_logging", lambda: None)
+    monkeypatch.setattr("app.log.info", lambda *_args, **_kwargs: None)
+
+    main(["--host", "127.0.0.1", "--port", "8000"])
+    assert captured["share"] is False
+    assert captured["launch"]["share"] is False
+
+    main(["--host", "127.0.0.1", "--port", "8000", "--share"])
+    assert captured["share"] is True
+    assert captured["launch"]["share"] is True
 
 
 def test_module_entrypoint_logs_oserror(monkeypatch, capsys):

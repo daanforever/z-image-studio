@@ -34,6 +34,18 @@ def test_build_theme_and_css():
     assert "color-scheme" in appearance["head"]
 
 
+def test_theme_uses_system_fonts():
+    theme = build_theme()
+    assert "ui-sans-serif" in theme.font
+    assert "ui-monospace" in theme.font_mono
+    assert not any(
+        url and "fonts.googleapis.com" in url for url in theme._stylesheets
+    )
+    assert "IBM Plex" not in CUSTOM_CSS
+    assert "Instrument Sans" not in CUSTOM_CSS
+    assert "ui-monospace" in CUSTOM_CSS
+
+
 def test_gallery_preview_click_opens_fullscreen():
     assert "#output-gallery .media-button" in CUSTOM_JS
     assert 'button[aria-label="Fullscreen"]' in CUSTOM_JS

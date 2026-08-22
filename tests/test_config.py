@@ -13,6 +13,7 @@ from zimage.config import (
     OUTPUTS_DIR,
     PRECISION_CHOICES,
     QUANTIZE_CHOICES,
+    apply_telemetry_defaults,
     canonical_precision,
     default_lora_dir,
     is_truthy,
@@ -83,6 +84,45 @@ def test_is_truthy():
     assert not is_truthy("false")
     assert not is_truthy("")
     assert not is_truthy(None)
+
+
+def test_apply_telemetry_defaults_when_unset(monkeypatch):
+    monkeypatch.delenv("GRADIO_ANALYTICS_ENABLED", raising=False)
+    monkeypatch.delenv("HF_HUB_DISABLE_TELEMETRY", raising=False)
+    apply_telemetry_defaults()
+    assert os.environ["GRADIO_ANALYTICS_ENABLED"] == "False"
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
+
+
+def test_apply_telemetry_defaults_preserves_existing(monkeypatch):
+    monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "True")
+    monkeypatch.setenv("HF_HUB_DISABLE_TELEMETRY", "0")
+    apply_telemetry_defaults()
+    assert os.environ["GRADIO_ANALYTICS_ENABLED"] == "True"
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "0"
+
+
+def test_load_dotenv_can_enable_telemetry(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("GRADIO_ANALYTICS_ENABLED", raising=False)
+    monkeypatch.delenv("HF_HUB_DISABLE_TELEMETRY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "GRADIO_ANALYTICS_ENABLED=True\nHF_HUB_DISABLE_TELEMETRY=0\n",
+        encoding="utf-8",
+    )
+    load_dotenv(env_file)
+    assert os.environ["GRADIO_ANALYTICS_ENABLED"] == "True"
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "0"
+
+
+def test_load_dotenv_missing_file_still_applies_telemetry_defaults(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.delenv("GRADIO_ANALYTICS_ENABLED", raising=False)
+    monkeypatch.delenv("HF_HUB_DISABLE_TELEMETRY", raising=False)
+    load_dotenv(tmp_path / "nope.env")
+    assert os.environ["GRADIO_ANALYTICS_ENABLED"] == "False"
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
 
 
 def test_load_dotenv_setdefault(tmp_path: Path, monkeypatch):

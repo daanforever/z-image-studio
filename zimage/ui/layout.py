@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import gradio as gr
-
 from zimage.config import (
     DEFAULT_BATCH,
     DEFAULT_DEVICE,
@@ -21,6 +19,8 @@ from zimage.config import (
     QUANTIZE_CHOICES,
     RESOLUTION_PRESETS,
 )
+import gradio as gr
+
 from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import (
     delete_preview_image,
@@ -55,7 +55,15 @@ def build_navbar() -> gr.Button:
     return stop_btn
 
 
-def build_ui() -> gr.Blocks:
+def _gallery_buttons(delete_btn, *, share: bool) -> list:
+    buttons: list = []
+    if share:
+        buttons.append("share")
+    buttons.extend(["download", "download_all", "fullscreen", delete_btn])
+    return buttons
+
+
+def build_ui(*, share: bool = False) -> gr.Blocks:
     with gr.Blocks(
         title="Z-Image-Turbo Studio",
         fill_height=True,
@@ -198,13 +206,7 @@ def build_ui() -> gr.Blocks:
                     preview=True,
                     format="png",
                     elem_id="output-gallery",
-                    buttons=[
-                        "share",
-                        "download",
-                        "download_all",
-                        "fullscreen",
-                        delete_btn,
-                    ],
+                    buttons=_gallery_buttons(delete_btn, share=share),
                 )
                 used_seed = gr.Textbox(label="Used seed", interactive=False)
                 status = gr.Markdown(format_status(), elem_id="status-md")

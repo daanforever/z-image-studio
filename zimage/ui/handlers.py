@@ -7,8 +7,6 @@ import threading
 from collections.abc import Generator
 from pathlib import Path
 
-import gradio as gr
-
 from zimage.config import (
     DEFAULT_BATCH,
     DEFAULT_MODEL,
@@ -19,6 +17,8 @@ from zimage.config import (
     parse_quantize_modules,
     parse_resolution,
 )
+import gradio as gr
+
 from zimage.engine import (
     delete_output_image,
     ensure_pipeline,

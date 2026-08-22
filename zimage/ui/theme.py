@@ -94,33 +94,36 @@ CUSTOM_CSS = """
 #studio-clear-btn {
     position: relative !important;
 }
+/* Broom: bristle head (::before) + angled handle (::after) */
 #studio-clear-btn::before {
     content: "";
     display: block;
-    width: 0.72em;
-    height: 0.72em;
-    font-size: 1rem;
-    margin-top: 0.18em;
     box-sizing: border-box;
-    border: 0.12em solid currentColor;
-    border-top-width: 0.18em;
-    border-radius: 0.06em 0.06em 0.12em 0.12em;
+    width: 0.7em;
+    height: 0.5em;
+    font-size: 1rem;
+    margin-top: 0.32em;
+    margin-left: -0.18em;
+    border-radius: 0.06em 0.06em 0.2em 0.2em;
+    transform: rotate(-40deg);
     background:
-        linear-gradient(currentColor, currentColor) center 0.18em / 0.1em 0.36em no-repeat,
-        linear-gradient(currentColor, currentColor) 0.16em 0.18em / 0.1em 0.36em no-repeat,
-        linear-gradient(currentColor, currentColor) calc(100% - 0.16em) 0.18em / 0.1em 0.36em no-repeat;
+        linear-gradient(90deg, transparent 0.12em, currentColor 0.12em, currentColor 0.2em, transparent 0.2em) 0 0.16em / 100% 0.34em no-repeat,
+        linear-gradient(90deg, transparent 0.28em, currentColor 0.28em, currentColor 0.36em, transparent 0.36em) 0 0.16em / 100% 0.34em no-repeat,
+        linear-gradient(90deg, transparent 0.44em, currentColor 0.44em, currentColor 0.52em, transparent 0.52em) 0 0.16em / 100% 0.34em no-repeat,
+        linear-gradient(currentColor, currentColor) 0 0 / 100% 0.16em no-repeat;
 }
 #studio-clear-btn::after {
     content: "";
     display: block;
     position: absolute;
-    top: 0.38em;
-    left: 50%;
-    width: 0.95em;
-    height: 0.12em;
-    transform: translateX(-50%);
+    top: 0.28em;
+    left: calc(50% + 0.08em);
+    width: 0.12em;
+    height: 0.85em;
     background: currentColor;
     border-radius: 0.06em;
+    transform: translateX(-50%) rotate(-40deg);
+    transform-origin: 50% 0;
 }
 #generate-btn {
     min-height: 48px;

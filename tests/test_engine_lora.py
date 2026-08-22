@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import torch
 from safetensors import safe_open
+from safetensors.torch import save_file
 
 from zimage.engine.lora import (
     LoraSpec,
@@ -11,6 +13,7 @@ from zimage.engine.lora import (
     normalize_lora_dir,
     parse_lora_specs,
     reset_lora_adapters,
+    rewrite_lora_inner_dit_keys,
     sync_lora_adapters,
 )
 
@@ -28,6 +31,12 @@ def _touch_loras(directory: Path, *names: str) -> None:
         (directory / name).write_bytes(b"")
 
 
+def _write_lora(path: Path, keys: list[str] | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keys = keys or ["diffusion_model.layers.0.attention.to_q.lora_A.weight"]
+    save_file({key: torch.zeros((1, 1), dtype=torch.float16) for key in keys}, str(path))
+
+
 class _LoraPipe:
     def __init__(self):
         self.loads = []
@@ -35,8 +44,8 @@ class _LoraPipe:
         self.unloads = 0
         self.disables = 0
 
-    def load_lora_weights(self, directory, weight_name=None, adapter_name=None):
-        self.loads.append((directory, weight_name, adapter_name))
+    def load_lora_weights(self, state_dict, weight_name=None, adapter_name=None):
+        self.loads.append((state_dict, adapter_name))
 
     def set_adapters(self, names, adapter_weights=None):
         self.adapters = (list(names), list(adapter_weights))
@@ -165,8 +174,52 @@ def test_parse_lora_specs_empty_directory():
     assert parse_lora_specs("", ["style.safetensors"], [["style.safetensors", 1]]) == ()
 
 
+def test_rewrite_lora_inner_dit_keys_strips_wrapper_segment():
+    wrapped = "diffusion_model._inner_dit.layers.0.attention.to_q.lora_A.weight"
+    portable = "diffusion_model.layers.0.attention.to_q.lora_A.weight"
+    tensor = torch.zeros((1, 1), dtype=torch.float16)
+    rewritten = rewrite_lora_inner_dit_keys({wrapped: tensor})
+    assert list(rewritten) == [portable]
+    assert rewritten[portable] is tensor
+
+
+def test_rewrite_lora_inner_dit_keys_leaves_portable_unchanged():
+    portable = "diffusion_model.layers.0.attention.to_q.lora_A.weight"
+    tensor = torch.zeros((1, 1), dtype=torch.float16)
+    rewritten = rewrite_lora_inner_dit_keys({portable: tensor})
+    assert list(rewritten) == [portable]
+    assert rewritten[portable] is tensor
+
+
+def test_rewrite_lora_inner_dit_keys_strips_dotted_and_leading_prefix():
+    tensor = torch.zeros((1, 1), dtype=torch.float16)
+    portable = "diffusion_model.layers.0.attention.to_q.lora_A.weight"
+    cases = {
+        "inner.dit.layers.0.attention.to_q.lora_A.weight": portable,
+        "diffusion_model.inner.dit.layers.0.attention.to_q.lora_A.weight": portable,
+        "transformer.inner.dit.layers.0.attention.to_q.lora_A.weight": (
+            "transformer.layers.0.attention.to_q.lora_A.weight"
+        ),
+        "_inner_dit.layers.0.attention.to_q.lora_A.weight": portable,
+    }
+    for source, expected in cases.items():
+        rewritten = rewrite_lora_inner_dit_keys({source: tensor})
+        assert list(rewritten) == [expected], source
+        assert rewritten[expected] is tensor
+
+
+def test_rewrite_lora_inner_dit_keys_collision_raises():
+    wrapped = "diffusion_model._inner_dit.layers.0.attention.to_q.lora_A.weight"
+    portable = "diffusion_model.layers.0.attention.to_q.lora_A.weight"
+    a = torch.zeros((1, 1), dtype=torch.float16)
+    b = torch.ones((1, 1), dtype=torch.float16)
+    with pytest.raises(ValueError, match="collision"):
+        rewrite_lora_inner_dit_keys({wrapped: a, portable: b})
+
+
 def test_sync_lora_adapters_loads_and_sets(tmp_path: Path, reset_lora):
-    _touch_loras(tmp_path, "style.safetensors", "char.safetensors")
+    _write_lora(tmp_path / "style.safetensors")
+    _write_lora(tmp_path / "char.safetensors")
     specs = parse_lora_specs(
         str(tmp_path),
         ["style.safetensors", "char.safetensors"],
@@ -175,10 +228,8 @@ def test_sync_lora_adapters_loads_and_sets(tmp_path: Path, reset_lora):
     pipe = _LoraPipe()
     sync_lora_adapters(pipe, specs)
     assert pipe.unloads == 1
-    assert pipe.loads == [
-        (str(tmp_path), "style.safetensors", "style"),
-        (str(tmp_path), "char.safetensors", "char"),
-    ]
+    assert [name for _state, name in pipe.loads] == ["style", "char"]
+    assert all(isinstance(state, dict) for state, _name in pipe.loads)
     assert pipe.adapters == (["style", "char"], [0.8, 1.0])
 
     sync_lora_adapters(pipe, specs)
@@ -186,8 +237,53 @@ def test_sync_lora_adapters_loads_and_sets(tmp_path: Path, reset_lora):
     assert pipe.unloads == 1
 
 
+def test_sync_lora_adapters_loads_pt(tmp_path: Path, reset_lora):
+    path = tmp_path / "style.pt"
+    state = {"diffusion_model.layers.0.attention.to_q.lora_A.weight": torch.zeros((1, 1))}
+    torch.save(state, path)
+    specs = parse_lora_specs(str(tmp_path), ["style.pt"], [["style.pt", 0.9]])
+    pipe = _LoraPipe()
+    sync_lora_adapters(pipe, specs)
+    assert len(pipe.loads) == 1
+    loaded, name = pipe.loads[0]
+    assert name == "style"
+    assert "diffusion_model.layers.0.attention.to_q.lora_A.weight" in loaded
+    assert pipe.adapters == (["style"], [0.9])
+
+
+def test_sync_lora_adapters_retries_after_load_failure(tmp_path: Path, reset_lora):
+    path = tmp_path / "style.safetensors"
+    _write_lora(path)
+    spec = LoraSpec(
+        path=path,
+        filename="style.safetensors",
+        adapter_name="style",
+        scale=1.0,
+    )
+    pipe = _LoraPipe()
+    original_load = pipe.load_lora_weights
+    calls = {"n": 0}
+
+    def flaky_load(state_dict, weight_name=None, adapter_name=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return original_load(state_dict, weight_name=weight_name, adapter_name=adapter_name)
+
+    pipe.load_lora_weights = flaky_load
+    with pytest.raises(RuntimeError, match="boom"):
+        sync_lora_adapters(pipe, (spec,))
+    assert pipe.unloads == 1
+    assert len(pipe.loads) == 0
+
+    sync_lora_adapters(pipe, (spec,))
+    assert pipe.unloads == 2
+    assert len(pipe.loads) == 1
+    assert pipe.adapters == (["style"], [1.0])
+
+
 def test_sync_lora_adapters_empty_unloads(tmp_path: Path, reset_lora):
-    _touch_loras(tmp_path, "style.safetensors")
+    _write_lora(tmp_path / "style.safetensors")
     specs = parse_lora_specs(str(tmp_path), ["style.safetensors"], None)
     pipe = _LoraPipe()
     sync_lora_adapters(pipe, specs)
@@ -261,7 +357,7 @@ def test_list_and_parse_real_fixture(tiny_lora_dir: Path):
     assert specs[0].adapter_name == "tiny_zimage_lora"
 
 
-def test_sync_real_fixture_passes_paths(tiny_lora_dir: Path, reset_lora):
+def test_sync_real_fixture_loads_state_dict(tiny_lora_dir: Path, reset_lora):
     specs = parse_lora_specs(
         str(tiny_lora_dir),
         ["tiny_zimage_lora.safetensors"],
@@ -269,9 +365,34 @@ def test_sync_real_fixture_passes_paths(tiny_lora_dir: Path, reset_lora):
     )
     pipe = _LoraPipe()
     sync_lora_adapters(pipe, specs)
-    assert pipe.loads == [
-        (str(tiny_lora_dir), "tiny_zimage_lora.safetensors", "tiny_zimage_lora"),
-    ]
+    assert len(pipe.loads) == 1
+    state, name = pipe.loads[0]
+    assert name == "tiny_zimage_lora"
+    assert isinstance(state, dict)
+    assert state
+    assert all("_inner_dit" not in key and "inner.dit." not in key for key in state)
     assert pipe.adapters == (["tiny_zimage_lora"], [0.6])
-    # Caller receives an existing on-disk weight file, not an empty stub.
-    assert Path(pipe.loads[0][0], pipe.loads[0][1]).stat().st_size > 1024
+
+
+def test_sync_lora_adapters_rewrites_wrapped_keys(tmp_path: Path, reset_lora):
+    path = tmp_path / "old.safetensors"
+    _write_lora(
+        path,
+        [
+            "diffusion_model._inner_dit.layers.0.attention.to_q.lora_A.weight",
+            "diffusion_model._inner_dit.layers.0.attention.to_q.lora_B.weight",
+        ],
+    )
+    spec = LoraSpec(
+        path=path,
+        filename="old.safetensors",
+        adapter_name="old",
+        scale=1.0,
+    )
+    pipe = _LoraPipe()
+    sync_lora_adapters(pipe, (spec,))
+    state, name = pipe.loads[0]
+    assert name == "old"
+    assert "diffusion_model.layers.0.attention.to_q.lora_A.weight" in state
+    assert "diffusion_model.layers.0.attention.to_q.lora_B.weight" in state
+    assert all("_inner_dit" not in key and "inner.dit." not in key for key in state)

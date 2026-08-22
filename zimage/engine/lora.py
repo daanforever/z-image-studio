@@ -7,10 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from safetensors.torch import load_file
+
 LORA_SUFFIXES = {".safetensors", ".pt"}
 DEFAULT_STRENGTH = 1.0
 MIN_STRENGTH = 0.0
 MAX_STRENGTH = 2.0
+_INNER_DIT_SEGMENT = "._inner_dit."
+_INNER_DIT_PREFIX = "_inner_dit."
+_INNER_DIT_DOTTED = "inner.dit."
+_DIFFUSION_PREFIX = "diffusion_model."
+_TRANSFORMER_PREFIX = "transformer."
 
 _applied_key: tuple | None = None
 _applied_pipe_id: int | None = None
@@ -116,6 +123,17 @@ def status_loras(specs: tuple[LoraSpec, ...] | list[LoraSpec] | None) -> list[di
     return [{"name": spec.filename, "strength": spec.scale} for spec in specs or ()]
 
 
+def rewrite_lora_inner_dit_keys(state_dict: dict) -> dict:
+    """Strip training-wrapper path segments so Diffusers/PEFT match HF Z-Image modules."""
+    rewritten: dict = {}
+    for key, value in state_dict.items():
+        new_key = _rewrite_lora_inner_dit_key(key)
+        if new_key in rewritten:
+            raise ValueError(f"LoRA key collision after rewrite: {new_key!r}")
+        rewritten[new_key] = value
+    return rewritten
+
+
 def sync_lora_adapters(pipe, specs: tuple[LoraSpec, ...] | list[LoraSpec] | None) -> None:
     global _applied_key, _applied_pipe_id
 
@@ -135,19 +153,53 @@ def sync_lora_adapters(pipe, specs: tuple[LoraSpec, ...] | list[LoraSpec] | None
         raise RuntimeError("Pipeline does not support LoRA adapters.")
 
     _unload_loras(pipe)
-    names: list[str] = []
-    scales: list[float] = []
-    for spec in specs:
-        pipe.load_lora_weights(
-            str(spec.path.parent),
-            weight_name=spec.path.name,
-            adapter_name=spec.adapter_name,
-        )
-        names.append(spec.adapter_name)
-        scales.append(spec.scale)
-    pipe.set_adapters(names, adapter_weights=scales)
+    try:
+        names: list[str] = []
+        scales: list[float] = []
+        for spec in specs:
+            state_dict = rewrite_lora_inner_dit_keys(_load_lora_state_dict(spec.path))
+            pipe.load_lora_weights(state_dict, adapter_name=spec.adapter_name)
+            names.append(spec.adapter_name)
+            scales.append(spec.scale)
+        pipe.set_adapters(names, adapter_weights=scales)
+    except Exception:
+        _applied_key = None
+        _applied_pipe_id = None
+        raise
     _applied_key = key
     _applied_pipe_id = pipe_id
+
+
+def _load_lora_state_dict(path: Path) -> dict:
+    suffix = path.suffix.lower()
+    if suffix == ".safetensors":
+        return load_file(str(path))
+    if suffix == ".pt":
+        import torch
+
+        loaded = torch.load(str(path), map_location="cpu", weights_only=True)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"LoRA .pt file must contain a state dict: {path}")
+        return loaded
+    raise ValueError(f"Unsupported LoRA file type: {path.suffix}")
+
+
+def _rewrite_lora_inner_dit_key(key: str) -> str:
+    rewritten = key.replace(_INNER_DIT_SEGMENT, ".")
+    stripped_leading = False
+    if rewritten.startswith(_INNER_DIT_PREFIX):
+        rewritten = rewritten[len(_INNER_DIT_PREFIX) :]
+        stripped_leading = True
+    if _INNER_DIT_DOTTED in rewritten:
+        rewritten = rewritten.replace(_INNER_DIT_DOTTED, "")
+        if rewritten.startswith("."):
+            rewritten = rewritten[1:]
+        stripped_leading = True
+    if stripped_leading and not rewritten.startswith(_DIFFUSION_PREFIX) and not rewritten.startswith(
+        _TRANSFORMER_PREFIX
+    ):
+        rewritten = f"{_DIFFUSION_PREFIX}{rewritten}"
+    return rewritten
 
 
 def _unload_loras(pipe) -> None:

@@ -219,6 +219,22 @@ def sync_lora_weights(selected, current_df=None):
     return rows
 
 
+def save_ui_prefs(prompt, lora_dir) -> dict[str, str]:
+    """Snapshot Prompt and LoRA Directory for browser localStorage."""
+    return {
+        "prompt": "" if prompt is None else str(prompt),
+        "lora_dir": normalize_lora_dir(lora_dir),
+    }
+
+
+def restore_ui_prefs(prefs):
+    """Restore Prompt / LoRA Directory and rescan adapters from the saved dir."""
+    data = prefs if isinstance(prefs, dict) else {}
+    prompt = "" if data.get("prompt") is None else str(data.get("prompt"))
+    lora_dir, adapters, weights = refresh_loras(data.get("lora_dir"), None, None)
+    return prompt, lora_dir, adapters, weights
+
+
 def load_model(
     model_id: str,
     device: str,

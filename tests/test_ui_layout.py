@@ -3,6 +3,8 @@ from __future__ import annotations
 import inspect
 import warnings
 
+import gradio as gr
+
 from zimage.config import DEFAULT_LORA_DIR, DEFAULT_OUTPUT_DIR
 from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import generate
@@ -235,3 +237,56 @@ def test_lora_events_wired(monkeypatch):
         assert "studio-lora-weights" in output_ids
     weight_fns = _fns_named(demo, "sync_lora_weights")
     assert len(weight_fns) == 1
+
+
+def test_prompt_has_elem_id(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    prompt = _block_by_elem_id(demo, "studio-prompt")
+    assert prompt.label == "Prompt"
+
+
+def test_ui_prefs_browser_state(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    states = [
+        block
+        for block in demo.blocks.values()
+        if isinstance(block, gr.BrowserState)
+    ]
+    assert len(states) == 1
+    prefs = states[0]
+    assert prefs.storage_key == "zimage-studio-ui-prefs"
+    assert prefs.secret == "zimage-studio"
+    assert prefs.default_value == {
+        "prompt": "",
+        "lora_dir": normalize_lora_dir(DEFAULT_LORA_DIR),
+    }
+
+
+def test_restore_ui_prefs_on_load(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    restore_fns = _fns_named(demo, "restore_ui_prefs")
+    assert len(restore_fns) == 1
+    restore_fn = restore_fns[0]
+    output_ids = [getattr(block, "elem_id", None) for block in restore_fn.outputs]
+    assert output_ids == [
+        "studio-prompt",
+        "studio-lora-dir",
+        "studio-lora-adapters",
+        "studio-lora-weights",
+    ]
+    assert any(isinstance(block, gr.BrowserState) for block in restore_fn.inputs)
+
+
+def test_save_ui_prefs_events_wired(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    save_fns = _fns_named(demo, "save_ui_prefs")
+    assert len(save_fns) == 4
+    for fn in save_fns:
+        input_ids = [getattr(block, "elem_id", None) for block in fn.inputs]
+        assert "studio-prompt" in input_ids
+        assert "studio-lora-dir" in input_ids
+        assert any(isinstance(block, gr.BrowserState) for block in fn.outputs)

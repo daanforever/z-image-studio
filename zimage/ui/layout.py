@@ -29,6 +29,8 @@ from zimage.ui.handlers import (
     load_model,
     refresh_loras,
     request_stop,
+    restore_ui_prefs,
+    save_ui_prefs,
     set_gallery_index,
     sync_lora_weights,
     unload_model,
@@ -59,12 +61,18 @@ def build_ui() -> gr.Blocks:
         fill_height=True,
     ) as demo:
         stop_btn = build_navbar()
+        ui_prefs = gr.BrowserState(
+            {"prompt": "", "lora_dir": normalize_lora_dir(DEFAULT_LORA_DIR)},
+            storage_key="zimage-studio-ui-prefs",
+            secret="zimage-studio",
+        )
         with gr.Row():
             with gr.Column(scale=5):
                 prompt = gr.Textbox(
                     label="Prompt",
                     lines=5,
                     placeholder="Describe the shot: lighting, lens, composition, on-image text…",
+                    elem_id="studio-prompt",
                 )
                 with gr.Row():
                     resolution = gr.Dropdown(
@@ -233,6 +241,9 @@ def build_ui() -> gr.Blocks:
             inputs=[lora_adapters, lora_weights],
             outputs=lora_weights,
         )
+        prompt.change(save_ui_prefs, inputs=[prompt, lora_dir], outputs=ui_prefs)
+        lora_dir.submit(save_ui_prefs, inputs=[prompt, lora_dir], outputs=ui_prefs)
+        lora_dir.blur(save_ui_prefs, inputs=[prompt, lora_dir], outputs=ui_prefs)
         generate_event = generate_btn.click(
             generate,
             inputs=[
@@ -260,6 +271,7 @@ def build_ui() -> gr.Blocks:
             show_progress="minimal",
             show_progress_on=status,
         )
+        generate_btn.click(save_ui_prefs, inputs=[prompt, lora_dir], outputs=ui_prefs)
         stop_btn.click(request_stop, cancels=[generate_event])
         generate_event.then(lambda: 0, outputs=gallery_index)
         delete_btn.click(
@@ -269,6 +281,11 @@ def build_ui() -> gr.Blocks:
         )
         gallery.select(set_gallery_index, outputs=gallery_index)
         demo.load(load_gallery_with_index, inputs=[output_dir], outputs=[gallery, gallery_index])
+        demo.load(
+            restore_ui_prefs,
+            inputs=[ui_prefs],
+            outputs=[prompt, lora_dir, lora_adapters, lora_weights],
+        )
 
         gr.Markdown(
             """

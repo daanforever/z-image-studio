@@ -18,6 +18,8 @@ from zimage.ui.handlers import (
     load_model,
     refresh_loras,
     request_stop,
+    restore_ui_prefs,
+    save_ui_prefs,
     set_gallery_index,
     sync_lora_weights,
     unload_model,
@@ -761,6 +763,50 @@ def test_generate_lora_error_is_gr_error(monkeypatch, tmp_path: Path):
 def test_refresh_loras_from_fixture(tiny_lora_dir: Path):
     normalized, dropdown, weights = refresh_loras(str(tiny_lora_dir), None, None)
     assert normalized == Path(tiny_lora_dir).as_posix()
+    labels = []
+    for choice in dropdown.choices:
+        if isinstance(choice, (list, tuple)):
+            labels.append(str(choice[0]))
+        else:
+            labels.append(str(choice))
+    assert "tiny_zimage_lora.safetensors" in labels
+    assert weights == []
+
+
+def test_save_ui_prefs_normalizes_lora_dir():
+    prefs = save_ui_prefs("a cat", r"D:\loras\style")
+    assert prefs == {"prompt": "a cat", "lora_dir": "D:/loras/style"}
+
+
+def test_save_ui_prefs_handles_none_prompt():
+    prefs = save_ui_prefs(None, None)
+    assert prefs == {"prompt": "", "lora_dir": ""}
+
+
+def test_restore_ui_prefs_empty_dict():
+    prompt, directory, dropdown, weights = restore_ui_prefs({})
+    assert prompt == ""
+    assert directory == ""
+    assert list(dropdown.choices or []) == []
+    assert weights == []
+
+
+def test_restore_ui_prefs_none():
+    prompt, directory, dropdown, weights = restore_ui_prefs(None)
+    assert prompt == ""
+    assert directory == ""
+    assert list(dropdown.choices or []) == []
+    assert weights == []
+
+
+def test_restore_ui_prefs_from_fixture(tiny_lora_dir: Path):
+    prefs = {
+        "prompt": "sunset",
+        "lora_dir": str(tiny_lora_dir),
+    }
+    prompt, directory, dropdown, weights = restore_ui_prefs(prefs)
+    assert prompt == "sunset"
+    assert directory == Path(tiny_lora_dir).as_posix()
     labels = []
     for choice in dropdown.choices:
         if isinstance(choice, (list, tuple)):

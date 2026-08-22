@@ -84,12 +84,11 @@ CUSTOM_CSS = """
 #studio-stop-btn::before {
     content: "";
     display: block;
-    width: 0.55em;
-    height: 0.9em;
+    width: 0.7em;
+    height: 0.7em;
     font-size: 1rem;
-    background:
-        linear-gradient(currentColor, currentColor) left / 0.22em 100% no-repeat,
-        linear-gradient(currentColor, currentColor) right / 0.22em 100% no-repeat;
+    background: currentColor;
+    border-radius: 0.08em;
 }
 #generate-btn {
     min-height: 48px;

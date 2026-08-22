@@ -37,6 +37,15 @@ def _write_lora(path: Path, keys: list[str] | None = None) -> None:
     save_file({key: torch.zeros((1, 1), dtype=torch.float16) for key in keys}, str(path))
 
 
+class _MoveModule:
+    def __init__(self):
+        self.moved_to = []
+
+    def to(self, device):
+        self.moved_to.append(device)
+        return self
+
+
 class _LoraPipe:
     def __init__(self):
         self.loads = []
@@ -279,6 +288,65 @@ def test_rewrite_lora_inner_dit_keys_collision_raises():
     b = torch.ones((1, 1), dtype=torch.float16)
     with pytest.raises(ValueError, match="collision"):
         rewrite_lora_inner_dit_keys({wrapped: a, portable: b})
+
+
+def test_sync_lora_adapters_moves_transformer_before_fuse(tmp_path: Path, reset_lora):
+    _write_lora(tmp_path / "style.safetensors")
+    specs = parse_lora_specs(str(tmp_path), ["style.safetensors"], None)
+    pipe = _LoraPipe()
+    pipe.transformer = _MoveModule()
+    order = []
+
+    original_to = pipe.transformer.to
+
+    def track_to(device):
+        order.append(("to", device))
+        return original_to(device)
+
+    pipe.transformer.to = track_to
+    original_load = pipe.load_lora_weights
+
+    def track_load(state_dict, weight_name=None, adapter_name=None):
+        order.append("load")
+        return original_load(state_dict, weight_name=weight_name, adapter_name=adapter_name)
+
+    pipe.load_lora_weights = track_load
+    original_fuse = pipe.fuse_lora
+
+    def track_fuse(adapter_names=None, lora_scale=None):
+        order.append("fuse")
+        return original_fuse(adapter_names=adapter_names, lora_scale=lora_scale)
+
+    pipe.fuse_lora = track_fuse
+
+    sync_lora_adapters(pipe, specs, device="cuda")
+    assert order == [("to", "cuda"), "load", "fuse"]
+    assert pipe.transformer.moved_to == ["cuda"]
+
+
+def test_sync_lora_adapters_moves_dit_when_no_transformer(tmp_path: Path, reset_lora):
+    _write_lora(tmp_path / "style.safetensors")
+    specs = parse_lora_specs(str(tmp_path), ["style.safetensors"], None)
+    pipe = _LoraPipe()
+    pipe.dit = _MoveModule()
+    sync_lora_adapters(pipe, specs, device="cuda")
+    assert pipe.dit.moved_to == ["cuda"]
+
+
+def test_sync_lora_adapters_skips_move_without_device(tmp_path: Path, reset_lora):
+    _write_lora(tmp_path / "style.safetensors")
+    specs = parse_lora_specs(str(tmp_path), ["style.safetensors"], None)
+    pipe = _LoraPipe()
+    pipe.transformer = _MoveModule()
+    sync_lora_adapters(pipe, specs)
+    assert pipe.transformer.moved_to == []
+
+
+def test_sync_lora_adapters_empty_skips_device_move(reset_lora):
+    pipe = _LoraPipe()
+    pipe.transformer = _MoveModule()
+    sync_lora_adapters(pipe, (), device="cuda")
+    assert pipe.transformer.moved_to == []
 
 
 def test_sync_lora_adapters_loads_and_sets(tmp_path: Path, reset_lora):

@@ -121,15 +121,53 @@ CUSTOM_CSS = """
 .dark #output-gallery .empty {
     background: #0a0a0a !important;
 }
+#output-gallery .media-button {
+    cursor: zoom-in;
+}
+#output-gallery.fullscreen .media-button {
+    cursor: zoom-out;
+}
+#output-gallery.fullscreen .gallery-container,
+#output-gallery.fullscreen .grid-wrap {
+    height: 100% !important;
+    max-height: none !important;
+}
 footer { display: none !important; }
+"""
+
+# Gradio Gallery preview click cycles prev/next; map it onto the existing fullscreen control.
+CUSTOM_JS = """
+(() => {
+  if (window.__zimageGalleryFullscreenClick) return;
+  window.__zimageGalleryFullscreenClick = true;
+  document.addEventListener(
+    "click",
+    (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const media = target.closest("#output-gallery .media-button");
+      if (!media) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      const gallery = media.closest("#output-gallery");
+      const toggle = gallery && gallery.querySelector(
+        'button[aria-label="Fullscreen"], button[aria-label="Exit fullscreen mode"]'
+      );
+      if (toggle) toggle.click();
+    },
+    true
+  );
+})();
 """
 
 
 def appearance_kwargs() -> dict[str, Any]:
-    """App-level Gradio 6 launch() parameters (theme, css, head)."""
+    """App-level Gradio 6 launch() parameters (theme, css, js, head)."""
     return {
         "theme": build_theme(),
         "css": CUSTOM_CSS,
+        "js": CUSTOM_JS,
         "head": COLOR_SCHEME_HEAD,
     }
 

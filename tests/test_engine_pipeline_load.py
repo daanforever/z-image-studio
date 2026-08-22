@@ -91,7 +91,7 @@ def test_load_pipeline_offline_sets_local_files_only(monkeypatch):
     assert captured["local_files_only"] is True
 
 
-def test_load_pipeline_int8_quantizes_before_device(monkeypatch):
+def test_load_pipeline_int8_quantizes_on_gpu(monkeypatch):
     order = []
 
     class Pipe(_BasePipe):
@@ -108,18 +108,18 @@ def test_load_pipeline_int8_quantizes_before_device(monkeypatch):
     _install_pipe(monkeypatch, Pipe)
     monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
 
-    def fake_apply(pipe, dtype_name, **_kwargs):
-        order.append(("quant", dtype_name))
+    def fake_apply(pipe, dtype_name, **kwargs):
+        order.append(("quant", dtype_name, kwargs.get("device")))
         return "transformer"
 
     monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
 
     pipe = pipeline_mod.load_pipeline("model", "cuda", "int8", False, False)
     assert pipe.moved_to == "cuda"
-    assert order == ["load", ("quant", "int8"), ("to", "cuda")]
+    assert order == ["load", ("quant", "int8", "cuda"), ("to", "cuda")]
 
 
-def test_load_pipeline_fp8_quantizes_before_device(monkeypatch):
+def test_load_pipeline_fp8_quantizes_on_gpu(monkeypatch):
     order = []
 
     class Pipe(_BasePipe):
@@ -137,24 +137,55 @@ def test_load_pipeline_fp8_quantizes_before_device(monkeypatch):
     monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
     monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
 
-    def fake_apply(pipe, dtype_name, **_kwargs):
-        order.append(("quant", dtype_name))
+    def fake_apply(pipe, dtype_name, **kwargs):
+        order.append(("quant", dtype_name, kwargs.get("device")))
         return "transformer"
 
     monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
 
     pipe = pipeline_mod.load_pipeline("model", "cuda", "fp8", False, False)
     assert pipe.moved_to == "cuda"
-    assert order == ["load", ("quant", "fp8"), ("to", "cuda")]
+    assert order == ["load", ("quant", "fp8", "cuda"), ("to", "cuda")]
 
 
-def test_load_pipeline_fp8_retries_after_device(monkeypatch):
+def test_load_pipeline_int8_quantizes_on_cpu_before_offload(monkeypatch):
     order = []
-    attempts = {"n": 0}
 
     class Pipe(_BasePipe):
         def to(self, device):
             order.append(("to", device))
+            return self
+
+        def enable_model_cpu_offload(self):
+            order.append("offload")
+            self.offloaded = True
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            order.append("load")
+            return cls()
+
+    _install_pipe(monkeypatch, Pipe)
+    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
+
+    def fake_apply(pipe, dtype_name, **kwargs):
+        order.append(("quant", dtype_name, kwargs.get("device")))
+        return "transformer"
+
+    monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
+
+    pipe = pipeline_mod.load_pipeline("model", "cuda", "int8", True, False)
+    assert pipe.offloaded is True
+    assert order == ["load", ("quant", "int8", None), "offload"]
+
+
+def test_load_pipeline_int8_quantizes_on_cpu_device(monkeypatch):
+    order = []
+
+    class Pipe(_BasePipe):
+        def to(self, device):
+            order.append(("to", device))
+            self.moved_to = device
             return self
 
         @classmethod
@@ -164,34 +195,16 @@ def test_load_pipeline_fp8_retries_after_device(monkeypatch):
 
     _install_pipe(monkeypatch, Pipe)
     monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
-    monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
 
-    def fake_apply(pipe, dtype_name, **_kwargs):
-        attempts["n"] += 1
-        order.append(("quant", attempts["n"]))
-        if attempts["n"] == 1:
-            raise RuntimeError("fp8 needs CUDA tensors")
+    def fake_apply(pipe, dtype_name, **kwargs):
+        order.append(("quant", dtype_name, kwargs.get("device")))
         return "transformer"
 
     monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
 
-    pipeline_mod.load_pipeline("model", "cuda", "fp8", False, False)
-    assert order == ["load", ("quant", 1), ("to", "cuda"), ("quant", 2)]
-
-
-def test_load_pipeline_fp8_retry_both_fail(monkeypatch):
-    _install_pipe(monkeypatch, _BasePipe)
-    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
-    monkeypatch.setattr("zimage.engine.pipeline.require_fp8_device", lambda _device: None)
-    attempts = {"n": 0}
-
-    def fake_apply(_pipe, _dtype, **_kwargs):
-        attempts["n"] += 1
-        raise RuntimeError(f"fail-{attempts['n']}")
-
-    monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", fake_apply)
-    with pytest.raises(RuntimeError, match=r"fail-2.*CPU attempt: fail-1"):
-        pipeline_mod.load_pipeline("model", "cuda", "fp8", False, False)
+    pipe = pipeline_mod.load_pipeline("model", "cpu", "int8", False, False)
+    assert pipe.moved_to == "cpu"
+    assert order == ["load", ("quant", "int8", None), ("to", "cpu")]
 
 
 def test_load_pipeline_int8_quantize_failure_is_not_retried(monkeypatch):
@@ -202,24 +215,6 @@ def test_load_pipeline_int8_quantize_failure_is_not_retried(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("int8 failed")),
     )
     with pytest.raises(RuntimeError, match="int8 failed"):
-        pipeline_mod.load_pipeline("model", "cuda", "int8", False, False)
-
-
-def test_load_pipeline_post_device_quantize_raises_directly(monkeypatch):
-    _install_pipe(monkeypatch, _BasePipe)
-    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
-    checks = {"n": 0}
-
-    def fake_quantized(_name):
-        checks["n"] += 1
-        return checks["n"] != 2
-
-    monkeypatch.setattr("zimage.engine.pipeline.is_quantized_precision", fake_quantized)
-    monkeypatch.setattr(
-        "zimage.engine.pipeline.apply_quantization",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("gpu quant failed")),
-    )
-    with pytest.raises(RuntimeError, match="gpu quant failed"):
         pipeline_mod.load_pipeline("model", "cuda", "int8", False, False)
 
 
@@ -344,9 +339,18 @@ def test_load_pipeline_fuses_lora_before_quantization(monkeypatch, tmp_path):
     from zimage.engine.lora import LoraSpec, reset_lora_adapters
 
     reset_lora_adapters()
-    order: list[str] = []
+    order: list = []
+
+    class Target:
+        def to(self, device):
+            order.append(("module_to", device))
+            return self
 
     class FusePipe(_BasePipe):
+        def __init__(self):
+            super().__init__()
+            self.transformer = Target()
+
         def load_lora_weights(self, state_dict, weight_name=None, adapter_name=None):
             order.append(f"load:{adapter_name}")
 
@@ -396,7 +400,8 @@ def test_load_pipeline_fuses_lora_before_quantization(monkeypatch, tmp_path):
         loras=(spec,),
     )
     assert called == {"torchao": 1, "apply": 1}
-    assert order[:4] == [
+    assert order[:5] == [
+        ("module_to", "cuda"),
         "load:style",
         "set:['style']:[0.8]",
         "fuse:['style']:0.8",
@@ -405,4 +410,53 @@ def test_load_pipeline_fuses_lora_before_quantization(monkeypatch, tmp_path):
     assert "quantize" in order
     assert order.index("quantize") > order.index("unload")
     assert pipe.moved_to == "cuda"
+    reset_lora_adapters()
+
+
+def test_load_pipeline_fuses_lora_on_cpu_with_offload(monkeypatch, tmp_path):
+    from zimage.engine.lora import LoraSpec, reset_lora_adapters
+
+    reset_lora_adapters()
+    captured = {}
+
+    class FusePipe(_BasePipe):
+        def load_lora_weights(self, state_dict, weight_name=None, adapter_name=None):
+            pass
+
+        def set_adapters(self, names, adapter_weights=None):
+            pass
+
+        def fuse_lora(self, adapter_names=None, lora_scale=None):
+            pass
+
+        def unload_lora_weights(self):
+            pass
+
+    _install_pipe(monkeypatch, FusePipe)
+    monkeypatch.setattr("zimage.engine.pipeline.require_torchao", lambda: None)
+
+    def fake_sync(_pipe, _specs, device=None):
+        captured["device"] = device
+
+    monkeypatch.setattr("zimage.engine.pipeline.sync_lora_adapters", fake_sync)
+    monkeypatch.setattr("zimage.engine.pipeline.apply_quantization", lambda *_a, **_k: "transformer")
+
+    path = tmp_path / "style.safetensors"
+    path.write_bytes(b"")
+    spec = LoraSpec(
+        path=path,
+        filename="style.safetensors",
+        adapter_name="style",
+        scale=1.0,
+    )
+    pipe = pipeline_mod.load_pipeline(
+        "model",
+        "cuda",
+        "int8",
+        True,
+        False,
+        loras=(spec,),
+    )
+    assert captured["device"] is None
+    assert pipe.offloaded is True
     reset_lora_adapters()

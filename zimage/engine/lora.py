@@ -21,6 +21,7 @@ _INNER_DIT_UNDERSCORE = re.compile(r"_?_inner_dit_|inner_dit_")
 _DIFFUSION_PREFIX = "diffusion_model."
 _TRANSFORMER_PREFIX = "transformer."
 _LORA_UNET_PREFIX = "lora_unet_"
+_LORA_MODULE_NAMES = ("transformer", "dit", "unet")
 
 _applied_key: tuple | None = None
 _applied_pipe_id: int | None = None
@@ -142,11 +143,16 @@ def lora_identity_key(specs: tuple[LoraSpec, ...] | list[LoraSpec] | None) -> tu
     return tuple((str(spec.path), spec.adapter_name, spec.scale) for spec in specs or ())
 
 
-def sync_lora_adapters(pipe, specs: tuple[LoraSpec, ...] | list[LoraSpec] | None) -> None:
+def sync_lora_adapters(
+    pipe,
+    specs: tuple[LoraSpec, ...] | list[LoraSpec] | None,
+    device: str | None = None,
+) -> None:
     """Load each LoRA, fuse it into base weights, then unload adapter matrices.
 
     Fusing before quantization keeps VRAM at the base-model footprint. Once fused,
     changing adapters or strength requires a fresh pipeline load (no unfuse).
+    When ``device`` is set, the DiT is moved there first so merge uses GPU kernels.
     """
     global _applied_key, _applied_pipe_id
 
@@ -166,6 +172,8 @@ def sync_lora_adapters(pipe, specs: tuple[LoraSpec, ...] | list[LoraSpec] | None
         raise RuntimeError("Pipeline does not support LoRA adapters.")
 
     try:
+        if device is not None:
+            _move_lora_modules(pipe, device)
         # One adapter at a time so peak memory never holds several A/B sets.
         for spec in specs:
             state_dict = rewrite_lora_inner_dit_keys(_load_lora_state_dict(spec.path))
@@ -179,6 +187,14 @@ def sync_lora_adapters(pipe, specs: tuple[LoraSpec, ...] | list[LoraSpec] | None
         raise
     _applied_key = key
     _applied_pipe_id = pipe_id
+
+
+def _move_lora_modules(pipe, device: str) -> None:
+    for name in _LORA_MODULE_NAMES:
+        module = getattr(pipe, name, None)
+        if module is not None and hasattr(module, "to"):
+            module.to(device)
+            return
 
 
 def _fuse_and_unload(pipe, *, adapter_name: str, scale: float) -> None:

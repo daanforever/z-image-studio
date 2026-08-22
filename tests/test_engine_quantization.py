@@ -134,6 +134,15 @@ class _EvalModule:
         return self
 
 
+class _DeviceModule(_EvalModule):
+    def __init__(self):
+        self.moved_to = []
+
+    def to(self, device):
+        self.moved_to.append(device)
+        return self
+
+
 def _pipe_with_module(attr="transformer", text_encoder=False):
     class Pipe:
         def __init__(self):
@@ -337,3 +346,28 @@ def test_apply_quantization_no_modules_selected(monkeypatch):
     monkeypatch.setattr("zimage.engine.quantization.try_import_torchao", lambda: object())
     with pytest.raises(RuntimeError, match="no modules selected"):
         apply_quantization(_pipe_with_module(text_encoder=True), "int8", False, False)
+
+
+def test_apply_quantization_moves_targets_to_device_before_quantize(monkeypatch):
+    pipe = SimpleNamespace(transformer=_DeviceModule(), text_encoder=_DeviceModule())
+    monkeypatch.setattr("zimage.engine.quantization._scheme_for", lambda _name: "scheme")
+    order = []
+
+    def fake_quantize(module, _scheme):
+        order.append((module, list(module.moved_to)))
+
+    _install_quantize(monkeypatch, fake_quantize)
+    assert apply_quantization(pipe, "fp8", device="cuda") == "transformer, text_encoder"
+    assert pipe.transformer.moved_to == ["cuda"]
+    assert pipe.text_encoder.moved_to == ["cuda"]
+    assert order == [
+        (pipe.transformer, ["cuda"]),
+        (pipe.text_encoder, ["cuda"]),
+    ]
+
+
+def test_apply_quantization_skips_device_move_when_unset(monkeypatch):
+    pipe = _pipe_with_module()
+    monkeypatch.setattr("zimage.engine.quantization._scheme_for", lambda _name: "scheme")
+    _install_quantize(monkeypatch, lambda _module, _scheme: None)
+    assert apply_quantization(pipe, "int8") == "transformer"

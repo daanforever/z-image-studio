@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from zimage.ui.theme import CUSTOM_CSS, appearance_kwargs, build_theme
+from zimage.ui.theme import CUSTOM_CSS, CUSTOM_JS, appearance_kwargs, build_theme
 
 
 def test_build_theme_and_css():
@@ -19,7 +19,16 @@ def test_build_theme_and_css():
     assert "64ch" not in CUSTOM_CSS
     assert "margin: 0 auto" in CUSTOM_CSS
     assert ".gradio-container .app" in CUSTOM_CSS
+    assert "#output-gallery .media-button" in CUSTOM_CSS
+    assert "cursor: zoom-in" in CUSTOM_CSS
     appearance = appearance_kwargs()
     assert appearance["css"] == CUSTOM_CSS
+    assert appearance["js"] == CUSTOM_JS
     assert appearance["theme"] is not None
     assert "color-scheme" in appearance["head"]
+
+
+def test_gallery_preview_click_opens_fullscreen():
+    assert "#output-gallery .media-button" in CUSTOM_JS
+    assert 'button[aria-label="Fullscreen"]' in CUSTOM_JS
+    assert "stopImmediatePropagation" in CUSTOM_JS

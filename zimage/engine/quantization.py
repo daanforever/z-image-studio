@@ -168,8 +168,13 @@ def apply_quantization(
     dtype_name: str,
     quantize_transformer: bool = True,
     quantize_text_encoder: bool = True,
+    device: str | None = None,
 ) -> str:
     """Quantize Linear layers of selected modules in-place.
+
+    When ``device`` is set, each target is moved there before ``quantize_``
+    so conversion can use GPU kernels without loading the whole pipeline at
+    full precision first.
 
     Returns a comma-separated list of quantized module names.
     """
@@ -191,6 +196,8 @@ def apply_quantization(
     scheme = _scheme_for(precision)
     applied: list[str] = []
     for name, module in targets:
+        if device is not None:
+            module.to(device)
         if hasattr(module, "eval"):
             module.eval()
         try:

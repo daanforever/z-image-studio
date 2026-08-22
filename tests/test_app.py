@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from app import main, parse_args
-from zimage.ui.theme import CUSTOM_CSS
+from zimage.ui.theme import CUSTOM_CSS, CUSTOM_JS
 
 
 def test_parse_args_defaults():
@@ -39,6 +39,7 @@ def test_main_launches_with_appearance(monkeypatch):
     assert captured["server_port"] == 8000
     assert captured["theme"] is not None
     assert captured["css"] == CUSTOM_CSS
+    assert captured["js"] == CUSTOM_JS
     assert "color-scheme" in captured["head"]
 
 

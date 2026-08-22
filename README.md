@@ -109,7 +109,7 @@ This app is tuned for Turbo. You can point the model field at full Z-Image, but 
 
 By default Turbo loads in **fp8** (Ada 8.9+ / Blackwell, including RTX 5080; incompatible with CPU offload). **bfloat16** is the full-precision path if you do not need fp8. **int8** if you need CPU offload. Plus **VAE tiling**. These are not Disty0/SDNQ checkpoints: the same `Tongyi-MAI/Z-Image-Turbo` is quantized in-process.
 
-**LoRA:** adapters are fused into the base weights on CPU, then the pipeline is quantized as usual. Steady-state VRAM with LoRA should match the same precision without LoRA (aside from activation memory during a step). Changing the selected adapters or strength requires a full model reload.
+**LoRA:** adapters are fused into the base weights (on GPU when CUDA is used without CPU offload), then the pipeline is quantized as usual. Steady-state VRAM with LoRA should match the same precision without LoRA (aside from activation memory during a step). Changing the selected adapters or strength requires a full model reload.
 
 ## Tests
 

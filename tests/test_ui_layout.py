@@ -155,6 +155,14 @@ def test_generate_event_includes_lora_inputs(monkeypatch):
     assert "studio-lora-weights" in input_ids
 
 
+def test_output_gallery_starts_in_preview(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    gallery = _block_by_elem_id(demo, "output-gallery")
+    assert gallery.preview is True
+    assert gallery.allow_preview is True
+
+
 def test_lora_events_wired(monkeypatch):
     monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
     demo = build_ui()

@@ -158,47 +158,35 @@ def load_pipeline(
 
     pipe = _instantiate_pipeline(model_id, kwargs)
 
-    # Fuse LoRA into base weights on CPU before quantization / device move.
+    # Fuse then quantize on GPU when the model will live there. With CPU
+    # offload, stay on CPU so peak VRAM is already the reduced footprint.
+    work_on_gpu = device == "cuda" and not cpu_offload
     if lora_specs:
-        sync_lora_adapters(pipe, lora_specs)
+        sync_lora_adapters(pipe, lora_specs, device=("cuda" if work_on_gpu else None))
         _reclaim_memory()
 
-    # Prefer quantizing on CPU so peak VRAM is already the reduced footprint.
-    quantized = False
-    cpu_quant_error: Exception | None = None
-    if quantize:
-        try:
-            apply_quantization(
-                pipe,
-                dtype_name,
-                quantize_transformer=quantize_transformer,
-                quantize_text_encoder=quantize_text_encoder,
-            )
-            quantized = True
-        except Exception as exc:  # noqa: BLE001 — fp8 may need CUDA tensors
-            if not (is_fp8_precision(dtype_name) and device == "cuda"):
-                raise
-            cpu_quant_error = exc
+    quantize_on_gpu = quantize and work_on_gpu
+    if quantize and not quantize_on_gpu:
+        apply_quantization(
+            pipe,
+            dtype_name,
+            quantize_transformer=quantize_transformer,
+            quantize_text_encoder=quantize_text_encoder,
+        )
 
     if cpu_offload and device == "cuda":
         pipe.enable_model_cpu_offload()
     else:
-        pipe.to(device)
-
-    if quantize and not quantized:
-        try:
+        if quantize_on_gpu:
             apply_quantization(
                 pipe,
                 dtype_name,
                 quantize_transformer=quantize_transformer,
                 quantize_text_encoder=quantize_text_encoder,
+                device=device,
             )
-        except Exception as exc:  # noqa: BLE001
-            if cpu_quant_error is not None:
-                raise RuntimeError(
-                    f"{exc} (CPU attempt: {cpu_quant_error})"
-                ) from exc
-            raise
+            _reclaim_memory()
+        pipe.to(device)
 
     if vae_tiling and hasattr(pipe, "enable_vae_tiling"):
         pipe.enable_vae_tiling()

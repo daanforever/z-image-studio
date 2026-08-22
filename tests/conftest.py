@@ -16,6 +16,14 @@ TINY_LORA_DIR = FIXTURES_DIR / "loras"
 TINY_LORA_FILE = TINY_LORA_DIR / "tiny_zimage_lora.safetensors"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_config_yaml(tmp_path, monkeypatch):
+    """Redirect config.yaml I/O away from the repo root for every test."""
+    path = tmp_path / "config.yaml"
+    monkeypatch.setattr("zimage.prefs.store.CONFIG_YAML", path)
+    monkeypatch.setattr("zimage.prefs.CONFIG_YAML", path)
+
+
 @pytest.fixture
 def reset_pipeline():
     from zimage.engine.lora import reset_lora_adapters

@@ -190,9 +190,20 @@ def test_output_gallery_starts_in_preview(monkeypatch):
     assert gallery.height == 640
 
 
-def test_gallery_loads_on_demo_load(monkeypatch):
+def test_gallery_loads_after_restore_on_demo_load(monkeypatch):
     monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
     demo = build_ui()
+    restore_fns = _fns_named(demo, "restore_ui_prefs")
+    assert len(restore_fns) == 1
+    restore_fn = restore_fns[0]
+    assert list(restore_fn.inputs) == []
+    restore_output_ids = [getattr(block, "elem_id", None) for block in restore_fn.outputs]
+    assert "studio-prompt" in restore_output_ids
+    assert "studio-output-dir" in restore_output_ids
+    assert "studio-lora-dir" in restore_output_ids
+    assert "studio-lora-adapters" in restore_output_ids
+    assert "studio-lora-weights" in restore_output_ids
+
     load_fns = _fns_named(demo, "load_gallery_with_index")
     assert len(load_fns) == 1
     load_fn = load_fns[0]
@@ -200,6 +211,10 @@ def test_gallery_loads_on_demo_load(monkeypatch):
     output_ids = [getattr(block, "elem_id", None) for block in load_fn.outputs]
     assert input_ids == ["studio-output-dir"]
     assert output_ids == ["output-gallery", None]
+
+    restore_key = next(k for k, fn in demo.fns.items() if fn is restore_fn)
+    assert load_fn.trigger_after == restore_key
+    assert load_fn.targets == [(None, "then")]
 
 
 def test_output_gallery_has_delete_button(monkeypatch):
@@ -283,7 +298,7 @@ def test_prompt_has_elem_id(monkeypatch):
     assert prompt.label == "Prompt"
 
 
-def test_ui_prefs_browser_state(monkeypatch):
+def test_no_browser_state_for_ui_prefs(monkeypatch):
     monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
     demo = build_ui()
     states = [
@@ -291,14 +306,7 @@ def test_ui_prefs_browser_state(monkeypatch):
         for block in demo.blocks.values()
         if isinstance(block, gr.BrowserState)
     ]
-    assert len(states) == 1
-    prefs = states[0]
-    assert prefs.storage_key == "zimage-studio-ui-prefs"
-    assert prefs.secret == "zimage-studio"
-    assert prefs.default_value == {
-        "prompt": "",
-        "lora_dir": normalize_lora_dir(DEFAULT_LORA_DIR),
-    }
+    assert states == []
 
 
 def test_restore_ui_prefs_on_load(monkeypatch):
@@ -307,23 +315,63 @@ def test_restore_ui_prefs_on_load(monkeypatch):
     restore_fns = _fns_named(demo, "restore_ui_prefs")
     assert len(restore_fns) == 1
     restore_fn = restore_fns[0]
+    assert list(restore_fn.inputs) == []
     output_ids = [getattr(block, "elem_id", None) for block in restore_fn.outputs]
-    assert output_ids == [
-        "studio-prompt",
-        "studio-lora-dir",
-        "studio-lora-adapters",
-        "studio-lora-weights",
-    ]
-    assert any(isinstance(block, gr.BrowserState) for block in restore_fn.inputs)
+    assert "studio-prompt" in output_ids
+    assert "studio-output-dir" in output_ids
+    assert "studio-lora-dir" in output_ids
+    assert "studio-lora-adapters" in output_ids
+    assert "studio-lora-weights" in output_ids
+    assert "studio-image-format" in output_ids
+    assert "studio-quantize" in output_ids
+    assert not any(isinstance(block, gr.BrowserState) for block in restore_fn.outputs)
 
 
 def test_save_ui_prefs_events_wired(monkeypatch):
     monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
     demo = build_ui()
     save_fns = _fns_named(demo, "save_ui_prefs")
-    assert len(save_fns) == 4
+    assert len(save_fns) >= 19
     for fn in save_fns:
         input_ids = [getattr(block, "elem_id", None) for block in fn.inputs]
         assert "studio-prompt" in input_ids
         assert "studio-lora-dir" in input_ids
-        assert any(isinstance(block, gr.BrowserState) for block in fn.outputs)
+        assert "studio-output-dir" in input_ids
+        assert list(fn.outputs) == []
+        assert not any(isinstance(block, gr.BrowserState) for block in fn.outputs)
+
+    generate_saves = [
+        fn for fn in save_fns if fn.targets and fn.targets[0][1] == "click"
+    ]
+    assert len(generate_saves) == 1
+
+    then_saves = [fn for fn in save_fns if fn.targets == [(None, "then")]]
+    assert len(then_saves) == 2
+    refresh_keys = {
+        k
+        for k, fn in demo.fns.items()
+        if getattr(getattr(fn, "fn", None), "__name__", None) == "refresh_loras"
+        and fn.targets
+        and fn.targets[0][1] in {"submit", "blur"}
+    }
+    assert {fn.trigger_after for fn in then_saves} == refresh_keys
+
+
+def test_build_ui_applies_yaml_pref_values(monkeypatch):
+    from zimage.prefs import save_ui_prefs as dump_prefs
+
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    dump_prefs(
+        {
+            "prompt": "from yaml",
+            "output_dir": "./yaml-out",
+            "precision": "float16",
+        }
+    )
+    demo = build_ui()
+    prompt = _block_by_elem_id(demo, "studio-prompt")
+    output_dir = _block_by_elem_id(demo, "studio-output-dir")
+    precision = _block_by_label(demo, "Precision")
+    assert prompt.value == "from yaml"
+    assert output_dir.value == "./yaml-out"
+    assert precision.value == "float16"

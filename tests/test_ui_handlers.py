@@ -842,47 +842,178 @@ def test_refresh_loras_from_fixture(tiny_lora_dir: Path):
 
 
 def test_save_ui_prefs_normalizes_lora_dir():
-    prefs = save_ui_prefs("a cat", r"D:\loras\style")
-    assert prefs == {"prompt": "a cat", "lora_dir": "D:/loras/style"}
+    from zimage.prefs import load_ui_prefs
+
+    save_ui_prefs(
+        "a cat",
+        "1024x768 (4:3)",
+        9,
+        1,
+        "./outputs",
+        "jpeg",
+        42,
+        True,
+        DEFAULT_MODEL,
+        "auto",
+        "fp8",
+        ["transformer", "text encoder"],
+        False,
+        False,
+        r"D:\loras\style",
+        [],
+        [],
+        0.0,
+        3.0,
+    )
+    prefs = load_ui_prefs()
+    assert prefs["prompt"] == "a cat"
+    assert prefs["lora_dir"] == "D:/loras/style"
 
 
 def test_save_ui_prefs_handles_none_prompt():
-    prefs = save_ui_prefs(None, None)
-    assert prefs == {"prompt": "", "lora_dir": ""}
+    from zimage.prefs import load_ui_prefs
+
+    save_ui_prefs(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    prefs = load_ui_prefs()
+    assert prefs["prompt"] == ""
+    assert prefs["lora_dir"] == ""
 
 
-def test_restore_ui_prefs_empty_dict():
-    prompt, directory, dropdown, weights = restore_ui_prefs({})
+def test_restore_ui_prefs_without_file():
+    (
+        prompt,
+        _resolution,
+        _steps,
+        _batch,
+        _output_dir,
+        _image_format,
+        _seed,
+        _random_seed,
+        model_id,
+        _device,
+        _precision,
+        _quantize_modules,
+        _cpu_offload,
+        _vae_tiling,
+        lora_dir,
+        adapters,
+        weights,
+        _guidance,
+        _time_shift,
+    ) = restore_ui_prefs()
     assert prompt == ""
-    assert directory == ""
-    assert list(dropdown.choices or []) == []
+    assert lora_dir == ""
+    assert list(adapters.choices or []) == []
     assert weights == []
+    assert model_id == DEFAULT_MODEL
 
 
-def test_restore_ui_prefs_none():
-    prompt, directory, dropdown, weights = restore_ui_prefs(None)
-    assert prompt == ""
-    assert directory == ""
-    assert list(dropdown.choices or []) == []
-    assert weights == []
+def test_restore_ui_prefs_all_fields(tiny_lora_dir: Path):
+    from zimage.prefs import save_ui_prefs as dump_prefs
 
-
-def test_restore_ui_prefs_from_fixture(tiny_lora_dir: Path):
-    prefs = {
-        "prompt": "sunset",
-        "lora_dir": str(tiny_lora_dir),
-    }
-    prompt, directory, dropdown, weights = restore_ui_prefs(prefs)
+    dump_prefs(
+        {
+            "prompt": "sunset",
+            "resolution": "1280x720 (16:9)",
+            "steps": 11,
+            "batch": 2,
+            "output_dir": "./custom-out",
+            "image_format": "png",
+            "seed": 7,
+            "random_seed": False,
+            "model_id": "local/model",
+            "device": "cpu",
+            "precision": "float16",
+            "quantize_modules": ["transformer"],
+            "cpu_offload": True,
+            "vae_tiling": True,
+            "lora_dir": str(tiny_lora_dir),
+            "lora_adapters": ["tiny_zimage_lora.safetensors"],
+            "lora_weights": [["tiny_zimage_lora.safetensors", 0.55]],
+            "guidance": 1.2,
+            "time_shift": 4.0,
+        }
+    )
+    (
+        prompt,
+        resolution,
+        steps,
+        batch,
+        output_dir,
+        image_format,
+        seed,
+        random_seed,
+        model_id,
+        device,
+        precision,
+        quantize_modules,
+        cpu_offload,
+        vae_tiling,
+        lora_dir,
+        adapters,
+        weights,
+        guidance,
+        time_shift,
+    ) = restore_ui_prefs()
     assert prompt == "sunset"
-    assert directory == Path(tiny_lora_dir).as_posix()
-    labels = []
-    for choice in dropdown.choices:
-        if isinstance(choice, (list, tuple)):
-            labels.append(str(choice[0]))
-        else:
-            labels.append(str(choice))
-    assert "tiny_zimage_lora.safetensors" in labels
-    assert weights == []
+    assert resolution == "1280x720 (16:9)"
+    assert steps == 11
+    assert batch == 2
+    assert output_dir == "./custom-out"
+    assert image_format == "png"
+    assert seed == 7
+    assert random_seed is False
+    assert model_id == "local/model"
+    assert device == "cpu"
+    assert precision == "float16"
+    assert quantize_modules == ["transformer"]
+    assert cpu_offload is True
+    assert vae_tiling is True
+    assert lora_dir == Path(tiny_lora_dir).as_posix()
+    assert adapters.value == ["tiny_zimage_lora.safetensors"]
+    assert weights == [["tiny_zimage_lora.safetensors", 0.55]]
+    assert guidance == 1.2
+    assert time_shift == 4.0
+
+
+def test_restore_ui_prefs_drops_missing_adapter(tiny_lora_dir: Path):
+    from zimage.prefs import save_ui_prefs as dump_prefs
+
+    dump_prefs(
+        {
+            "lora_dir": str(tiny_lora_dir),
+            "lora_adapters": ["tiny_zimage_lora.safetensors", "gone.safetensors"],
+            "lora_weights": [
+                ["tiny_zimage_lora.safetensors", 0.4],
+                ["gone.safetensors", 0.9],
+            ],
+        }
+    )
+    result = restore_ui_prefs()
+    adapters = result[15]
+    weights = result[16]
+    assert adapters.value == ["tiny_zimage_lora.safetensors"]
+    assert weights == [["tiny_zimage_lora.safetensors", 0.4]]
 
 
 def test_generate_passes_real_fixture_lora(monkeypatch, tiny_lora_dir: Path):

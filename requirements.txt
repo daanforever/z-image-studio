@@ -10,3 +10,4 @@ huggingface_hub>=0.26.0
 Pillow>=10.0.0
 sentencepiece>=0.2.2
 protobuf>=5.0.0
+PyYAML>=6.0

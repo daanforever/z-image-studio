@@ -3,17 +3,6 @@
 from __future__ import annotations
 
 from zimage.config import (
-    DEFAULT_BATCH,
-    DEFAULT_DEVICE,
-    DEFAULT_DTYPE,
-    DEFAULT_GUIDANCE,
-    DEFAULT_IMAGE_FORMAT,
-    DEFAULT_LORA_DIR,
-    DEFAULT_MODEL,
-    DEFAULT_OUTPUT_DIR,
-    DEFAULT_QUANTIZE_MODULES,
-    DEFAULT_RESOLUTION,
-    DEFAULT_STEPS,
     EXAMPLE_PROMPTS,
     IMAGE_FORMAT_CHOICES,
     MAX_BATCH,
@@ -23,7 +12,7 @@ from zimage.config import (
 )
 import gradio as gr
 
-from zimage.engine.lora import normalize_lora_dir
+from zimage.prefs import load_ui_prefs
 from zimage.ui.handlers import (
     clear_preview_images,
     delete_preview_image,
@@ -71,35 +60,82 @@ def _gallery_buttons(delete_btn, *, share: bool) -> list:
     return buttons
 
 
+def _pref_inputs(
+    prompt,
+    resolution,
+    steps,
+    batch_count,
+    output_dir,
+    image_format,
+    seed,
+    random_seed,
+    model_id,
+    device,
+    dtype_name,
+    quantize_modules,
+    cpu_offload,
+    vae_tiling,
+    lora_dir,
+    lora_adapters,
+    lora_weights,
+    guidance,
+    time_shift,
+) -> list:
+    return [
+        prompt,
+        resolution,
+        steps,
+        batch_count,
+        output_dir,
+        image_format,
+        seed,
+        random_seed,
+        model_id,
+        device,
+        dtype_name,
+        quantize_modules,
+        cpu_offload,
+        vae_tiling,
+        lora_dir,
+        lora_adapters,
+        lora_weights,
+        guidance,
+        time_shift,
+    ]
+
+
 def build_ui(*, share: bool = False) -> gr.Blocks:
+    prefs = load_ui_prefs()
     with gr.Blocks(
         title="Z-Image-Turbo Studio",
         fill_height=True,
     ) as demo:
         clear_btn, stop_btn = build_navbar()
-        ui_prefs = gr.BrowserState(
-            {"prompt": "", "lora_dir": normalize_lora_dir(DEFAULT_LORA_DIR)},
-            storage_key="zimage-studio-ui-prefs",
-            secret="zimage-studio",
-        )
         with gr.Row():
             with gr.Column(scale=5):
                 prompt = gr.Textbox(
                     label="Prompt",
                     lines=5,
+                    value=prefs["prompt"],
                     placeholder="Describe the shot: lighting, lens, composition, on-image text…",
                     elem_id="studio-prompt",
                 )
                 with gr.Row():
                     resolution = gr.Dropdown(
                         choices=RESOLUTION_PRESETS,
-                        value=DEFAULT_RESOLUTION,
+                        value=prefs["resolution"],
                         label="Resolution",
                     )
-                    steps = gr.Slider(1, 20, value=DEFAULT_STEPS, step=1, label="Steps (Turbo = 9)")
+                    steps = gr.Slider(
+                        1,
+                        20,
+                        value=prefs["steps"],
+                        step=1,
+                        label="Steps (Turbo = 9)",
+                    )
                 with gr.Row():
                     batch_count = gr.Number(
-                        value=DEFAULT_BATCH,
+                        value=prefs["batch"],
                         precision=0,
                         minimum=1,
                         maximum=MAX_BATCH,
@@ -107,57 +143,63 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                         info="Images to generate with incremental seeds (seed, seed+1, …).",
                     )
                     output_dir = gr.Textbox(
-                        value=DEFAULT_OUTPUT_DIR,
+                        value=prefs["output_dir"],
                         label="Output dir",
                         info="Folder for saved images (Windows paths accepted).",
                         elem_id="studio-output-dir",
                     )
                     image_format = gr.Radio(
                         choices=IMAGE_FORMAT_CHOICES,
-                        value=DEFAULT_IMAGE_FORMAT,
+                        value=prefs["image_format"],
                         label="Format",
                         info="JPEG is smaller; PNG is lossless.",
                         elem_id="studio-image-format",
                     )
                 with gr.Row():
-                    seed = gr.Number(value=42, precision=0, label="Seed")
-                    random_seed = gr.Checkbox(value=True, label="Random seed")
+                    seed = gr.Number(value=prefs["seed"], precision=0, label="Seed")
+                    random_seed = gr.Checkbox(value=prefs["random_seed"], label="Random seed")
                 generate_btn = gr.Button("Generate", variant="primary", elem_id="generate-btn")
 
                 with gr.Accordion("Model & device", open=True):
                     model_id = gr.Textbox(
-                        value=DEFAULT_MODEL,
+                        value=prefs["model_id"],
                         label="Model (Hugging Face ID or snapshot path)",
                         info="e.g. Tongyi-MAI/Z-Image-Turbo or E:\\Backup\\huggingface\\hub\\models--Tongyi-MAI--Z-Image-Turbo\\snapshots\\…",
                     )
                     with gr.Row():
                         device = gr.Radio(
                             choices=["auto", "cuda", "cpu"],
-                            value=DEFAULT_DEVICE if DEFAULT_DEVICE in {"auto", "cuda", "cpu"} else "auto",
+                            value=prefs["device"],
                             label="Device",
                         )
                         dtype_name = gr.Radio(
                             choices=PRECISION_CHOICES,
-                            value=DEFAULT_DTYPE if DEFAULT_DTYPE in PRECISION_CHOICES else "fp8",
+                            value=prefs["precision"],
                             label="Precision",
                             info="fp8 / int8: torchao on the checked modules (official checkpoint). fp8 needs Ada 8.9+ / Blackwell and cannot use CPU offload.",
                         )
                     quantize_modules = gr.CheckboxGroup(
                         choices=QUANTIZE_CHOICES,
-                        value=DEFAULT_QUANTIZE_MODULES,
+                        value=prefs["quantize_modules"],
                         label="quantize",
                         elem_id="studio-quantize",
                     )
                     with gr.Row():
-                        cpu_offload = gr.Checkbox(value=False, label="CPU offload (saves VRAM)")
-                        vae_tiling = gr.Checkbox(value=False, label="VAE tiling")
+                        cpu_offload = gr.Checkbox(
+                            value=prefs["cpu_offload"],
+                            label="CPU offload (saves VRAM)",
+                        )
+                        vae_tiling = gr.Checkbox(
+                            value=prefs["vae_tiling"],
+                            label="VAE tiling",
+                        )
                     with gr.Row():
                         load_btn = gr.Button("Load model")
                         unload_btn = gr.Button("Unload")
 
                 with gr.Accordion("LoRA", open=True, elem_id="studio-lora"):
                     lora_dir = gr.Textbox(
-                        value=normalize_lora_dir(DEFAULT_LORA_DIR),
+                        value=prefs["lora_dir"],
                         label="Directory",
                         info=(
                             "Local folder of .safetensors / .pt adapters "
@@ -172,7 +214,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                     lora_refresh = gr.Button("Refresh", elem_id="studio-lora-refresh")
                     lora_adapters = gr.Dropdown(
                         choices=[],
-                        value=[],
+                        value=list(prefs["lora_adapters"]),
                         multiselect=True,
                         label="Adapters",
                         info="Select one or more files. Empty = no LoRA.",
@@ -181,7 +223,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                     lora_weights = gr.Dataframe(
                         headers=["LoRA", "Strength"],
                         datatype=["str", "number"],
-                        value=[],
+                        value=list(prefs["lora_weights"]),
                         column_count=2,
                         interactive=True,
                         label="Strength",
@@ -192,7 +234,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                     guidance = gr.Slider(
                         0.0,
                         8.0,
-                        value=DEFAULT_GUIDANCE,
+                        value=prefs["guidance"],
                         step=0.1,
                         label="Guidance scale",
                         info="Keep at 0 for Turbo. For full Z-Image, 3–5 is typical.",
@@ -200,7 +242,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                     time_shift = gr.Slider(
                         1.0,
                         10.0,
-                        value=3.0,
+                        value=prefs["time_shift"],
                         step=0.1,
                         label="Time shift",
                         info="3 is the Turbo default. Toward 10: more steps on composition. Toward 1: more on fine detail.",
@@ -232,6 +274,29 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                     elem_id="studio-examples",
                 )
 
+        pref_inputs = _pref_inputs(
+            prompt,
+            resolution,
+            steps,
+            batch_count,
+            output_dir,
+            image_format,
+            seed,
+            random_seed,
+            model_id,
+            device,
+            dtype_name,
+            quantize_modules,
+            cpu_offload,
+            vae_tiling,
+            lora_dir,
+            lora_adapters,
+            lora_weights,
+            guidance,
+            time_shift,
+        )
+        pref_outputs = list(pref_inputs)
+
         load_btn.click(
             load_model,
             inputs=[model_id, device, dtype_name, cpu_offload, vae_tiling, quantize_modules],
@@ -243,12 +308,12 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
             inputs=[lora_dir, lora_adapters, lora_weights],
             outputs=[lora_dir, lora_adapters, lora_weights],
         )
-        lora_dir.submit(
+        lora_dir_submit = lora_dir.submit(
             refresh_loras,
             inputs=[lora_dir, lora_adapters, lora_weights],
             outputs=[lora_dir, lora_adapters, lora_weights],
         )
-        lora_dir.blur(
+        lora_dir_blur = lora_dir.blur(
             refresh_loras,
             inputs=[lora_dir, lora_adapters, lora_weights],
             outputs=[lora_dir, lora_adapters, lora_weights],
@@ -258,9 +323,32 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
             inputs=[lora_adapters, lora_weights],
             outputs=lora_weights,
         )
-        prompt.change(save_ui_prefs, inputs=[prompt, lora_dir], outputs=ui_prefs)
-        lora_dir.submit(save_ui_prefs, inputs=[prompt, lora_dir], outputs=ui_prefs)
-        lora_dir.blur(save_ui_prefs, inputs=[prompt, lora_dir], outputs=ui_prefs)
+
+        for control in (
+            prompt,
+            resolution,
+            steps,
+            batch_count,
+            output_dir,
+            image_format,
+            seed,
+            random_seed,
+            model_id,
+            device,
+            dtype_name,
+            quantize_modules,
+            cpu_offload,
+            vae_tiling,
+            lora_adapters,
+            lora_weights,
+            guidance,
+            time_shift,
+        ):
+            control.change(save_ui_prefs, inputs=pref_inputs)
+
+        lora_dir_submit.then(save_ui_prefs, inputs=pref_inputs)
+        lora_dir_blur.then(save_ui_prefs, inputs=pref_inputs)
+
         generate_event = generate_btn.click(
             generate,
             inputs=[
@@ -289,7 +377,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
             show_progress="minimal",
             show_progress_on=status,
         )
-        generate_btn.click(save_ui_prefs, inputs=[prompt, lora_dir], outputs=ui_prefs)
+        generate_btn.click(save_ui_prefs, inputs=pref_inputs)
         stop_btn.click(request_stop, cancels=[generate_event])
         clear_btn.click(
             clear_preview_images,
@@ -303,11 +391,13 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
             outputs=[gallery, gallery_index, status],
         )
         gallery.select(set_gallery_index, outputs=gallery_index)
-        demo.load(load_gallery_with_index, inputs=[output_dir], outputs=[gallery, gallery_index])
         demo.load(
             restore_ui_prefs,
-            inputs=[ui_prefs],
-            outputs=[prompt, lora_dir, lora_adapters, lora_weights],
+            outputs=pref_outputs,
+        ).then(
+            load_gallery_with_index,
+            inputs=[output_dir],
+            outputs=[gallery, gallery_index],
         )
 
         gr.Markdown(

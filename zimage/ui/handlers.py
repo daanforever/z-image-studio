@@ -37,6 +37,7 @@ from zimage.engine.lora import (
     parse_lora_specs,
     weights_map,
 )
+from zimage.prefs import load_ui_prefs, save_ui_prefs as dump_ui_prefs
 from zimage.ui.log import log_error
 from zimage.ui.status import format_status
 
@@ -236,20 +237,82 @@ def sync_lora_weights(selected, current_df=None):
     return rows
 
 
-def save_ui_prefs(prompt, lora_dir) -> dict[str, str]:
-    """Snapshot Prompt and LoRA Directory for browser localStorage."""
-    return {
-        "prompt": "" if prompt is None else str(prompt),
-        "lora_dir": normalize_lora_dir(lora_dir),
-    }
+def save_ui_prefs(
+    prompt,
+    resolution,
+    steps,
+    batch_count,
+    output_dir,
+    image_format,
+    seed,
+    random_seed,
+    model_id,
+    device,
+    dtype_name,
+    quantize_modules,
+    cpu_offload,
+    vae_tiling,
+    lora_dir,
+    lora_adapters,
+    lora_weights,
+    guidance,
+    time_shift,
+) -> None:
+    """Persist all editable UI fields to config.yaml."""
+    dump_ui_prefs(
+        {
+            "prompt": "" if prompt is None else str(prompt),
+            "resolution": resolution,
+            "steps": steps,
+            "batch": batch_count,
+            "output_dir": "" if output_dir is None else str(output_dir),
+            "image_format": image_format,
+            "seed": seed,
+            "random_seed": random_seed,
+            "model_id": model_id,
+            "device": device,
+            "precision": dtype_name,
+            "quantize_modules": quantize_modules,
+            "cpu_offload": cpu_offload,
+            "vae_tiling": vae_tiling,
+            "lora_dir": normalize_lora_dir(lora_dir),
+            "lora_adapters": lora_adapters,
+            "lora_weights": sync_lora_weights(lora_adapters, lora_weights),
+            "guidance": guidance,
+            "time_shift": time_shift,
+        }
+    )
 
 
-def restore_ui_prefs(prefs):
-    """Restore Prompt / LoRA Directory and rescan adapters from the saved dir."""
-    data = prefs if isinstance(prefs, dict) else {}
-    prompt = "" if data.get("prompt") is None else str(data.get("prompt"))
-    lora_dir, adapters, weights = refresh_loras(data.get("lora_dir"), None, None)
-    return prompt, lora_dir, adapters, weights
+def restore_ui_prefs():
+    """Restore all editable UI fields from config.yaml and rescan LoRAs."""
+    data = load_ui_prefs()
+    lora_dir, adapters, weights = refresh_loras(
+        data.get("lora_dir"),
+        data.get("lora_adapters"),
+        data.get("lora_weights"),
+    )
+    return (
+        data.get("prompt", ""),
+        data.get("resolution"),
+        data.get("steps"),
+        data.get("batch"),
+        data.get("output_dir"),
+        data.get("image_format"),
+        data.get("seed"),
+        data.get("random_seed"),
+        data.get("model_id"),
+        data.get("device"),
+        data.get("precision"),
+        data.get("quantize_modules"),
+        data.get("cpu_offload"),
+        data.get("vae_tiling"),
+        lora_dir,
+        adapters,
+        weights,
+        data.get("guidance"),
+        data.get("time_shift"),
+    )
 
 
 def load_model(

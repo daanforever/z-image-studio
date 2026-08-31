@@ -1,11 +1,15 @@
-"""Gradio event handlers: load / unload / generate."""
+"""Gradio event handlers: load / unload / generate / training callbacks."""
 
 from __future__ import annotations
 
 import random
 import threading
+import time
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any, Mapping
+
+import yaml
 
 from zimage.config import (
     DEFAULT_BATCH,
@@ -30,6 +34,12 @@ from zimage.engine import (
     runtime_status,
     unload_pipeline,
 )
+from zimage.engine.pipeline import (
+    GPU_LEASE_HELD_MESSAGE,
+    clear_training_start_fence,
+    set_training_start_fence,
+    training_start_fence_is_set,
+)
 from zimage.engine.lora import (
     DEFAULT_STRENGTH,
     list_lora_files,
@@ -38,15 +48,38 @@ from zimage.engine.lora import (
     weights_map,
 )
 from zimage.prefs import load_ui_prefs, save_ui_prefs as dump_ui_prefs
+from zimage.training.commands import enqueue_update, save_idle_update
+from zimage.training.contracts import JobStatus
+from zimage.training.jobs import (
+    CONFIG_FILE,
+    create_or_open_job,
+    load_job_state,
+    resolve_job_path,
+)
+from zimage.training.schema import TrainingConfigError, validate_job_document
 from zimage.ui.log import log_error
 from zimage.ui.status import format_status
+from zimage.ui.training_panel import TrainingCallbacks
+from zimage.ui.training_process import (
+    TrainingProcessManager,
+    create_training_process_manager,
+)
 
 _stop_event = threading.Event()
+_LEASE_WAIT_TIMEOUT_SECONDS = 300.0
+_LEASE_WAIT_POLL_SECONDS = 0.05
+_training_manager: TrainingProcessManager | None = None
+_PREVIEW_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
 
 
 def request_stop() -> None:
     """Signal the active batch to stop after the current image (no rollback)."""
     _stop_event.set()
+
+
+def cancel_generate_for_training() -> None:
+    """Training Start hook: stop the in-flight Generate batch."""
+    request_stop()
 
 
 def load_gallery(output_dir=None) -> list[str]:
@@ -218,14 +251,27 @@ def _as_name_list(names) -> list[str]:
     return [str(item).strip() for item in names if str(item).strip()]
 
 
-def refresh_loras(directory, selected=None, current_df=None):
+def _clamp_lora_selection(directory, selected=None, current_df=None):
+    """Normalize LoRA dir, keep on-disk adapters, and sync their weights."""
     normalized = normalize_lora_dir(directory)
     files = list_lora_files(normalized)
     kept = [name for name in _as_name_list(selected) if name in files]
+    return normalized, files, kept, sync_lora_weights(kept, current_df)
+
+
+def refresh_loras(directory, selected=None, current_df=None):
+    normalized, files, kept, weights = _clamp_lora_selection(
+        directory, selected, current_df
+    )
     return (
         normalized,
-        gr.Dropdown(choices=files, value=kept, multiselect=True),
-        sync_lora_weights(kept, current_df),
+        gr.Dropdown(
+            choices=files,
+            value=kept,
+            multiselect=True,
+            allow_custom_value=True,
+        ),
+        weights,
     )
 
 
@@ -259,6 +305,9 @@ def save_ui_prefs(
     time_shift,
 ) -> None:
     """Persist all editable UI fields to config.yaml."""
+    normalized, _files, kept, weights = _clamp_lora_selection(
+        lora_dir, lora_adapters, lora_weights
+    )
     dump_ui_prefs(
         {
             "prompt": "" if prompt is None else str(prompt),
@@ -275,9 +324,9 @@ def save_ui_prefs(
             "quantize_modules": quantize_modules,
             "cpu_offload": cpu_offload,
             "vae_tiling": vae_tiling,
-            "lora_dir": normalize_lora_dir(lora_dir),
-            "lora_adapters": lora_adapters,
-            "lora_weights": sync_lora_weights(lora_adapters, lora_weights),
+            "lora_dir": normalized,
+            "lora_adapters": kept,
+            "lora_weights": weights,
             "guidance": guidance,
             "time_shift": time_shift,
         }
@@ -323,6 +372,8 @@ def load_model(
     vae_tiling: bool,
     quantize_modules=None,
 ):
+    if training_start_fence_is_set():
+        raise gr.Error(GPU_LEASE_HELD_MESSAGE)
     quantize_transformer, quantize_text_encoder = parse_quantize_modules(quantize_modules)
     try:
         _, status = ensure_pipeline(
@@ -456,3 +507,285 @@ def generate(
             int(last_seed) if produced else int(seed) if seed is not None else base_seed,
             format_status(last_status, extra=extra),
         )
+
+
+def training_callbacks() -> TrainingCallbacks:
+    """Wire the Training tab to jobs + the process manager. No panel logic."""
+    return TrainingCallbacks(
+        list_jobs=list_training_jobs,
+        create_or_open=create_or_open_training_job,
+        load_job=load_training_job,
+        validate_yaml=validate_training_yaml,
+        save_yaml=save_training_yaml,
+        start_job=start_training_job,
+        stop_job=stop_training_job,
+        poll_state=poll_training_state,
+        queue_update=queue_training_update,
+    )
+
+
+def list_training_jobs() -> list[str]:
+    """Scan ``jobs_dir`` for job folders that contain ``config.yaml``."""
+    root = _jobs_dir()
+    if not root.is_dir():
+        return []
+    jobs: list[str] = []
+    for child in sorted(root.iterdir(), key=lambda path: path.name.lower()):
+        if child.is_dir() and (child / CONFIG_FILE).is_file():
+            jobs.append(child.name)
+    return jobs
+
+
+def create_or_open_training_job(name: str) -> dict[str, Any]:
+    """Create a job or open the existing slug without rewriting files."""
+    job_dir = create_or_open_job(name, _jobs_dir())
+    return _job_view(job_dir)
+
+
+def load_training_job(job_id: str) -> dict[str, Any]:
+    """Load canonical YAML, operational state, and preview paths."""
+    return _job_view(_require_job_dir(job_id))
+
+
+def validate_training_yaml(job_id: str, text: str) -> dict[str, Any]:
+    """Validate editor text. Return ``ok`` / ``error``."""
+    _require_job_dir(job_id)
+    try:
+        validate_job_document(_parse_job_yaml(text))
+    except (TrainingConfigError, TypeError, ValueError, yaml.YAMLError) as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True}
+
+
+def save_training_yaml(job_id: str, text: str) -> dict[str, Any]:
+    """Idle validated atomic save. Running ``state.json`` queues an update."""
+    job_dir = _require_job_dir(job_id)
+    if load_job_state(job_dir).status is JobStatus.RUNNING:
+        return queue_training_update(job_id, text)
+    save_idle_update(job_dir, _parse_job_yaml(text))
+    return {
+        "mode": "saved",
+        "config_text": (job_dir / CONFIG_FILE).read_text(encoding="utf-8"),
+        "state": _state_mapping(load_job_state(job_dir)),
+        "previews": _list_previews(job_dir),
+    }
+
+
+def queue_training_update(job_id: str, text: str) -> dict[str, Any]:
+    """Enqueue when RUNNING; otherwise idle-save like the CLI path."""
+    job_dir = _require_job_dir(job_id)
+    if load_job_state(job_dir).status is not JobStatus.RUNNING:
+        save_idle_update(job_dir, _parse_job_yaml(text))
+        return {
+            "mode": "saved",
+            "config_text": (job_dir / CONFIG_FILE).read_text(encoding="utf-8"),
+            "state": _state_mapping(load_job_state(job_dir)),
+            "previews": _list_previews(job_dir),
+        }
+    enqueue_update(job_dir, _parse_job_yaml(text))
+    return {
+        "mode": "queued",
+        "state": _state_mapping(load_job_state(job_dir)),
+        "previews": _list_previews(job_dir),
+    }
+
+
+def start_training_job(job_id: str) -> dict[str, Any]:
+    """Handoff the GPU lease, unload inference, then start the trainer child."""
+    job_dir = _require_job_dir(job_id)
+    manager = _get_training_process_manager()
+    if manager.is_running() or training_start_fence_is_set():
+        raise RuntimeError("training is already running")
+    request_stop()
+    guard = _wait_for_gpu_lease()
+    set_training_start_fence()
+    try:
+        guard.release()
+        unload_pipeline()
+        _sync_and_empty_cuda()
+        manager.start(job_id)
+        try:
+            _wait_for_foreign_gpu_holder()
+        except Exception:
+            # Lease-wait timeout / failure: kill the child before clearing the
+            # fence so Generate cannot race a still-alive trainer.
+            manager.stop()
+            raise
+    finally:
+        # Child holds the GPU lease, or start failed / timed out.
+        clear_training_start_fence()
+    return _job_view(job_dir, message="Start requested.")
+
+
+def stop_training_job(job_id: str) -> dict[str, Any]:
+    """Immediate Stop: kill the trainer child. No extra checkpoint."""
+    job_dir = _require_job_dir(job_id)
+    manager = _get_training_process_manager()
+    active = getattr(manager, "job_id", None)
+    if active is not None and active != job_id:
+        raise RuntimeError(
+            f"stop refused: manager is running job {active!r}, not {job_id!r}"
+        )
+    manager.stop()
+    return _job_view(job_dir, message="Stop requested.")
+
+
+def poll_training_state(job_id: str) -> dict[str, Any]:
+    """Return ``state.json`` plus preview image paths under ``previews/``."""
+    job_dir = _require_job_dir(job_id)
+    return {
+        "state": _state_mapping(load_job_state(job_dir)),
+        "previews": _list_previews(job_dir),
+    }
+
+
+def _jobs_dir() -> Path:
+    from zimage.config import ROOT
+    from zimage.training.schema import resolve_training_paths
+
+    configured = Path(resolve_training_paths().jobs_dir)
+    if configured.is_absolute():
+        return configured
+    return (ROOT / configured).resolve()
+
+
+def _get_training_process_manager() -> TrainingProcessManager:
+    global _training_manager
+    if _training_manager is None:
+        _training_manager = create_training_process_manager(jobs_dir=_jobs_dir())
+    return _training_manager
+
+
+def _create_handoff_guard():
+    from zimage.training.runtime_guard import create_runtime_guard
+
+    return create_runtime_guard()
+
+
+def _live_foreign_lease_pid() -> int | None:
+    """Return another live PID that currently holds the GPU lease, if any.
+
+    Reads the FileRuntimeGuard lock file without calling ``acquire``, so an
+    in-flight start cannot steal the GPU while waiting for the child.
+    """
+    import os
+
+    from zimage.training.runtime_guard import create_runtime_guard, pid_is_alive
+
+    guard = create_runtime_guard()
+    path = Path(guard.lock_path)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="ascii", errors="ignore")
+    except OSError:
+        return None
+    token = text.replace("\0", " ").strip().split()
+    if not token or not token[0].isdigit():
+        return None
+    pid = int(token[0])
+    if pid <= 0 or pid == os.getpid() or not pid_is_alive(pid):
+        return None
+    return pid
+
+
+def _wait_for_foreign_gpu_holder() -> None:
+    """Block until a live foreign PID holds the GPU lease, or time out."""
+    deadline = time.monotonic() + _LEASE_WAIT_TIMEOUT_SECONDS
+    while True:
+        if _live_foreign_lease_pid() is not None:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Timed out waiting for the trainer to take the GPU lease."
+            )
+        time.sleep(_LEASE_WAIT_POLL_SECONDS)
+
+
+def _wait_for_gpu_lease():
+    """Wait until this process can acquire the lease (inference finished).
+
+    Does not acquire — and does not return a held lease — while the training
+    start fence is set.
+    """
+    guard = _create_handoff_guard()
+    deadline = time.monotonic() + _LEASE_WAIT_TIMEOUT_SECONDS
+    while True:
+        if training_start_fence_is_set():
+            raise RuntimeError("training is already running")
+        if guard.acquire():
+            if training_start_fence_is_set():
+                guard.release()
+                raise RuntimeError("training is already running")
+            return guard
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Timed out waiting for the GPU lease; stop Generate before starting training."
+            )
+        time.sleep(_LEASE_WAIT_POLL_SECONDS)
+
+
+def _sync_and_empty_cuda() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+def _require_job_dir(job_id: str) -> Path:
+    job_dir = resolve_job_path(_jobs_dir(), job_id)
+    if not job_dir.is_dir():
+        raise FileNotFoundError(f"job does not exist: {job_id}")
+    return job_dir
+
+
+def _job_view(job_dir: Path, *, message: str = "") -> dict[str, Any]:
+    payload = {
+        "job_id": job_dir.name,
+        "config_text": (job_dir / CONFIG_FILE).read_text(encoding="utf-8"),
+        "state": _state_mapping(load_job_state(job_dir)),
+        "previews": _list_previews(job_dir),
+    }
+    if message:
+        payload["message"] = message
+    return payload
+
+
+def _state_mapping(state: Any) -> dict[str, Any]:
+    status = getattr(state, "status", "")
+    return {
+        "job_id": state.job_id,
+        "status": getattr(status, "value", status),
+        "step": state.step,
+        "epoch": state.epoch,
+        "last_error": state.last_error,
+        "exit_code": state.exit_code,
+    }
+
+
+def _list_previews(job_dir: Path) -> list[str]:
+    root = job_dir / "previews"
+    if not root.is_dir():
+        return []
+    paths = [
+        child
+        for child in root.rglob("*")
+        if child.is_file() and child.suffix.lower() in _PREVIEW_SUFFIXES
+    ]
+    paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return [str(path) for path in paths]
+
+
+def _parse_job_yaml(text: str) -> Mapping[str, Any]:
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise TrainingConfigError(f"invalid job YAML: {exc}") from exc
+    if not isinstance(document, Mapping):
+        raise TrainingConfigError("YAML must contain a mapping")
+    return document
+

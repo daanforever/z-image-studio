@@ -11,6 +11,10 @@ __pycache__/
 config.yaml
 outputs/*
 !outputs/.gitkeep
+datasets/*
+!datasets/.gitkeep
+jobs/*
+!jobs/.gitkeep
 *.png
 *.jpg
 *.jpeg

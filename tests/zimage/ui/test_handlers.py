@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -735,6 +736,7 @@ def test_refresh_loras_keeps_existing_files(tmp_path: Path):
             labels.append(str(choice))
     assert labels == ["alpha.safetensors", "beta.safetensors"]
     assert dropdown.value == ["alpha.safetensors"]
+    assert dropdown.allow_custom_value is True
     assert weights == [["alpha.safetensors", 0.8]]
 
 
@@ -868,6 +870,38 @@ def test_save_ui_prefs_normalizes_lora_dir():
     prefs = load_ui_prefs()
     assert prefs["prompt"] == "a cat"
     assert prefs["lora_dir"] == "D:/loras/style"
+
+
+def test_save_ui_prefs_drops_missing_adapter(tmp_path: Path):
+    from zimage.prefs import load_ui_prefs
+
+    (tmp_path / "alpha.safetensors").write_bytes(b"")
+    save_ui_prefs(
+        "a cat",
+        "1024x768 (4:3)",
+        9,
+        1,
+        "./outputs",
+        "jpeg",
+        42,
+        True,
+        DEFAULT_MODEL,
+        "auto",
+        "fp8",
+        ["transformer", "text encoder"],
+        False,
+        False,
+        str(tmp_path),
+        ["alpha.safetensors", "gone.safetensors"],
+        [["alpha.safetensors", 0.8], ["gone.safetensors", 0.5]],
+        0.0,
+        3.0,
+    )
+    prefs = load_ui_prefs()
+    assert prefs["lora_adapters"] == ["alpha.safetensors"]
+    assert prefs["lora_weights"] == [["alpha.safetensors", 0.8]]
+    assert "gone.safetensors" not in prefs["lora_adapters"]
+    assert all(row[0] != "gone.safetensors" for row in prefs["lora_weights"])
 
 
 def test_save_ui_prefs_handles_none_prompt():
@@ -1043,3 +1077,665 @@ def test_load_model_does_not_accept_lora():
     assert "lora_dir" not in params
     assert "loras" not in params
     assert "lora_names" not in params
+
+
+def test_list_training_jobs_scans_jobs_dir(tmp_path: Path, monkeypatch):
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    create_or_open_job("Beta", jobs)
+    create_or_open_job("Alpha", jobs)
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    assert handlers.list_training_jobs() == ["alpha", "beta"]
+
+
+def test_create_or_open_training_job_does_not_rewrite(tmp_path: Path, monkeypatch):
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    before = (root / "config.yaml").read_bytes()
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    payload = handlers.create_or_open_training_job("job")
+    assert (root / "config.yaml").read_bytes() == before
+    assert payload["job_id"] == "job"
+    assert "job_name:" in payload["config_text"]
+    assert payload["state"]["status"] == "stopped"
+
+
+def test_save_and_queue_training_yaml(tmp_path: Path, monkeypatch):
+    from zimage.training.commands import consume_commands
+    from zimage.training.contracts import JobState, JobStatus
+    from zimage.training.jobs import create_or_open_job, load_job_config, write_job_state
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    loaded = handlers.load_training_job("job")
+    text = loaded["config_text"]
+    assert handlers.validate_training_yaml("job", text) == {"ok": True}
+    invalid = handlers.validate_training_yaml("job", "not: [valid")
+    assert invalid["ok"] is False
+    saved = handlers.save_training_yaml("job", text)
+    assert saved["mode"] == "saved"
+    # Idle / STOPPED queue_training_update writes YAML (CLI parity), no commands.
+    idle_queue = handlers.queue_training_update("job", text)
+    assert idle_queue["mode"] == "saved"
+    assert list((root / "commands").glob("*.json")) == []
+    write_job_state(root, JobState("job", JobStatus.RUNNING, step=1, epoch=0))
+    queued = handlers.queue_training_update("job", text)
+    assert queued["mode"] == "queued"
+    envelopes = consume_commands(root)
+    assert len(envelopes) == 1
+    assert envelopes[0].kind == "update"
+    assert load_job_config(root)["job_name"]
+
+
+def test_save_training_yaml_queues_when_state_running(tmp_path: Path, monkeypatch):
+    from zimage.training.commands import consume_commands
+    from zimage.training.contracts import JobState, JobStatus
+    from zimage.training.jobs import create_or_open_job, load_job_config, write_job_state
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    before = (root / "config.yaml").read_bytes()
+    write_job_state(root, JobState("job", JobStatus.RUNNING, step=1, epoch=0))
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    text = handlers.load_training_job("job")["config_text"]
+    result = handlers.save_training_yaml("job", text)
+    assert result["mode"] == "queued"
+    assert (root / "config.yaml").read_bytes() == before
+    envelopes = consume_commands(root)
+    assert len(envelopes) == 1
+    assert envelopes[0].kind == "update"
+    assert load_job_config(root)["job_name"]
+
+
+def test_idle_save_discards_stale_queued_update(tmp_path: Path, monkeypatch):
+    import yaml
+
+    from zimage.training.contracts import JobState, JobStatus
+    from zimage.training.jobs import create_or_open_job, load_job_config, write_job_state
+    from zimage.training.schema import TrainingConfigError
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+
+    write_job_state(root, JobState("job", JobStatus.RUNNING, step=1, epoch=0))
+    stale = load_job_config(root)
+    stale["seed"] = 11
+    queued = handlers.queue_training_update("job", yaml.safe_dump(stale))
+    assert queued["mode"] == "queued"
+    assert list((root / "commands").glob("*.json"))
+
+    write_job_state(
+        root, JobState("job", JobStatus.COMPLETED, step=1, epoch=0, exit_code=0)
+    )
+    idle = load_job_config(root)
+    idle["seed"] = 22
+    saved = handlers.save_training_yaml("job", yaml.safe_dump(idle))
+    assert saved["mode"] == "saved"
+    assert load_job_config(root)["seed"] == 22
+    assert list((root / "commands").glob("*.json")) == []
+
+    write_job_state(root, JobState("job", JobStatus.RUNNING, step=1, epoch=0))
+    handlers.queue_training_update("job", yaml.safe_dump(stale))
+    write_job_state(
+        root, JobState("job", JobStatus.COMPLETED, step=1, epoch=0, exit_code=0)
+    )
+    invalid = load_job_config(root)
+    invalid["precision"] = "invalid"
+    with pytest.raises(TrainingConfigError):
+        handlers.save_training_yaml("job", yaml.safe_dump(invalid))
+    leftover = list((root / "commands").glob("*.json"))
+    assert len(leftover) == 1
+    assert load_job_config(root)["seed"] == 22
+
+
+def test_start_training_job_handoff_sequence(tmp_path: Path, monkeypatch):
+    from zimage.engine.pipeline import training_start_fence_is_set
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    create_or_open_job("job", jobs)
+    order: list = []
+    fence_at: dict[str, bool] = {}
+
+    class FakeGuard:
+        def acquire(self):
+            order.append("acquire")
+            fence_at["acquire"] = training_start_fence_is_set()
+            return True
+
+        def release(self):
+            fence_at["release"] = training_start_fence_is_set()
+            order.append("release")
+
+        def is_held(self):
+            return False
+
+    class FakeManager:
+        def is_running(self):
+            return False
+
+        def start(self, job_id):
+            fence_at["start"] = training_start_fence_is_set()
+            order.append(("start", job_id))
+
+        def stop(self):
+            order.append("stop")
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "request_stop", lambda: order.append("request_stop"))
+    monkeypatch.setattr(handlers, "unload_pipeline", lambda: order.append("unload"))
+    monkeypatch.setattr(handlers, "_create_handoff_guard", lambda: FakeGuard())
+    monkeypatch.setattr(handlers, "_sync_and_empty_cuda", lambda: order.append("cuda"))
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: FakeManager())
+    monkeypatch.setattr(handlers, "_live_foreign_lease_pid", lambda: 4242)
+
+    payload = handlers.start_training_job("job")
+    assert payload["job_id"] == "job"
+    assert order == [
+        "request_stop",
+        "acquire",
+        "release",
+        "unload",
+        "cuda",
+        ("start", "job"),
+    ]
+    assert fence_at["acquire"] is False
+    assert fence_at["release"] is True
+    assert fence_at["start"] is True
+    assert training_start_fence_is_set() is False
+    handlers.stop_training_job("job")
+    assert order[-1] == "stop"
+
+
+def test_start_training_keeps_fence_until_foreign_holder_pid(tmp_path: Path, monkeypatch):
+    from zimage.engine.pipeline import training_start_fence_is_set
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    create_or_open_job("job", jobs)
+    fence_before_holder: list[bool] = []
+    reads = {"n": 0}
+
+    def fake_lease_reader():
+        reads["n"] += 1
+        fence_before_holder.append(training_start_fence_is_set())
+        if reads["n"] < 3:
+            return None
+        return 4242
+
+    class FakeGuard:
+        def acquire(self):
+            return True
+
+        def release(self):
+            return None
+
+        def is_held(self):
+            return False
+
+    class FakeManager:
+        def is_running(self):
+            return False
+
+        def start(self, job_id):
+            assert training_start_fence_is_set() is True
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "request_stop", lambda: None)
+    monkeypatch.setattr(handlers, "unload_pipeline", lambda: None)
+    monkeypatch.setattr(handlers, "_create_handoff_guard", lambda: FakeGuard())
+    monkeypatch.setattr(handlers, "_sync_and_empty_cuda", lambda: None)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: FakeManager())
+    monkeypatch.setattr(handlers, "_live_foreign_lease_pid", fake_lease_reader)
+
+    handlers.start_training_job("job")
+    assert reads["n"] >= 3
+    assert fence_before_holder[0] is True
+    assert fence_before_holder[1] is True
+    assert training_start_fence_is_set() is False
+
+
+def test_start_training_clears_fence_when_start_fails(tmp_path: Path, monkeypatch):
+    from zimage.engine.pipeline import training_start_fence_is_set
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    create_or_open_job("job", jobs)
+
+    class FakeGuard:
+        def acquire(self):
+            return True
+
+        def release(self):
+            return None
+
+        def is_held(self):
+            return False
+
+    class FakeManager:
+        def is_running(self):
+            return False
+
+        def start(self, job_id):
+            raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "request_stop", lambda: None)
+    monkeypatch.setattr(handlers, "unload_pipeline", lambda: None)
+    monkeypatch.setattr(handlers, "_create_handoff_guard", lambda: FakeGuard())
+    monkeypatch.setattr(handlers, "_sync_and_empty_cuda", lambda: None)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: FakeManager())
+
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        handlers.start_training_job("job")
+    assert training_start_fence_is_set() is False
+
+
+def test_start_training_clears_fence_when_holder_wait_times_out(tmp_path: Path, monkeypatch):
+    from zimage.engine.pipeline import training_start_fence_is_set
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    create_or_open_job("job", jobs)
+
+    class FakeGuard:
+        def acquire(self):
+            return True
+
+        def release(self):
+            return None
+
+        def is_held(self):
+            return False
+
+    class FakeManager:
+        def __init__(self):
+            self.stopped = False
+            self.job_id = None
+
+        def is_running(self):
+            return False
+
+        def start(self, job_id):
+            self.job_id = job_id
+
+        def stop(self):
+            self.stopped = True
+            self.job_id = None
+
+    manager = FakeManager()
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "request_stop", lambda: None)
+    monkeypatch.setattr(handlers, "unload_pipeline", lambda: None)
+    monkeypatch.setattr(handlers, "_create_handoff_guard", lambda: FakeGuard())
+    monkeypatch.setattr(handlers, "_sync_and_empty_cuda", lambda: None)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: manager)
+    monkeypatch.setattr(handlers, "_live_foreign_lease_pid", lambda: None)
+    monkeypatch.setattr(handlers, "_LEASE_WAIT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(handlers, "_LEASE_WAIT_POLL_SECONDS", 0.01)
+
+    with pytest.raises(RuntimeError, match="Timed out waiting for the trainer"):
+        handlers.start_training_job("job")
+    assert training_start_fence_is_set() is False
+    assert manager.stopped is True
+
+
+def test_wait_for_gpu_lease_does_not_acquire_during_start_fence(monkeypatch):
+    from zimage.engine.pipeline import (
+        clear_training_start_fence,
+        set_training_start_fence,
+    )
+
+    acquired: list[bool] = []
+
+    class FakeGuard:
+        def acquire(self):
+            acquired.append(True)
+            return True
+
+        def release(self):
+            return None
+
+        def is_held(self):
+            return False
+
+    monkeypatch.setattr(handlers, "_create_handoff_guard", lambda: FakeGuard())
+    set_training_start_fence()
+    try:
+        with pytest.raises(RuntimeError, match="training is already running"):
+            handlers._wait_for_gpu_lease()
+        assert acquired == []
+    finally:
+        clear_training_start_fence()
+
+
+def test_wait_for_gpu_lease_releases_if_fence_set_after_acquire(monkeypatch):
+    from zimage.engine.pipeline import (
+        clear_training_start_fence,
+        set_training_start_fence,
+    )
+
+    released: list[bool] = []
+
+    class FakeGuard:
+        def acquire(self):
+            set_training_start_fence()
+            return True
+
+        def release(self):
+            released.append(True)
+
+        def is_held(self):
+            return False
+
+    monkeypatch.setattr(handlers, "_create_handoff_guard", lambda: FakeGuard())
+    try:
+        with pytest.raises(RuntimeError, match="training is already running"):
+            handlers._wait_for_gpu_lease()
+        assert released == [True]
+    finally:
+        clear_training_start_fence()
+
+
+def test_live_foreign_lease_pid_reads_file_runtime_guard(tmp_path: Path, monkeypatch):
+    from zimage.training.runtime_guard import LOCK_ENV_VAR
+
+    lock = tmp_path / ".gpu.lease"
+    monkeypatch.setenv(LOCK_ENV_VAR, str(lock))
+    monkeypatch.setattr(
+        "zimage.training.runtime_guard.pid_is_alive",
+        lambda pid: pid == 4242,
+    )
+    lock.write_text("4242\n", encoding="ascii")
+    assert handlers._live_foreign_lease_pid() == 4242
+    lock.write_text("99999\n", encoding="ascii")
+    assert handlers._live_foreign_lease_pid() is None
+    lock.write_bytes(b"\0")
+    assert handlers._live_foreign_lease_pid() is None
+
+
+
+def test_duplicate_start_does_not_wait(tmp_path: Path, monkeypatch):
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    create_or_open_job("job", jobs)
+    waited: list[str] = []
+
+    class SlowGuard:
+        def acquire(self):
+            waited.append("acquire")
+            time.sleep(5)
+            return False
+
+        def release(self):
+            waited.append("release")
+
+        def is_held(self):
+            return False
+
+    class RunningManager:
+        def is_running(self):
+            return True
+
+        def start(self, job_id):
+            waited.append("start")
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "request_stop", lambda: waited.append("request_stop"))
+    monkeypatch.setattr(handlers, "_create_handoff_guard", lambda: SlowGuard())
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: RunningManager())
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="training is already running"):
+        handlers.start_training_job("job")
+    assert time.monotonic() - started < 1.0
+    assert waited == []
+
+
+def test_load_model_rejected_during_start_fence():
+    from zimage.engine.pipeline import (
+        clear_training_start_fence,
+        set_training_start_fence,
+    )
+
+    set_training_start_fence()
+    try:
+        with pytest.raises(gr.Error, match="Training owns the GPU"):
+            load_model("model", "cpu", "float32", False, False)
+    finally:
+        clear_training_start_fence()
+
+
+def test_generate_rejected_during_start_fence():
+    from zimage.engine.pipeline import (
+        clear_training_start_fence,
+        set_training_start_fence,
+    )
+
+    set_training_start_fence()
+    try:
+        with pytest.raises(gr.Error, match="Training owns the GPU"):
+            _generate()
+    finally:
+        clear_training_start_fence()
+
+
+def test_start_training_blocks_generate_and_load_during_fence(tmp_path: Path, monkeypatch):
+    from zimage.engine.pipeline import generate_image as real_generate
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    create_or_open_job("job", jobs)
+    blocked: list[str] = []
+
+    class FakeGuard:
+        def acquire(self):
+            return True
+
+        def release(self):
+            return None
+
+        def is_held(self):
+            return False
+
+    class FakeManager:
+        def is_running(self):
+            return False
+
+        def start(self, job_id):
+            return None
+
+    def during_unload():
+        with pytest.raises(gr.Error, match="Training owns the GPU"):
+            load_model("model", "cpu", "float32", False, False)
+        blocked.append("load")
+        with pytest.raises(RuntimeError, match="Training owns the GPU"):
+            real_generate("prompt", seed=1, outputs_dir=tmp_path)
+        blocked.append("generate")
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "request_stop", lambda: None)
+    monkeypatch.setattr(handlers, "unload_pipeline", during_unload)
+    monkeypatch.setattr(handlers, "_create_handoff_guard", lambda: FakeGuard())
+    monkeypatch.setattr(handlers, "_sync_and_empty_cuda", lambda: None)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: FakeManager())
+    monkeypatch.setattr(handlers, "_live_foreign_lease_pid", lambda: 4242)
+    monkeypatch.setattr(
+        "zimage.engine.pipeline.runtime_status",
+        lambda: {
+            "demo": False,
+            "cuda": False,
+            "torch": True,
+            "device": "cpu",
+            "device_name": "CPU",
+            "torch_version": "2.0",
+            "cuda_built": "",
+            "loaded": False,
+        },
+    )
+    monkeypatch.setattr("zimage.engine.pipeline.resolve_device", lambda _device: "cpu")
+
+    handlers.start_training_job("job")
+    assert blocked == ["load", "generate"]
+
+
+def test_poll_training_state_lists_previews(tmp_path: Path, monkeypatch):
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    preview = root / "previews" / "step-1" / "00.png"
+    preview.parent.mkdir(parents=True)
+    preview.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    payload = handlers.poll_training_state("job")
+    assert payload["state"]["job_id"] == "job"
+    assert payload["previews"] == [str(preview)]
+
+
+def test_training_callbacks_are_canonical_production_functions():
+    from zimage.ui.training_panel import TrainingCallbacks, noop_training_callbacks
+
+    bundle = handlers.training_callbacks()
+    assert isinstance(bundle, TrainingCallbacks)
+    assert bundle.start_job is handlers.start_training_job
+    assert bundle.stop_job is handlers.stop_training_job
+    assert bundle.save_yaml is handlers.save_training_yaml
+    assert bundle.list_jobs is handlers.list_training_jobs
+    assert bundle.create_or_open is handlers.create_or_open_training_job
+    assert bundle.queue_update is handlers.queue_training_update
+    assert bundle.load_job is handlers.load_training_job
+    assert bundle.validate_yaml is handlers.validate_training_yaml
+    assert bundle.poll_state is handlers.poll_training_state
+
+    noop = noop_training_callbacks()
+    assert bundle.start_job is not noop.start_job
+    assert bundle.stop_job is not noop.stop_job
+    assert bundle.save_yaml is not noop.save_yaml
+    assert bundle.list_jobs is not noop.list_jobs
+    assert bundle.create_or_open is not noop.create_or_open
+    assert bundle.queue_update is not noop.queue_update
+
+
+def test_start_training_unloads_cached_pipeline_and_next_inference_reloads(
+    tmp_path: Path, monkeypatch, reset_pipeline
+):
+    """Training start clears the inference singleton; the next load is lazy.
+
+    Same ``zimage.engine.pipeline._pipe`` that ``ensure_pipeline`` caches.
+    Generate is not invoked while the fake job still holds the GPU lease.
+    """
+    from zimage.engine import pipeline as pipeline_mod
+    from zimage.engine.pipeline import ensure_pipeline, training_start_fence_is_set
+    from zimage.training.jobs import create_or_open_job
+    from zimage.training.runtime_guard import FileRuntimeGuard
+
+    jobs = tmp_path / "jobs"
+    create_or_open_job("job", jobs)
+    lock_path = tmp_path / "gpu.lease"
+    monkeypatch.setenv("ZIMAGE_RUNTIME_LOCK", str(lock_path))
+    monkeypatch.setattr(pipeline_mod, "_INFERENCE_GUARD", None)
+    pipeline_mod.clear_training_start_fence()
+    pipeline_mod._lease_local.depth = 0
+
+    cached = object()
+    pipeline_mod._pipe = cached
+    pipeline_mod._pipe_key = ("seeded-before-training",)
+    assert handlers.unload_pipeline is pipeline_mod.unload_pipeline
+
+    loads: list[object] = []
+
+    def fake_load(*_args, **_kwargs):
+        pipe = object()
+        loads.append(pipe)
+        return pipe
+
+    def non_demo_status():
+        return {
+            "demo": False,
+            "cuda": False,
+            "torch": True,
+            "device": "cpu",
+            "device_name": "CPU",
+            "torch_version": "2.0",
+            "cuda_built": "",
+            "loaded": False,
+        }
+
+    monkeypatch.setattr(pipeline_mod, "load_pipeline", fake_load)
+    monkeypatch.setattr(pipeline_mod, "resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(pipeline_mod, "runtime_status", non_demo_status)
+    monkeypatch.setattr(pipeline_mod, "_reclaim_memory", lambda: None)
+
+    fence_at: dict[str, bool] = {}
+    pipe_at_start: dict[str, object] = {}
+
+    class FakeGuard:
+        def acquire(self):
+            return True
+
+        def release(self):
+            return None
+
+        def is_held(self):
+            return False
+
+    class FakeManager:
+        def is_running(self):
+            return False
+
+        def start(self, job_id):
+            fence_at["start"] = training_start_fence_is_set()
+            pipe_at_start["pipe"] = pipeline_mod._pipe
+            pipe_at_start["key"] = pipeline_mod._pipe_key
+            assert job_id == "job"
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "request_stop", lambda: None)
+    monkeypatch.setattr(handlers, "_create_handoff_guard", lambda: FakeGuard())
+    monkeypatch.setattr(handlers, "_sync_and_empty_cuda", lambda: None)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: FakeManager())
+    monkeypatch.setattr(handlers, "_live_foreign_lease_pid", lambda: 4242)
+
+    payload = handlers.start_training_job("job")
+    assert payload["job_id"] == "job"
+    assert pipe_at_start["pipe"] is None
+    assert pipe_at_start["key"] is None
+    assert pipeline_mod._pipe is None
+    assert pipeline_mod._pipe_key is None
+    assert fence_at["start"] is True
+    assert training_start_fence_is_set() is False
+    assert loads == []
+
+    child_lease = FileRuntimeGuard(lock_path)
+    assert child_lease.acquire() is True
+    try:
+        with pytest.raises(RuntimeError, match="Training owns the GPU"):
+            ensure_pipeline("model-a", "cpu", "float32", False, False)
+        with pytest.raises(gr.Error, match="Training owns the GPU"):
+            load_model("model-a", "cpu", "float32", False, False)
+        assert loads == []
+        assert pipeline_mod._pipe is None
+    finally:
+        child_lease.release()
+        monkeypatch.setattr(pipeline_mod, "_INFERENCE_GUARD", None)
+        pipeline_mod._lease_local.depth = 0
+
+    first, status_a = ensure_pipeline("model-a", "cpu", "float32", False, False)
+    second, status_b = ensure_pipeline("model-a", "cpu", "float32", False, False)
+    assert first is not cached
+    assert first is second
+    assert first is pipeline_mod._pipe
+    assert loads == [first]
+    assert status_a["loaded"] is True
+    assert status_b["model"] == "model-a"
+    assert training_start_fence_is_set() is False

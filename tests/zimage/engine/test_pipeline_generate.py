@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from PIL import Image
 import pytest
 
-from zimage.engine.pipeline import generate_image
+from zimage.engine import pipeline as pipeline_mod
+from zimage.engine.pipeline import GPU_LEASE_HELD_MESSAGE, generate_image
+
+
+@pytest.fixture(autouse=True)
+def _isolate_inference_lease(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZIMAGE_RUNTIME_LOCK", str(tmp_path / "gpu.lease"))
+    monkeypatch.setattr(pipeline_mod, "_INFERENCE_GUARD", None)
+    pipeline_mod.clear_training_start_fence()
+    pipeline_mod._lease_local.depth = 0
+    yield
+    pipeline_mod.clear_training_start_fence()
+    pipeline_mod._lease_local.depth = 0
+    monkeypatch.setattr(pipeline_mod, "_INFERENCE_GUARD", None)
 
 
 class _FakeResult:
@@ -428,3 +442,124 @@ def test_generate_image_passes_loras_on_cache_check(monkeypatch, tmp_path: Path)
     monkeypatch.setattr("zimage.engine.pipeline._pipeline_cache_hit", fake_hit)
     generate_image("prompt", seed=1, outputs_dir=tmp_path, loras=(spec,))
     assert captured["loras"] == (spec,)
+
+
+def test_generate_image_rejects_when_training_holds_lease(monkeypatch, tmp_path: Path):
+    class BlockingGuard:
+        def acquire(self):
+            return False
+
+        def release(self):
+            return None
+
+        def is_held(self):
+            return False
+
+    monkeypatch.setattr(pipeline_mod, "_INFERENCE_GUARD", BlockingGuard())
+    monkeypatch.setattr(pipeline_mod, "runtime_status", _non_demo_status)
+    monkeypatch.setattr(pipeline_mod, "resolve_device", lambda _device: "cpu")
+    with pytest.raises(RuntimeError, match="Training owns the GPU"):
+        generate_image("prompt", seed=1, outputs_dir=tmp_path)
+    assert GPU_LEASE_HELD_MESSAGE.startswith("Training owns the GPU")
+
+
+def test_generate_image_holds_lease_during_pipe(monkeypatch, tmp_path: Path):
+    fake = Image.new("RGB", (4, 4), "red")
+    held = {}
+
+    class HoldingPipe(_FakePipe):
+        def __call__(self, **kwargs):
+            held["during"] = pipeline_mod._inference_guard().is_held()
+            return super().__call__(**kwargs)
+
+    pipe = HoldingPipe(fake)
+    monkeypatch.setattr(pipeline_mod, "runtime_status", _non_demo_status)
+    monkeypatch.setattr(pipeline_mod, "resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        pipeline_mod, "ensure_pipeline", lambda *_args, **_kwargs: (pipe, {})
+    )
+    monkeypatch.setattr(pipeline_mod, "_pipeline_cache_hit", lambda *_a, **_k: True)
+
+    generate_image("prompt", seed=1, outputs_dir=tmp_path)
+    assert held["during"] is True
+    assert pipeline_mod._inference_guard().is_held() is False
+
+
+def test_generate_image_releases_lease_when_pipe_fails(monkeypatch, tmp_path: Path):
+    class BoomPipe:
+        def __call__(self, **kwargs):
+            raise RuntimeError("pipe failed")
+
+    monkeypatch.setattr(pipeline_mod, "runtime_status", _non_demo_status)
+    monkeypatch.setattr(pipeline_mod, "resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        pipeline_mod, "ensure_pipeline", lambda *_args, **_kwargs: (BoomPipe(), {})
+    )
+    monkeypatch.setattr(pipeline_mod, "_pipeline_cache_hit", lambda *_a, **_k: True)
+
+    with pytest.raises(RuntimeError, match="pipe failed"):
+        generate_image("prompt", seed=1, outputs_dir=tmp_path)
+    assert pipeline_mod._inference_guard().is_held() is False
+
+
+def test_generate_and_ensure_rejected_during_start_fence(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(pipeline_mod, "runtime_status", _non_demo_status)
+    monkeypatch.setattr(pipeline_mod, "resolve_device", lambda _device: "cpu")
+    pipeline_mod.set_training_start_fence()
+    with pytest.raises(RuntimeError, match="Training owns the GPU"):
+        generate_image("prompt", seed=1, outputs_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="Training owns the GPU"):
+        pipeline_mod.ensure_pipeline("model", "cpu")
+    assert GPU_LEASE_HELD_MESSAGE.startswith("Training owns the GPU")
+
+
+def test_same_thread_nested_hold_reuses_lease():
+    with pipeline_mod._hold_gpu_lease() as outer:
+        with pipeline_mod._hold_gpu_lease() as inner:
+            assert outer is inner
+            assert outer.is_held()
+    assert pipeline_mod._inference_guard().is_held() is False
+
+
+def test_other_thread_cannot_reuse_inference_lease():
+    started = threading.Event()
+    finished = threading.Event()
+    result: dict[str, str | bool] = {}
+
+    def other():
+        started.wait(timeout=2)
+        try:
+            with pipeline_mod._hold_gpu_lease():
+                result["nested"] = True
+        except RuntimeError as exc:
+            result["error"] = str(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=other)
+    thread.start()
+    with pipeline_mod._hold_gpu_lease():
+        started.set()
+        assert finished.wait(timeout=2)
+    thread.join(timeout=2)
+    assert "nested" not in result
+    assert "Training owns the GPU" in str(result.get("error", ""))
+
+
+def test_generate_nests_ensure_pipeline_on_same_thread(monkeypatch, tmp_path: Path):
+    fake = Image.new("RGB", (4, 4), "red")
+    pipe = _FakePipe(fake)
+    nested = {}
+
+    def tracking_load(*_args, **_kwargs):
+        nested["held"] = pipeline_mod._inference_guard().is_held()
+        nested["depth"] = getattr(pipeline_mod._lease_local, "depth", 0)
+        return pipe
+
+    monkeypatch.setattr(pipeline_mod, "runtime_status", _non_demo_status)
+    monkeypatch.setattr(pipeline_mod, "resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(pipeline_mod, "load_pipeline", tracking_load)
+    generate_image("prompt", seed=1, outputs_dir=tmp_path)
+    assert nested["held"] is True
+    assert nested["depth"] >= 2
+    assert pipeline_mod._inference_guard().is_held() is False

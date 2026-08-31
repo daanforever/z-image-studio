@@ -15,6 +15,8 @@ LORA_SUFFIXES = {".safetensors", ".pt"}
 DEFAULT_STRENGTH = 1.0
 MIN_STRENGTH = 0.0
 MAX_STRENGTH = 2.0
+NATIVE_LORA_WEIGHT_NAME = "pytorch_lora_weights.safetensors"
+NATIVE_LORA_METADATA_KEY = "lora_adapter_metadata"
 _INNER_DIT_SEGMENT = "._inner_dit."
 _INNER_DIT_PREFIX = "_inner_dit."
 _INNER_DIT_DOTTED = "inner.dit."
@@ -167,8 +169,7 @@ def sync_lora_adapters(
             _move_lora_modules(pipe, device)
         # One adapter at a time so peak memory never holds several A/B sets.
         for spec in specs:
-            state_dict = rewrite_lora_inner_dit_keys(_load_lora_state_dict(spec.path))
-            pipe.load_lora_weights(state_dict, adapter_name=spec.adapter_name)
+            _load_lora_weights(pipe, spec)
             if hasattr(pipe, "set_adapters"):
                 # Activate at unit scale. fuse_lora(lora_scale=spec.scale) applies
                 # strength once; passing the same value to both squares it.
@@ -180,6 +181,53 @@ def sync_lora_adapters(
         raise
     _applied_key = key
     _applied_pipe_id = pipe_id
+
+
+def _load_lora_weights(pipe, spec: LoraSpec) -> None:
+    """Load native Diffusers LoRA from path; rewrite external/Kohya state dicts."""
+    if _is_native_diffusers_lora(spec.path):
+        _load_native_lora_weights(pipe, spec.path, spec.adapter_name)
+        return
+    state_dict = rewrite_lora_inner_dit_keys(_load_lora_state_dict(spec.path))
+    pipe.load_lora_weights(state_dict, adapter_name=spec.adapter_name)
+
+
+def _is_native_diffusers_lora(path: Path) -> bool:
+    """True for a Diffusers save_lora_weights directory or metadata-bearing file."""
+    target = Path(path)
+    if target.is_dir():
+        return (target / NATIVE_LORA_WEIGHT_NAME).is_file()
+    if target.suffix.lower() != ".safetensors":
+        return False
+    if target.name == NATIVE_LORA_WEIGHT_NAME:
+        return True
+    return _safetensors_has_adapter_metadata(target)
+
+
+def _safetensors_has_adapter_metadata(path: Path) -> bool:
+    try:
+        from safetensors import safe_open
+
+        with safe_open(str(path), framework="pt") as handle:
+            metadata = handle.metadata() or {}
+    except Exception:
+        return False
+    return NATIVE_LORA_METADATA_KEY in metadata
+
+
+def _load_native_lora_weights(pipe, path: Path, adapter_name: str) -> None:
+    target = Path(path)
+    if target.is_dir():
+        pipe.load_lora_weights(str(target), adapter_name=adapter_name)
+        return
+    try:
+        pipe.load_lora_weights(str(target), adapter_name=adapter_name)
+    except TypeError:
+        pipe.load_lora_weights(
+            str(target.parent),
+            weight_name=target.name,
+            adapter_name=adapter_name,
+        )
 
 
 def _move_lora_modules(pipe, device: str) -> None:

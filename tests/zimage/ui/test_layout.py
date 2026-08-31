@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
+from pathlib import Path
 
 import gradio as gr
 
@@ -9,6 +10,7 @@ from zimage.config import DEFAULT_IMAGE_FORMAT, DEFAULT_LORA_DIR, DEFAULT_OUTPUT
 from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import generate
 from zimage.ui.layout import build_ui
+from zimage.ui.training_panel import build_training_panel as real_build_training_panel
 
 
 def _elem_ids(demo) -> set[str | None]:
@@ -357,6 +359,70 @@ def test_save_ui_prefs_events_wired(monkeypatch):
     assert {fn.trigger_after for fn in then_saves} == refresh_keys
 
 
+def test_generate_and_training_tabs(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    ids = _elem_ids(demo)
+    assert "studio-tabs" in ids
+    assert "studio-tab-generate" in ids
+    assert "studio-tab-training" in ids
+    assert "generate-btn" in ids
+    assert "studio-training-panel" in ids
+    assert "studio-training-start" in ids
+    assert "studio-training-stop" in ids
+    labels = []
+    for block in demo.blocks.values():
+        label = getattr(block, "label", None)
+        if label in {"Generate", "Training"}:
+            labels.append(label)
+    assert labels == ["Generate", "Training"]
+
+
+def test_navbar_stop_still_cancels_generate(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    assert len(_fns_named(demo, "generate")) == 1
+    stop_fns = _fns_named(demo, "request_stop")
+    assert len(stop_fns) == 1
+    assert stop_fns[0].targets
+    assert stop_fns[0].targets[0][1] == "click"
+    assert "studio-stop-btn" in _elem_ids(demo)
+    assert "studio-training-stop" in _elem_ids(demo)
+
+
+def test_training_start_cancels_generate(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    cancel_fns = _fns_named(demo, "cancel_generate_for_training")
+    assert len(cancel_fns) == 1
+    assert cancel_fns[0].targets
+    assert cancel_fns[0].targets[0][1] == "click"
+    start_btn = _block_by_elem_id(demo, "studio-training-start")
+    assert cancel_fns[0].targets[0][0] == getattr(start_btn, "_id", start_btn)
+
+
+def test_build_ui_clamps_lora_adapters_from_yaml(monkeypatch, tmp_path: Path):
+    from zimage.prefs import save_ui_prefs as dump_prefs
+
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    (tmp_path / "alpha.safetensors").write_bytes(b"")
+    dump_prefs(
+        {
+            "lora_dir": str(tmp_path),
+            "lora_adapters": ["alpha.safetensors", "gone.safetensors"],
+            "lora_weights": [
+                ["alpha.safetensors", 0.8],
+                ["gone.safetensors", 0.5],
+            ],
+        }
+    )
+    demo = build_ui()
+    adapters = _block_by_elem_id(demo, "studio-lora-adapters")
+    assert adapters.allow_custom_value is True
+    assert "alpha.safetensors" in _choice_labels(adapters.choices)
+    assert adapters.value == ["alpha.safetensors"]
+
+
 def test_build_ui_applies_yaml_pref_values(monkeypatch):
     from zimage.prefs import save_ui_prefs as dump_prefs
 
@@ -375,3 +441,44 @@ def test_build_ui_applies_yaml_pref_values(monkeypatch):
     assert prompt.value == "from yaml"
     assert output_dir.value == "./yaml-out"
     assert precision.value == "float16"
+
+
+def test_build_ui_passes_training_callbacks_bundle_to_panel(monkeypatch):
+    from zimage.ui import handlers as handlers_mod
+    from zimage.ui.training_panel import TrainingCallbacks, noop_training_callbacks
+
+    produced: dict[str, TrainingCallbacks] = {}
+    captured: dict[str, TrainingCallbacks] = {}
+
+    def tracking_callbacks():
+        bundle = handlers_mod.training_callbacks()
+        produced["bundle"] = bundle
+        return bundle
+
+    def spy_build(*, callbacks=None):
+        captured["callbacks"] = callbacks
+        return real_build_training_panel(callbacks=callbacks)
+
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    monkeypatch.setattr("zimage.ui.layout.training_callbacks", tracking_callbacks)
+    monkeypatch.setattr("zimage.ui.layout.build_training_panel", spy_build)
+
+    demo = build_ui()
+    assert demo is not None
+    bundle = captured["callbacks"]
+    assert bundle is produced["bundle"]
+    assert isinstance(bundle, TrainingCallbacks)
+    assert bundle.start_job is handlers_mod.start_training_job
+    assert bundle.stop_job is handlers_mod.stop_training_job
+    assert bundle.save_yaml is handlers_mod.save_training_yaml
+    assert bundle.list_jobs is handlers_mod.list_training_jobs
+    assert bundle.create_or_open is handlers_mod.create_or_open_training_job
+    assert bundle.queue_update is handlers_mod.queue_training_update
+    assert bundle.load_job is handlers_mod.load_training_job
+    assert bundle.validate_yaml is handlers_mod.validate_training_yaml
+    assert bundle.poll_state is handlers_mod.poll_training_state
+
+    noop = noop_training_callbacks()
+    assert bundle.start_job is not noop.start_job
+    assert bundle.save_yaml is not noop.save_yaml
+    assert bundle.create_or_open is not noop.create_or_open

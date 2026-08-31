@@ -6,3 +6,4 @@ Please review the proposed implementation plan and do the following:
 - If the scope is too large, divide the main task into smaller, manageable subagents (subtasks).
 - For every piece of feedback or concern you raise, provide a concrete and actionable suggestion on how to correct or expand the plan.
 
+Never update the plan directly.

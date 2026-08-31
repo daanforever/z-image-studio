@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from PIL import Image
 
@@ -45,8 +46,71 @@ from zimage.engine.runtime import dtype_from_name, resolve_device, runtime_statu
 _lock = threading.Lock()
 _pipe: Any = None
 _pipe_key: tuple | None = None
+_INFERENCE_GUARD: Any = None
+_lease_local = threading.local()
+_lease_gate = threading.Lock()
+_training_start_fence = threading.Event()
 
 OUTPUT_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
+GPU_LEASE_HELD_MESSAGE = (
+    "Training owns the GPU; Generate is rejected until training finishes."
+)
+
+
+def set_training_start_fence() -> None:
+    """Block Generate/Load while training takes over the GPU."""
+    _training_start_fence.set()
+
+
+def clear_training_start_fence() -> None:
+    """Drop the start fence after the child is running or start fails."""
+    _training_start_fence.clear()
+
+
+def training_start_fence_is_set() -> bool:
+    return _training_start_fence.is_set()
+
+
+def _raise_if_inference_blocked() -> None:
+    if _training_start_fence.is_set():
+        raise RuntimeError(GPU_LEASE_HELD_MESSAGE)
+
+
+def _inference_guard():
+    global _INFERENCE_GUARD
+    if _INFERENCE_GUARD is None:
+        from zimage.training.runtime_guard import create_runtime_guard
+
+        _INFERENCE_GUARD = create_runtime_guard()
+    return _INFERENCE_GUARD
+
+
+@contextmanager
+def _hold_gpu_lease() -> Iterator[Any]:
+    """Hold the GPU lease. Same-thread callers nest; other threads must acquire."""
+    _raise_if_inference_blocked()
+    guard = _inference_guard()
+    depth = getattr(_lease_local, "depth", 0)
+    if depth > 0:
+        _lease_local.depth = depth + 1
+        try:
+            yield guard
+        finally:
+            _lease_local.depth = depth
+        return
+
+    with _lease_gate:
+        _raise_if_inference_blocked()
+        # Do not treat another thread's is_held() as a nestable hold.
+        # acquire() is required unless this thread already owns the depth.
+        if guard.is_held() or not guard.acquire():
+            raise RuntimeError(GPU_LEASE_HELD_MESSAGE)
+        _lease_local.depth = 1
+    try:
+        yield guard
+    finally:
+        _lease_local.depth = 0
+        guard.release()
 
 
 def _instantiate_pipeline(model_id: str, kwargs: dict[str, Any]):
@@ -212,6 +276,7 @@ def ensure_pipeline(
 ):
     global _pipe, _pipe_key
 
+    _raise_if_inference_blocked()
     resolved = resolve_device(device)
     if resolved == "demo":
         return None, runtime_status()
@@ -228,25 +293,26 @@ def ensure_pipeline(
         quantize_text_encoder,
         loras=lora_specs,
     )
-    with _lock:
-        if _pipe is not None and _pipe_key == key:
+    with _hold_gpu_lease():
+        with _lock:
+            if _pipe is not None and _pipe_key == key:
+                return _pipe, _loaded_status(model_id, resolved, dtype_name)
+            _pipe = None
+            _pipe_key = None
+            reset_lora_adapters()
+            _reclaim_memory()
+            _pipe = load_pipeline(
+                model_id,
+                resolved,
+                dtype_name,
+                cpu_offload,
+                vae_tiling,
+                quantize_transformer=quantize_transformer,
+                quantize_text_encoder=quantize_text_encoder,
+                loras=lora_specs,
+            )
+            _pipe_key = key
             return _pipe, _loaded_status(model_id, resolved, dtype_name)
-        _pipe = None
-        _pipe_key = None
-        reset_lora_adapters()
-        _reclaim_memory()
-        _pipe = load_pipeline(
-            model_id,
-            resolved,
-            dtype_name,
-            cpu_offload,
-            vae_tiling,
-            quantize_transformer=quantize_transformer,
-            quantize_text_encoder=quantize_text_encoder,
-            loras=lora_specs,
-        )
-        _pipe_key = key
-        return _pipe, _loaded_status(model_id, resolved, dtype_name)
 
 
 def unload_pipeline() -> None:
@@ -412,6 +478,7 @@ def generate_image(
     outputs_dir: Path | None = None,
     image_format: str = DEFAULT_IMAGE_FORMAT,
 ) -> tuple[Image.Image, int, dict[str, Any]]:
+    _raise_if_inference_blocked()
     status = runtime_status()
     resolved = resolve_device(device)
     lora_specs = tuple(loras or ())
@@ -431,81 +498,84 @@ def generate_image(
             progress(1.0, desc="Done")
         return image, seed, status
 
-    needs_load = not _pipeline_cache_hit(
-        model_id,
-        resolved,
-        dtype_name,
-        cpu_offload,
-        vae_tiling,
-        quantize_transformer,
-        quantize_text_encoder,
-        loras=lora_specs,
-    )
-    if progress is not None and needs_load:
-        progress(0.0, desc="Loading model…")
+    with _hold_gpu_lease():
+        needs_load = not _pipeline_cache_hit(
+            model_id,
+            resolved,
+            dtype_name,
+            cpu_offload,
+            vae_tiling,
+            quantize_transformer,
+            quantize_text_encoder,
+            loras=lora_specs,
+        )
+        if progress is not None and needs_load:
+            progress(0.0, desc="Loading model…")
 
-    pipe, _status = ensure_pipeline(
-        model_id,
-        resolved,
-        dtype_name,
-        cpu_offload,
-        vae_tiling,
-        quantize_transformer=quantize_transformer,
-        quantize_text_encoder=quantize_text_encoder,
-        loras=lora_specs,
-    )
+        pipe, _status = ensure_pipeline(
+            model_id,
+            resolved,
+            dtype_name,
+            cpu_offload,
+            vae_tiling,
+            quantize_transformer=quantize_transformer,
+            quantize_text_encoder=quantize_text_encoder,
+            loras=lora_specs,
+        )
 
-    if progress is not None and needs_load:
-        progress(0.02, desc="Loading model…")
+        if progress is not None and needs_load:
+            progress(0.02, desc="Loading model…")
 
-    if hasattr(pipe, "set_progress_bar_config"):
-        pipe.set_progress_bar_config(disable=True)
+        if hasattr(pipe, "set_progress_bar_config"):
+            pipe.set_progress_bar_config(disable=True)
 
-    import torch
-    from diffusers import FlowMatchEulerDiscreteScheduler
+        import torch
+        from diffusers import FlowMatchEulerDiscreteScheduler
 
-    if hasattr(pipe, "scheduler"):
-        try:
-            pipe.scheduler = FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=time_shift)
-        except Exception:
-            pass
+        if hasattr(pipe, "scheduler"):
+            try:
+                pipe.scheduler = FlowMatchEulerDiscreteScheduler(
+                    num_train_timesteps=1000, shift=time_shift
+                )
+            except Exception:
+                pass
 
-    gen_device = "cuda" if resolved == "cuda" else "cpu"
-    generator = torch.Generator(device=gen_device).manual_seed(int(seed))
+        gen_device = "cuda" if resolved == "cuda" else "cpu"
+        generator = torch.Generator(device=gen_device).manual_seed(int(seed))
 
-    total_steps = max(int(steps), 1)
+        total_steps = max(int(steps), 1)
 
-    def on_step_end(_pipe, step_index, _timestep, callback_kwargs):
+        def on_step_end(_pipe, step_index, _timestep, callback_kwargs):
+            if progress is not None:
+                frac = min(0.05 + 0.90 * ((step_index + 1) / total_steps), 0.95)
+                progress(frac, desc=f"Generating… {step_index + 1}/{total_steps}")
+            return callback_kwargs
+
         if progress is not None:
-            frac = min(0.05 + 0.90 * ((step_index + 1) / total_steps), 0.95)
-            progress(frac, desc=f"Generating… {step_index + 1}/{total_steps}")
-        return callback_kwargs
+            progress(0.05, desc="Generating…")
 
-    if progress is not None:
-        progress(0.05, desc="Generating…")
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "height": int(height),
+            "width": int(width),
+            "num_inference_steps": int(steps),
+            "guidance_scale": float(guidance),
+            "generator": generator,
+        }
+        # Turbo ignores CFG; keep the arg for API compatibility.
+        try:
+            result = _invoke_pipe(pipe, {**kwargs, "callback_on_step_end": on_step_end})
+        except TypeError:
+            # Pipeline rejected callback_on_step_end; keep a coarse "Generating…" until return.
+            result = _invoke_pipe(pipe, kwargs)
 
-    kwargs: dict[str, Any] = {
-        "prompt": prompt,
-        "height": int(height),
-        "width": int(width),
-        "num_inference_steps": int(steps),
-        "guidance_scale": float(guidance),
-        "generator": generator,
-    }
-    # Turbo ignores CFG; keep the arg for API compatibility.
-    try:
-        result = _invoke_pipe(pipe, {**kwargs, "callback_on_step_end": on_step_end})
-    except TypeError:
-        # Pipeline rejected callback_on_step_end; keep a coarse "Generating…" until return.
-        result = _invoke_pipe(pipe, kwargs)
-
-    image = result.images[0]
-    if progress is not None:
-        progress(0.98, desc="Saving…")
-    path = save_image(image, seed, outputs_dir=outputs_dir, image_format=fmt)
-    status = _loaded_status(model_id, resolved, dtype_name)
-    status["loras"] = status_loras(lora_specs)
-    status["saved"] = str(path)
-    if progress is not None:
-        progress(1.0, desc="Done")
-    return image, seed, status
+        image = result.images[0]
+        if progress is not None:
+            progress(0.98, desc="Saving…")
+        path = save_image(image, seed, outputs_dir=outputs_dir, image_format=fmt)
+        status = _loaded_status(model_id, resolved, dtype_name)
+        status["loras"] = status_loras(lora_specs)
+        status["saved"] = str(path)
+        if progress is not None:
+            progress(1.0, desc="Done")
+        return image, seed, status

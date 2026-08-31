@@ -9,6 +9,9 @@ from safetensors.torch import save_file
 
 from zimage.engine.lora import (
     LoraSpec,
+    NATIVE_LORA_METADATA_KEY,
+    NATIVE_LORA_WEIGHT_NAME,
+    _is_native_diffusers_lora,
     list_lora_files,
     normalize_lora_dir,
     parse_lora_specs,
@@ -101,6 +104,92 @@ class _DisableOnlyPipe:
 
     def disable_lora(self):
         self.disables += 1
+
+
+def _recording_zimage_pipeline(in_features: int):
+    """Real ZImagePipeline + tiny CPU transformer; wrappers only record, then delegate."""
+    pytest.importorskip("diffusers")
+    pytest.importorskip("peft")
+    import torch.nn as nn
+    from diffusers import ZImagePipeline
+    from diffusers.loaders import PeftAdapterMixin
+    from diffusers.loaders.lora_pipeline import ZImageLoraLoaderMixin
+    from diffusers.models.modeling_utils import ModelMixin
+
+    class TinyTransformer(ModelMixin, PeftAdapterMixin):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(in_features, in_features, bias=False)
+            nn.init.zeros_(self.proj.weight)
+
+    assert ZImagePipeline.load_lora_weights is ZImageLoraLoaderMixin.load_lora_weights
+    pipe = ZImagePipeline(
+        scheduler=None,
+        vae=None,
+        text_encoder=None,
+        tokenizer=None,
+        transformer=TinyTransformer(),
+    )
+    assert isinstance(pipe, ZImageLoraLoaderMixin)
+    assert next(pipe.transformer.parameters()).device.type == "cpu"
+
+    pipe.loads = []
+    pipe.fuses = []
+    pipe.unloads = 0
+    pipe.loaded_rank = None
+    pipe.loaded_alpha = None
+
+    original_load = pipe.load_lora_weights
+    original_fuse = pipe.fuse_lora
+    original_unload = pipe.unload_lora_weights
+    assert original_load.__func__ is ZImageLoraLoaderMixin.load_lora_weights
+    assert original_fuse.__func__ is ZImageLoraLoaderMixin.fuse_lora
+
+    def load_lora_weights(pretrained, adapter_name=None, **kwargs):
+        pipe.loads.append(pretrained)
+        if isinstance(pretrained, dict):
+            raise AssertionError(
+                "native LoRA must load from path, not a rewritten state dict"
+            )
+        result = original_load(pretrained, adapter_name=adapter_name, **kwargs)
+        config = pipe.transformer.peft_config[adapter_name]
+        pipe.loaded_rank = config.r
+        pipe.loaded_alpha = config.lora_alpha
+        return result
+
+    def fuse_lora(adapter_names=None, lora_scale=None, **kwargs):
+        pipe.fuses.append((list(adapter_names or []), lora_scale))
+        return original_fuse(adapter_names=adapter_names, lora_scale=lora_scale, **kwargs)
+
+    def unload_lora_weights():
+        pipe.unloads += 1
+        return original_unload()
+
+    pipe.load_lora_weights = load_lora_weights
+    pipe.fuse_lora = fuse_lora
+    pipe.unload_lora_weights = unload_lora_weights
+    return pipe
+
+
+def _save_native_proj_lora(destination: Path, *, rank: int, alpha: int, a, b) -> Path:
+    pytest.importorskip("diffusers")
+    from diffusers import ZImagePipeline
+
+    ZImagePipeline.save_lora_weights(
+        destination,
+        transformer_lora_layers={
+            "proj.lora_A.weight": a,
+            "proj.lora_B.weight": b,
+        },
+        transformer_lora_adapter_metadata={
+            "r": rank,
+            "lora_alpha": alpha,
+            "lora_dropout": 0.0,
+            "target_modules": ["proj"],
+        },
+        safe_serialization=True,
+    )
+    return destination / NATIVE_LORA_WEIGHT_NAME
 
 
 def test_list_lora_files_empty_and_missing(tmp_path: Path):
@@ -376,6 +465,7 @@ def test_sync_lora_adapters_loads_pt(tmp_path: Path, reset_lora):
     path = tmp_path / "style.pt"
     state = {"diffusion_model.layers.0.attention.to_q.lora_A.weight": torch.zeros((1, 1))}
     torch.save(state, path)
+    assert _is_native_diffusers_lora(path) is False
     specs = parse_lora_specs(str(tmp_path), ["style.pt"], [["style.pt", 0.9]])
     pipe = _LoraPipe()
     sync_lora_adapters(pipe, specs)
@@ -548,6 +638,7 @@ def test_sync_lora_adapters_rewrites_wrapped_keys(tmp_path: Path, reset_lora):
         adapter_name="old",
         scale=1.0,
     )
+    assert _is_native_diffusers_lora(path) is False
     pipe = _LoraPipe()
     sync_lora_adapters(pipe, (spec,))
     state, name = pipe.loads[0]
@@ -557,3 +648,92 @@ def test_sync_lora_adapters_rewrites_wrapped_keys(tmp_path: Path, reset_lora):
     assert all("_inner_dit" not in key and "inner.dit." not in key for key in state)
     assert pipe.fuses == [(["old"], 1.0)]
     assert pipe.unloads == 1
+
+
+def test_native_diffusers_lora_loads_from_path_and_scales_alpha_over_rank(
+    tmp_path: Path, reset_lora
+):
+    import json
+
+    rank = 2
+    alpha = 8
+    strength = 0.5
+    in_features = 8
+    a = torch.zeros(rank, in_features)
+    b = torch.zeros(in_features, rank)
+    a[0, 0] = 2.0
+    b[0, 0] = 3.0
+    delta = 6.0
+    destination = tmp_path / "native-adapter"
+    weights = _save_native_proj_lora(destination, rank=rank, alpha=alpha, a=a, b=b)
+    assert weights.is_file()
+    with safe_open(str(weights), framework="pt") as handle:
+        metadata = handle.metadata() or {}
+    assert NATIVE_LORA_METADATA_KEY in metadata
+    packed = json.loads(metadata[NATIVE_LORA_METADATA_KEY])
+    assert packed["transformer.r"] == rank
+    assert packed["transformer.lora_alpha"] == alpha
+    assert packed["transformer.lora_alpha"] != packed["transformer.r"]
+    assert _is_native_diffusers_lora(destination) is True
+
+    spec = LoraSpec(
+        path=destination,
+        filename=destination.name,
+        adapter_name="native",
+        scale=strength,
+    )
+    allocated_before = (
+        torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+    )
+    pipe = _recording_zimage_pipeline(in_features)
+    sync_lora_adapters(pipe, (spec,))
+    allocated_after = (
+        torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+    )
+    assert allocated_after - allocated_before < 1024 * 1024
+    assert pipe.loads == [str(destination)]
+    assert pipe.loaded_rank == rank
+    assert pipe.loaded_alpha == alpha
+    expected = strength * (alpha / rank) * delta
+    fused = float(pipe.transformer.proj.weight.detach()[0, 0])
+    assert fused == pytest.approx(expected)
+    assert fused != pytest.approx(strength * delta)
+    assert fused != pytest.approx((strength**2) * (alpha / rank) * delta)
+    assert fused != pytest.approx(strength * ((alpha / rank) ** 2) * delta)
+    probe = torch.zeros(1, in_features)
+    probe[0, 0] = 1.0
+    assert float(pipe.transformer.proj(probe)[0, 0]) == pytest.approx(expected)
+    assert pipe.fuses == [(["native"], strength)]
+    assert pipe.unloads == 1
+    assert next(pipe.transformer.parameters()).device.type == "cpu"
+
+
+def test_native_safetensors_file_loads_from_path(tmp_path: Path, reset_lora):
+    rank = 2
+    alpha = 8
+    strength = 0.5
+    in_features = 8
+    a = torch.zeros(rank, in_features)
+    b = torch.zeros(in_features, rank)
+    a[0, 0] = 2.0
+    b[0, 0] = 3.0
+    destination = tmp_path / "native-file"
+    weights = _save_native_proj_lora(destination, rank=rank, alpha=alpha, a=a, b=b)
+    assert _is_native_diffusers_lora(weights) is True
+    pipe = _recording_zimage_pipeline(in_features)
+    spec = LoraSpec(
+        path=weights,
+        filename=weights.name,
+        adapter_name="native_file",
+        scale=strength,
+    )
+    sync_lora_adapters(pipe, (spec,))
+    assert len(pipe.loads) == 1
+    loaded = pipe.loads[0]
+    assert isinstance(loaded, str)
+    assert Path(loaded) == weights or Path(loaded) == destination
+    expected = strength * (alpha / rank) * 6.0
+    fused = float(pipe.transformer.proj.weight.detach()[0, 0])
+    assert fused == pytest.approx(expected)
+    assert pipe.loaded_rank == rank
+    assert pipe.loaded_alpha == alpha

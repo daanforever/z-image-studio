@@ -1,0 +1,43 @@
+job_name: "minimal"
+main_transformer:
+  path: Tongyi-MAI/Z-Image
+  revision: null
+sampling_transformer:
+  path: Tongyi-MAI/Z-Image-Turbo
+  revision: null
+datasets: []
+lora:
+  rank: 4
+  alpha: 4
+  dropout: 0.0
+  targets: [to_k, to_q, to_v, to_out.0]
+precision: fp8
+gradient_checkpointing: true
+seed: 0
+epochs: 1
+max_steps: 500
+checkpoint_every: 100
+optimizer:
+  name: adamw
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+scheduler:
+  name: constant
+  warmup_steps: 0
+weighting_scheme: none
+logit_mean: 0.0
+logit_std: 1.0
+mode_scale: 1.29
+max_sequence_length: 512
+sampling:
+  common_parameters:
+    num_inference_steps: 9
+    guidance_scale: 0.0
+    time_shift: 3.0
+    width: 1024
+    height: 1024
+    seed: 42
+    prompt: ""
+    negative_prompt: ""
+  samples:
+    - prompt: ""

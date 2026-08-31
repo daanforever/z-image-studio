@@ -14,6 +14,8 @@ import gradio as gr
 
 from zimage.prefs import load_ui_prefs
 from zimage.ui.handlers import (
+    _clamp_lora_selection,
+    cancel_generate_for_training,
     clear_preview_images,
     delete_preview_image,
     generate,
@@ -25,9 +27,11 @@ from zimage.ui.handlers import (
     save_ui_prefs,
     set_gallery_index,
     sync_lora_weights,
+    training_callbacks,
     unload_model,
 )
 from zimage.ui.status import format_status
+from zimage.ui.training_panel import build_training_panel
 
 
 def build_navbar() -> tuple[gr.Button, gr.Button]:
@@ -106,173 +110,184 @@ def _pref_inputs(
 
 def build_ui(*, share: bool = False) -> gr.Blocks:
     prefs = load_ui_prefs()
+    lora_dir_value, lora_files, lora_kept, lora_weight_rows = _clamp_lora_selection(
+        prefs["lora_dir"],
+        prefs["lora_adapters"],
+        prefs["lora_weights"],
+    )
     with gr.Blocks(
         title="Z-Image-Turbo Studio",
         fill_height=True,
     ) as demo:
         clear_btn, stop_btn = build_navbar()
-        with gr.Row():
-            with gr.Column(scale=5):
-                prompt = gr.Textbox(
-                    label="Prompt",
-                    lines=5,
-                    value=prefs["prompt"],
-                    placeholder="Describe the shot: lighting, lens, composition, on-image text…",
-                    elem_id="studio-prompt",
-                )
+        with gr.Tabs(elem_id="studio-tabs"):
+            with gr.Tab("Generate", elem_id="studio-tab-generate"):
                 with gr.Row():
-                    resolution = gr.Dropdown(
-                        choices=RESOLUTION_PRESETS,
-                        value=prefs["resolution"],
-                        label="Resolution",
-                    )
-                    steps = gr.Slider(
-                        1,
-                        20,
-                        value=prefs["steps"],
-                        step=1,
-                        label="Steps (Turbo = 9)",
-                    )
-                with gr.Row():
-                    batch_count = gr.Number(
-                        value=prefs["batch"],
-                        precision=0,
-                        minimum=1,
-                        maximum=MAX_BATCH,
-                        label="Batch",
-                        info="Images to generate with incremental seeds (seed, seed+1, …).",
-                    )
-                    output_dir = gr.Textbox(
-                        value=prefs["output_dir"],
-                        label="Output dir",
-                        info="Folder for saved images (Windows paths accepted).",
-                        elem_id="studio-output-dir",
-                    )
-                    image_format = gr.Radio(
-                        choices=IMAGE_FORMAT_CHOICES,
-                        value=prefs["image_format"],
-                        label="Format",
-                        info="JPEG is smaller; PNG is lossless.",
-                        elem_id="studio-image-format",
-                    )
-                with gr.Row():
-                    seed = gr.Number(value=prefs["seed"], precision=0, label="Seed")
-                    random_seed = gr.Checkbox(value=prefs["random_seed"], label="Random seed")
-                generate_btn = gr.Button("Generate", variant="primary", elem_id="generate-btn")
-
-                with gr.Accordion("Model & device", open=True):
-                    model_id = gr.Textbox(
-                        value=prefs["model_id"],
-                        label="Model (Hugging Face ID or snapshot path)",
-                        info="e.g. Tongyi-MAI/Z-Image-Turbo or E:\\Backup\\huggingface\\hub\\models--Tongyi-MAI--Z-Image-Turbo\\snapshots\\…",
-                    )
-                    with gr.Row():
-                        device = gr.Radio(
-                            choices=["auto", "cuda", "cpu"],
-                            value=prefs["device"],
-                            label="Device",
+                    with gr.Column(scale=5):
+                        prompt = gr.Textbox(
+                            label="Prompt",
+                            lines=5,
+                            value=prefs["prompt"],
+                            placeholder="Describe the shot: lighting, lens, composition, on-image text…",
+                            elem_id="studio-prompt",
                         )
-                        dtype_name = gr.Radio(
-                            choices=PRECISION_CHOICES,
-                            value=prefs["precision"],
-                            label="Precision",
-                            info="fp8 / int8: torchao on the checked modules (official checkpoint). fp8 needs Ada 8.9+ / Blackwell and cannot use CPU offload.",
-                        )
-                    quantize_modules = gr.CheckboxGroup(
-                        choices=QUANTIZE_CHOICES,
-                        value=prefs["quantize_modules"],
-                        label="quantize",
-                        elem_id="studio-quantize",
-                    )
-                    with gr.Row():
-                        cpu_offload = gr.Checkbox(
-                            value=prefs["cpu_offload"],
-                            label="CPU offload (saves VRAM)",
-                        )
-                        vae_tiling = gr.Checkbox(
-                            value=prefs["vae_tiling"],
-                            label="VAE tiling",
-                        )
-                    with gr.Row():
-                        load_btn = gr.Button("Load model")
-                        unload_btn = gr.Button("Unload")
+                        with gr.Row():
+                            resolution = gr.Dropdown(
+                                choices=RESOLUTION_PRESETS,
+                                value=prefs["resolution"],
+                                label="Resolution",
+                            )
+                            steps = gr.Slider(
+                                1,
+                                20,
+                                value=prefs["steps"],
+                                step=1,
+                                label="Steps (Turbo = 9)",
+                            )
+                        with gr.Row():
+                            batch_count = gr.Number(
+                                value=prefs["batch"],
+                                precision=0,
+                                minimum=1,
+                                maximum=MAX_BATCH,
+                                label="Batch",
+                                info="Images to generate with incremental seeds (seed, seed+1, …).",
+                            )
+                            output_dir = gr.Textbox(
+                                value=prefs["output_dir"],
+                                label="Output dir",
+                                info="Folder for saved images (Windows paths accepted).",
+                                elem_id="studio-output-dir",
+                            )
+                            image_format = gr.Radio(
+                                choices=IMAGE_FORMAT_CHOICES,
+                                value=prefs["image_format"],
+                                label="Format",
+                                info="JPEG is smaller; PNG is lossless.",
+                                elem_id="studio-image-format",
+                            )
+                        with gr.Row():
+                            seed = gr.Number(value=prefs["seed"], precision=0, label="Seed")
+                            random_seed = gr.Checkbox(value=prefs["random_seed"], label="Random seed")
+                        generate_btn = gr.Button("Generate", variant="primary", elem_id="generate-btn")
 
-                with gr.Accordion("LoRA", open=True, elem_id="studio-lora"):
-                    lora_dir = gr.Textbox(
-                        value=prefs["lora_dir"],
-                        label="Directory",
-                        info=(
-                            "Local folder of .safetensors / .pt adapters "
-                            "(a pasted file path uses its parent folder). "
-                            "Leave empty for the base model. "
-                            "Adapters are fused into the base weights before "
-                            "quantization (VRAM ≈ base model); changing adapters "
-                            "or strength reloads the model."
-                        ),
-                        elem_id="studio-lora-dir",
-                    )
-                    lora_refresh = gr.Button("Refresh", elem_id="studio-lora-refresh")
-                    lora_adapters = gr.Dropdown(
-                        choices=[],
-                        value=list(prefs["lora_adapters"]),
-                        multiselect=True,
-                        label="Adapters",
-                        info="Select one or more files. Empty = no LoRA.",
-                        elem_id="studio-lora-adapters",
-                    )
-                    lora_weights = gr.Dataframe(
-                        headers=["LoRA", "Strength"],
-                        datatype=["str", "number"],
-                        value=list(prefs["lora_weights"]),
-                        column_count=2,
-                        interactive=True,
-                        label="Strength",
-                        elem_id="studio-lora-weights",
-                    )
+                        with gr.Accordion("Model & device", open=True):
+                            model_id = gr.Textbox(
+                                value=prefs["model_id"],
+                                label="Model (Hugging Face ID or snapshot path)",
+                                info="e.g. Tongyi-MAI/Z-Image-Turbo or E:\\Backup\\huggingface\\hub\\models--Tongyi-MAI--Z-Image-Turbo\\snapshots\\…",
+                            )
+                            with gr.Row():
+                                device = gr.Radio(
+                                    choices=["auto", "cuda", "cpu"],
+                                    value=prefs["device"],
+                                    label="Device",
+                                )
+                                dtype_name = gr.Radio(
+                                    choices=PRECISION_CHOICES,
+                                    value=prefs["precision"],
+                                    label="Precision",
+                                    info="fp8 / int8: torchao on the checked modules (official checkpoint). fp8 needs Ada 8.9+ / Blackwell and cannot use CPU offload.",
+                                )
+                            quantize_modules = gr.CheckboxGroup(
+                                choices=QUANTIZE_CHOICES,
+                                value=prefs["quantize_modules"],
+                                label="quantize",
+                                elem_id="studio-quantize",
+                            )
+                            with gr.Row():
+                                cpu_offload = gr.Checkbox(
+                                    value=prefs["cpu_offload"],
+                                    label="CPU offload (saves VRAM)",
+                                )
+                                vae_tiling = gr.Checkbox(
+                                    value=prefs["vae_tiling"],
+                                    label="VAE tiling",
+                                )
+                            with gr.Row():
+                                load_btn = gr.Button("Load model")
+                                unload_btn = gr.Button("Unload")
 
-                with gr.Accordion("Advanced", open=False):
-                    guidance = gr.Slider(
-                        0.0,
-                        8.0,
-                        value=prefs["guidance"],
-                        step=0.1,
-                        label="Guidance scale",
-                        info="Keep at 0 for Turbo. For full Z-Image, 3–5 is typical.",
-                    )
-                    time_shift = gr.Slider(
-                        1.0,
-                        10.0,
-                        value=prefs["time_shift"],
-                        step=0.1,
-                        label="Time shift",
-                        info="3 is the Turbo default. Toward 10: more steps on composition. Toward 1: more on fine detail.",
-                    )
+                        with gr.Accordion("LoRA", open=True, elem_id="studio-lora"):
+                            lora_dir = gr.Textbox(
+                                value=lora_dir_value,
+                                label="Directory",
+                                info=(
+                                    "Local folder of .safetensors / .pt adapters "
+                                    "(a pasted file path uses its parent folder). "
+                                    "Leave empty for the base model. "
+                                    "Adapters are fused into the base weights before "
+                                    "quantization (VRAM ≈ base model); changing adapters "
+                                    "or strength reloads the model."
+                                ),
+                                elem_id="studio-lora-dir",
+                            )
+                            lora_refresh = gr.Button("Refresh", elem_id="studio-lora-refresh")
+                            lora_adapters = gr.Dropdown(
+                                choices=lora_files,
+                                value=lora_kept,
+                                multiselect=True,
+                                allow_custom_value=True,
+                                label="Adapters",
+                                info="Select one or more files. Empty = no LoRA.",
+                                elem_id="studio-lora-adapters",
+                            )
+                            lora_weights = gr.Dataframe(
+                                headers=["LoRA", "Strength"],
+                                datatype=["str", "number"],
+                                value=lora_weight_rows,
+                                column_count=2,
+                                interactive=True,
+                                label="Strength",
+                                elem_id="studio-lora-weights",
+                            )
 
-            with gr.Column(scale=6):
-                gallery_index = gr.State(0)
-                delete_btn = gr.Button(
-                    "Delete",
-                    render=False,
-                    elem_id="studio-gallery-delete",
-                )
-                gallery = gr.Gallery(
-                    label="Output",
-                    columns=1,
-                    height=640,
-                    object_fit="contain",
-                    preview=True,
-                    format="png",
-                    elem_id="output-gallery",
-                    buttons=_gallery_buttons(delete_btn, share=share),
-                )
-                used_seed = gr.Textbox(label="Used seed", interactive=False)
-                status = gr.Markdown(format_status(), elem_id="status-md")
-                gr.Examples(
-                    examples=EXAMPLE_PROMPTS,
-                    inputs=prompt,
-                    label="Examples",
-                    elem_id="studio-examples",
-                )
+                        with gr.Accordion("Advanced", open=False):
+                            guidance = gr.Slider(
+                                0.0,
+                                8.0,
+                                value=prefs["guidance"],
+                                step=0.1,
+                                label="Guidance scale",
+                                info="Keep at 0 for Turbo. For full Z-Image, 3–5 is typical.",
+                            )
+                            time_shift = gr.Slider(
+                                1.0,
+                                10.0,
+                                value=prefs["time_shift"],
+                                step=0.1,
+                                label="Time shift",
+                                info="3 is the Turbo default. Toward 10: more steps on composition. Toward 1: more on fine detail.",
+                            )
+
+                    with gr.Column(scale=6):
+                        gallery_index = gr.State(0)
+                        delete_btn = gr.Button(
+                            "Delete",
+                            render=False,
+                            elem_id="studio-gallery-delete",
+                        )
+                        gallery = gr.Gallery(
+                            label="Output",
+                            columns=1,
+                            height=640,
+                            object_fit="contain",
+                            preview=True,
+                            format="png",
+                            elem_id="output-gallery",
+                            buttons=_gallery_buttons(delete_btn, share=share),
+                        )
+                        used_seed = gr.Textbox(label="Used seed", interactive=False)
+                        status = gr.Markdown(format_status(), elem_id="status-md")
+                        gr.Examples(
+                            examples=EXAMPLE_PROMPTS,
+                            inputs=prompt,
+                            label="Examples",
+                            elem_id="studio-examples",
+                        )
+
+            with gr.Tab("Training", elem_id="studio-tab-training"):
+                training = build_training_panel(callbacks=training_callbacks())
 
         pref_inputs = _pref_inputs(
             prompt,
@@ -379,6 +394,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
         )
         generate_btn.click(save_ui_prefs, inputs=pref_inputs)
         stop_btn.click(request_stop, cancels=[generate_event])
+        training.start_btn.click(cancel_generate_for_training, cancels=[generate_event])
         clear_btn.click(
             clear_preview_images,
             inputs=[output_dir],

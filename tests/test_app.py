@@ -10,7 +10,7 @@ from zimage.ui.theme import CUSTOM_CSS, CUSTOM_JS
 
 def test_parse_args_defaults():
     args = parse_args([])
-    assert args.host == "0.0.0.0"
+    assert args.host == "127.0.0.1"
     assert args.share is False
 
 
@@ -85,4 +85,5 @@ def test_module_entrypoint_logs_oserror(monkeypatch, capsys):
     app_path = Path(__file__).resolve().parents[1] / "app.py"
     with pytest.raises(OSError, match="address already in use"):
         runpy.run_path(str(app_path), run_name="__main__")
-    assert "Failed to start server" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "Failed to start server" in captured.out + captured.err

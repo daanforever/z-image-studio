@@ -126,23 +126,156 @@ By default Turbo loads in **fp8** (Ada 8.9+ / Blackwell, including RTX 5080; inc
 
 **LoRA:** adapters are fused into the base weights (on GPU when CUDA is used without CPU offload), then the pipeline is quantized as usual. Steady-state VRAM with LoRA should match the same precision without LoRA (aside from activation memory during a step). Changing the selected adapters or strength requires a full model reload.
 
+## Training
+
+LoRA training against **Tongyi-MAI/Z-Image** (Base). Optional preview sampling can use **Tongyi-MAI/Z-Image-Turbo**. The Gradio app has **Generate** and **Training** tabs. The CLI is `python train.py`.
+
+### Root `config.yaml`
+
+Training paths live only under the root `training` section (not under `ui`):
+
+```yaml
+training:
+  datasets_dir: ./datasets
+  jobs_dir: ./jobs
+```
+
+The first training call (CLI or Training tab) writes that section atomically if it is missing. If `training` is present but `datasets_dir` / `jobs_dir` are missing, empty, or not strings, training fails — those defaults are not applied as a silent read-time fallback.
+
+`datasets/` and `jobs/` are gitignored (`.gitkeep` only).
+
+### Job YAML
+
+Create/Open writes a full default job. `job_id` is a lowercase ASCII slug of the name you type; the original string is stored as `job_name`. Opening an existing slug does not overwrite `config.yaml` or `state.json`.
+
+`main_transformer` must be Base (`Tongyi-MAI/Z-Image`). Turbo is rejected as `main_transformer` and is only valid as optional `sampling_transformer`. `datasets[].name` is a folder under `datasets_dir` or an absolute path. `precision` is `fp8` or `bf16`. When both `epochs` and `max_steps` are set, **`max_steps` wins**. `sampling.common_parameters` uses Diffusers keys (`guidance_scale`, `num_inference_steps`, `time_shift`, `width`, `height`, `seed`, `prompt`, `negative_prompt`); per-sample maps overlay those keys.
+
+There is no `init_adapter` field.
+
+```yaml
+job_name: "my style"
+main_transformer:
+  path: Tongyi-MAI/Z-Image
+  revision: null
+sampling_transformer:
+  path: Tongyi-MAI/Z-Image-Turbo
+  revision: null
+datasets:
+  - name: my-dataset
+    default_caption: ""
+lora:
+  rank: 4
+  alpha: 4
+  dropout: 0.0
+  targets: [to_k, to_q, to_v, to_out.0]
+precision: fp8
+gradient_checkpointing: true
+seed: 0
+epochs: 1
+max_steps: 500
+checkpoint_every: 100
+optimizer:
+  name: adamw
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+scheduler:
+  name: constant
+  warmup_steps: 0
+weighting_scheme: none
+logit_mean: 0.0
+logit_std: 1.0
+mode_scale: 1.29
+max_sequence_length: 512
+sampling:
+  common_parameters:
+    num_inference_steps: 9
+    guidance_scale: 0.0
+    time_shift: 3.0
+    width: 1024
+    height: 1024
+    seed: 42
+    prompt: ""
+    negative_prompt: ""
+  samples:
+    - prompt: ""
+```
+
+### Dataset layout
+
+```
+datasets/{name}/
+  photo.png              # .png / .jpg / .jpeg / .webp
+  photo.txt              # sidecar caption (UTF-8)
+  .cache/
+    photo.png.safetensors
+```
+
+Caption is the sidecar `.txt` when it is non-empty, otherwise `default_caption`. A sample with neither is rejected. Images must already be a multiple of 16 on each side and at most **1024×1024** (area). There is no resize, crop, or pad. `.cache/` holds versioned safetensors (latent + prompt embedding); files under `.cache/` are not treated as dataset images.
+
+### Job layout
+
+```
+jobs/{job_id}/
+  config.yaml
+  state.json
+  commands/
+  checkpoints/
+  previews/
+```
+
+No `metrics/` or `logs/`. `state.json` is operational only (`job_id`, `status`, `step`, `epoch`, `last_error`, `exit_code`). Checkpoints are native LoRA weights (`checkpoints/step-N/`); optimizer state is not saved.
+
+### CLI
+
+```bat
+python train.py create "my style"
+python train.py validate <job_id>
+python train.py cache <job_id>
+python train.py run <job_id>
+python train.py update <job_id> path\to\job.yaml
+python train.py status <job_id>
+```
+
+`create` prints the slug and opens the existing directory if that slug already exists. `update` writes `config.yaml` when the job is idle, or enqueues the document when it is running. `status` prints a JSON snapshot of `state.json`.
+
+### UI
+
+**Generate** | **Training**. On Training: **Job** dropdown (select an existing job, or type a new name and click **Create**), YAML editor for `jobs/{id}/config.yaml`, **Validate** / **Save** / **Start** / **Stop**, operational status, and a preview gallery. **Stop** is immediate: the trainer process is killed and no extra checkpoint is written.
+
+### Policy
+
+- **Base trains, Turbo samples.** `Tongyi-MAI/Z-Image-Turbo` cannot be `main_transformer`. Omit `sampling_transformer` to sample from the same Base weights; set it to Turbo for distilled previews.
+- **FP8 training** uses TorchAO `convert_to_float8_training` on the main transformer (not inference `apply_quantization`). If the GPU is not FP8-capable (needs Ada 8.9+ / Blackwell), the run falls back to **BF16**.
+- **Warm start** loads the latest complete LoRA checkpoint and builds a **new** optimizer. Checkpoints do not store optimizer state. There is no `init_adapter` field.
+- **Immediate Stop** does not write a checkpoint.
+- **GPU lease.** Generate (inference) and training cannot own the GPU at the same time. Start training after Generate is idle (or stop Generate first).
+- **System RAM** is not validated or limited.
+
 ## Tests
+
+The suite mirrors the production package: `tests/test_app.py` for `app.py`, and `tests/zimage/{engine,prefs,ui,training}/` for the matching `zimage/` modules. Shared fixtures live in `tests/conftest.py`.
+
+Default `pytest` is the mocked / unit / tiny-CUDA suite. Opt-in real-weight tests stay skipped unless you set their env flags. See [tests/README.md](tests/README.md) for what each GPU test is designed to prove versus what has been observed, the exact commands, and the resource-safety protocol.
 
 ```bat
 pip install -r requirements-dev.txt
 pytest
 ```
 
-Covers config, runtime/demo/pipeline, and UI handlers. Model weights and a live GPU are not required.
+The default suite does not need model weights. Tiny CUDA tests skip when CUDA or FP8 capability is missing. Opt-in real-model gates are not part of a default pass. The Base snapshot metadata prerequisite is repaired and the hardware smoke is ready for a controlled rerun; that smoke has not been rerun and has not passed.
 
 ## Layout
 
 ```
 app.py                 entry point (python app.py)
+train.py               training CLI (python train.py)
 zimage/config.py       presets and .env
 zimage/engine/         device status, demo frame, pipeline
+zimage/training/       job schema, cache, loop
 zimage/ui/             theme, status, handlers, Gradio layout
 tests/                 pytest
 launch.bat             Windows launcher with local paths
 outputs/               saved JPEGs / PNGs
+datasets/              training images (gitignored)
+jobs/                  training jobs (gitignored)
 ```

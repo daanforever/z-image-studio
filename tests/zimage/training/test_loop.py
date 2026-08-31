@@ -970,16 +970,14 @@ def test_checkpoint_writer_then_preview_sampler_order(tmp_path):
         max_steps=1,
         checkpoint_every=1,
         sampling={
-            "common_parameters": {
-                "num_inference_steps": 9,
-                "guidance_scale": 0.0,
-                "time_shift": 3.0,
-                "width": 1024,
-                "height": 1024,
-                "seed": 42,
-                "prompt": "shared",
-                "negative_prompt": "",
-            },
+            "num_inference_steps": 9,
+            "guidance_scale": 0.0,
+            "time_shift": 3.0,
+            "width": 1024,
+            "height": 1024,
+            "seed": 42,
+            "prompt": "shared",
+            "negative_prompt": "",
             "samples": [{"prompt": "one"}, {"prompt": "two", "seed": 7}],
         },
     )
@@ -1020,16 +1018,14 @@ def test_cuda_checkpoint_preview_handoff_exact_order(tmp_path):
     root = make_job(
         tmp_path,
         sampling={
-            "common_parameters": {
-                "num_inference_steps": 1,
-                "guidance_scale": 0.0,
-                "time_shift": 1.0,
-                "width": 16,
-                "height": 16,
-                "seed": 1,
-                "prompt": "one",
-                "negative_prompt": "",
-            },
+            "num_inference_steps": 1,
+            "guidance_scale": 0.0,
+            "time_shift": 1.0,
+            "width": 16,
+            "height": 16,
+            "seed": 1,
+            "prompt": "one",
+            "negative_prompt": "",
             "samples": [{"prompt": "one"}],
         },
     )
@@ -1102,7 +1098,7 @@ def test_cuda_handoff_wraps_all_previews_once(tmp_path):
     root = make_job(
         tmp_path,
         sampling={
-            "common_parameters": {"prompt": "shared"},
+            "prompt": "shared",
             "samples": [{"prompt": "one"}, {"prompt": "two"}],
         },
     )
@@ -1696,7 +1692,7 @@ def test_default_preview_sampler_uses_from_components_without_pipeline(monkeypat
         {
             "components": components,
             "config": {
-                "sampling": {"common_parameters": common},
+                "sampling": common,
                 "lora": {"targets": ["to_k"]},
             },
             "preview_prompt_embeddings": embeddings,
@@ -1779,16 +1775,14 @@ def test_cli_path_builds_default_sampler_before_releasing_text(monkeypatch, tmp_
         max_steps=1,
         checkpoint_every=1,
         sampling={
-            "common_parameters": {
-                "num_inference_steps": 9,
-                "guidance_scale": 0.0,
-                "time_shift": 3.0,
-                "width": 1024,
-                "height": 1024,
-                "seed": 42,
-                "prompt": "shared",
-                "negative_prompt": "neg",
-            },
+            "num_inference_steps": 9,
+            "guidance_scale": 0.0,
+            "time_shift": 3.0,
+            "width": 1024,
+            "height": 1024,
+            "seed": 42,
+            "prompt": "shared",
+            "negative_prompt": "neg",
             "samples": [{"prompt": "one"}, {"prompt": "two", "seed": 7}],
         },
     )
@@ -2191,21 +2185,19 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
         tmp_path,
         max_steps=2,
         sampling={
-            "common_parameters": {
-                "num_inference_steps": 9,
-                "guidance_scale": 0.0,
-                "time_shift": 3.0,
-                "width": 64,
-                "height": 64,
-                "seed": 42,
-                "prompt": "old prompt",
-                "negative_prompt": "",
-            },
+            "num_inference_steps": 9,
+            "guidance_scale": 0.0,
+            "time_shift": 3.0,
+            "width": 64,
+            "height": 64,
+            "seed": 42,
+            "prompt": "old prompt",
+            "negative_prompt": "",
             "samples": [{"prompt": "old prompt"}],
         },
     )
     updated = load_job_config(root)
-    updated["sampling"]["common_parameters"]["prompt"] = "brand new prompt"
+    updated["sampling"]["prompt"] = "brand new prompt"
     updated["sampling"]["samples"] = [{"prompt": "brand new prompt"}]
     enqueue_update(root, updated)
 
@@ -2256,7 +2248,7 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
     assert after_handoff["main_residency"] == "cuda"
     assert set(after_handoff["main_devices"].values()) <= {"cpu"}
     assert set(after_handoff["optimizer_devices"] or ["cpu"]) <= {"cpu"}
-    assert load_job_config(root)["sampling"]["common_parameters"]["prompt"] == (
+    assert load_job_config(root)["sampling"]["prompt"] == (
         "brand new prompt"
     )
     assert load_job_state(root).status is JobStatus.RUNNING or load_job_state(
@@ -2266,16 +2258,14 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
 
 def _sampling_block(*, prompt: str, negative: str = "", **sample_extra) -> dict:
     return {
-        "common_parameters": {
-            "num_inference_steps": 9,
-            "guidance_scale": 0.0,
-            "time_shift": 3.0,
-            "width": 64,
-            "height": 64,
-            "seed": 42,
-            "prompt": "",
-            "negative_prompt": "",
-        },
+        "num_inference_steps": 9,
+        "guidance_scale": 0.0,
+        "time_shift": 3.0,
+        "width": 64,
+        "height": 64,
+        "seed": 42,
+        "prompt": "",
+        "negative_prompt": "",
         "samples": [{"prompt": prompt, "negative_prompt": negative, **sample_extra}],
     }
 
@@ -2428,11 +2418,11 @@ def test_sampling_size_seed_time_shift_and_empty_negative_do_not_load_te(
         sampling=_sampling_block(prompt="stable prompt", negative="old negative"),
     )
     updated = load_job_config(root)
-    updated["sampling"]["common_parameters"]["width"] = 32
-    updated["sampling"]["common_parameters"]["height"] = 32
-    updated["sampling"]["common_parameters"]["seed"] = 99
-    updated["sampling"]["common_parameters"]["time_shift"] = 1.25
-    updated["sampling"]["common_parameters"]["negative_prompt"] = ""
+    updated["sampling"]["width"] = 32
+    updated["sampling"]["height"] = 32
+    updated["sampling"]["seed"] = 99
+    updated["sampling"]["time_shift"] = 1.25
+    updated["sampling"]["negative_prompt"] = ""
     updated["sampling"]["samples"] = [
         {"prompt": "stable prompt", "negative_prompt": "", "seed": 7}
     ]

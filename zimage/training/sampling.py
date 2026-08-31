@@ -444,17 +444,9 @@ def resolve_preview_parameters(
     common: Mapping[str, Any],
     sample: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Merge ``sampling.common_parameters`` with one sample (sample wins)."""
+    """Merge root sampling parameters with one sample (sample wins)."""
 
-    payload = dict(sample)
-    if "common_parameters" in payload and "samples" in payload:
-        common = payload["common_parameters"]
-        samples = payload["samples"]
-        payload = samples[0] if samples else {}
-    elif "common_parameters" in payload:
-        common = payload.pop("common_parameters")
-        payload.pop("samples", None)
-    return merge_sample_parameters(common, payload)
+    return merge_sample_parameters(common, sample)
 
 
 def _invoke_pipeline(pipeline: Any, request: dict[str, Any]) -> Any:

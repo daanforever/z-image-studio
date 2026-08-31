@@ -70,6 +70,7 @@ from zimage.training.schema import (
     merge_sample_parameters,
     resolve_stop_condition,
     resolve_training_paths,
+    sampling_base_parameters,
     validate_job_document,
 )
 
@@ -869,7 +870,7 @@ def _sample_previews(
     step: int,
 ) -> None:
     sampling = config["sampling"]
-    common = sampling["common_parameters"]
+    common = sampling_base_parameters(sampling)
     for index, sample in enumerate(sampling["samples"]):
         parameters = merge_sample_parameters(common, sample)
         destination = job_dir / "previews" / f"step-{step}" / f"{index:02d}.png"
@@ -1131,9 +1132,7 @@ def _refresh_preview_embeddings_serial(
                 sampler.negative_prompt_embeddings = dict(negative_embeds)
             sampling = runtime["config"].get("sampling") or {}
             if hasattr(sampler, "common_parameters"):
-                sampler.common_parameters = dict(
-                    sampling.get("common_parameters") or {}
-                )
+                sampler.common_parameters = dict(sampling_base_parameters(sampling))
     except Exception as exc:
         failure = exc
     finally:
@@ -1724,7 +1723,7 @@ def _collect_preview_prompt_texts(
     job: Mapping[str, Any],
 ) -> tuple[list[str], list[str]]:
     sampling = job.get("sampling") or {}
-    common = sampling.get("common_parameters") or {}
+    common = sampling_base_parameters(sampling)
     samples = sampling.get("samples") or [{}]
     prompts: list[str] = []
     negatives: list[str] = []
@@ -1783,7 +1782,7 @@ def _default_preview_sampler(
         "negative_prompt_embeddings": dict(
             runtime.get("preview_negative_embeddings") or {}
         ),
-        "common_parameters": (config.get("sampling") or {}).get("common_parameters"),
+        "common_parameters": sampling_base_parameters(config.get("sampling") or {}),
         "device": _preview_sampler_device(runtime, injected),
         "target_modules": list((config.get("lora") or {}).get("targets") or []),
         "main_transformer": getattr(components, "main_transformer", None),

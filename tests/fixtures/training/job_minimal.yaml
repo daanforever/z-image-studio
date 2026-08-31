@@ -31,14 +31,13 @@ logit_std: 1.0
 mode_scale: 1.29
 max_sequence_length: 512
 sampling:
-  common_parameters:
-    num_inference_steps: 9
-    guidance_scale: 0.0
-    time_shift: 3.0
-    width: 1024
-    height: 1024
-    seed: 42
-    prompt: ""
-    negative_prompt: ""
+  num_inference_steps: 9
+  guidance_scale: 0.0
+  time_shift: 3.0
+  width: 1024
+  height: 1024
+  seed: 42
+  prompt: ""
+  negative_prompt: ""
   samples:
-    - prompt: ""
+    - prompt: "a photo of a dog"

@@ -37,9 +37,8 @@ from zimage.ui.training_panel import (
 CANONICAL_YAML = (
     "job_name: demo\n"
     "sampling:\n"
-    "  common_parameters:\n"
-    "    guidance_scale: 0.0\n"
-    "    num_inference_steps: 9\n"
+    "  guidance_scale: 0.0\n"
+    "  num_inference_steps: 9\n"
 )
 
 PANEL_SOURCE = Path(__file__).resolve().parents[3] / "zimage" / "ui" / "training_panel.py"

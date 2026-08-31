@@ -148,7 +148,7 @@ The first training call (CLI or Training tab) writes that section atomically if 
 
 Create/Open writes a full default job. `job_id` is a lowercase ASCII slug of the name you type; the original string is stored as `job_name`. Opening an existing slug does not overwrite `config.yaml` or `state.json`.
 
-`model.main_transformer` must be Base (`Tongyi-MAI/Z-Image`). Turbo is rejected as `model.main_transformer` and is only valid as optional `model.sampling_transformer`. Top-level `main_transformer` and `sampling_transformer` keys are no longer valid; they must be nested under `model`. `datasets[].name` is a folder under `datasets_dir` or an absolute path. `precision` is `fp8` or `bf16`. When both `epochs` and `max_steps` are set, **`max_steps` wins**. `sampling.common_parameters` uses Diffusers keys (`guidance_scale`, `num_inference_steps`, `time_shift`, `width`, `height`, `seed`, `prompt`, `negative_prompt`); per-sample maps overlay those keys.
+`model.main_transformer` must be Base (`Tongyi-MAI/Z-Image`). Turbo is rejected as `model.main_transformer` and is only valid as optional `model.sampling_transformer`. Top-level `main_transformer` and `sampling_transformer` keys are no longer valid; they must be nested under `model`. `datasets[].name` is a folder under `datasets_dir` or an absolute path. `precision` is `fp8` or `bf16`. When both `epochs` and `max_steps` are set, **`max_steps` wins**. Diffusers keys (`guidance_scale`, `num_inference_steps`, `time_shift`, `width`, `height`, `seed`, `prompt`, `negative_prompt`) live on `sampling`; each `samples[]` map overlays those keys. Existing jobs with the old nested sampling YAML fail Validate/Start (unknown keys) and must be edited by hand.
 
 There is no `init_adapter` field.
 
@@ -188,17 +188,16 @@ logit_std: 1.0
 mode_scale: 1.29
 max_sequence_length: 512
 sampling:
-  common_parameters:
-    num_inference_steps: 9
-    guidance_scale: 0.0
-    time_shift: 3.0
-    width: 1024
-    height: 1024
-    seed: 42
-    prompt: ""
-    negative_prompt: ""
+  num_inference_steps: 9
+  guidance_scale: 0.0
+  time_shift: 3.0
+  width: 1024
+  height: 1024
+  seed: 42
+  prompt: ''
+  negative_prompt: ''
   samples:
-    - prompt: ""
+  - prompt: 'a photo of a dog'
 ```
 
 ### Dataset layout

@@ -103,7 +103,6 @@ DATASET_ITEM_KEYS = frozenset({"name", "default_caption"})
 LORA_KEYS = frozenset({"rank", "alpha", "dropout", "targets"})
 OPTIMIZER_KEYS = frozenset({"name", "learning_rate", "weight_decay"})
 SCHEDULER_KEYS = frozenset({"name", "warmup_steps"})
-SAMPLING_BLOCK_KEYS = frozenset({"common_parameters", "samples"})
 SAMPLING_PARAMETER_KEYS = frozenset(
     {
         "guidance_scale",
@@ -116,6 +115,7 @@ SAMPLING_PARAMETER_KEYS = frozenset(
         "negative_prompt",
     }
 )
+SAMPLING_BLOCK_KEYS = SAMPLING_PARAMETER_KEYS | {"samples"}
 
 
 class TrainingConfigError(ValueError):
@@ -301,18 +301,16 @@ def job_create_template() -> dict[str, Any]:
         "mode_scale": 1.29,
         "max_sequence_length": 512,
         "sampling": {
-            "common_parameters": {
-                "num_inference_steps": 9,
-                "guidance_scale": 0.0,
-                "time_shift": 3.0,
-                "width": 1024,
-                "height": 1024,
-                "seed": 42,
-                "prompt": "",
-                "negative_prompt": "",
-            },
+            "num_inference_steps": 9,
+            "guidance_scale": 0.0,
+            "time_shift": 3.0,
+            "width": 1024,
+            "height": 1024,
+            "seed": 42,
+            "prompt": "",
+            "negative_prompt": "",
             "samples": [
-                {"prompt": ""},
+                {"prompt": "a photo of a dog"},
             ],
         },
     }
@@ -473,25 +471,32 @@ def resolve_stop_condition(job: Mapping[str, Any]) -> tuple[str, int]:
     raise TrainingConfigError("job must set epochs or max_steps")
 
 
+def sampling_base_parameters(sampling: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the eight Diffusers keys present on ``sampling`` (partial OK)."""
+    data = _require_mapping(sampling, "sampling")
+    return {key: data[key] for key in SAMPLING_PARAMETER_KEYS if key in data}
+
+
 def merge_sample_parameters(
     common: Mapping[str, Any],
     sample: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Merge a per-sample dict over ``sampling.common_parameters`` (sample wins)."""
-    common_map = _require_mapping(common, "sampling.common_parameters")
+    """Merge a per-sample dict over root sampling parameters (sample wins)."""
+    common_map = _require_mapping(common, "sampling")
     sample_map = _require_mapping(sample, "sampling.samples[]")
-    _reject_unknown(common_map, SAMPLING_PARAMETER_KEYS, "sampling.common_parameters")
+    _reject_unknown(common_map, SAMPLING_PARAMETER_KEYS, "sampling")
     _reject_unknown(sample_map, SAMPLING_PARAMETER_KEYS, "sampling.samples[]")
     base = _coerce_sampling_params(
         {**_sampling_defaults(), **dict(common_map)},
-        "sampling.common_parameters",
+        "sampling",
     )
     overlay = _coerce_sampling_params(sample_map, "sampling.samples[]", partial=True)
     return {**base, **overlay}
 
 
 def _sampling_defaults() -> dict[str, Any]:
-    return dict(job_create_template()["sampling"]["common_parameters"])
+    sampling = job_create_template()["sampling"]
+    return {key: sampling[key] for key in SAMPLING_PARAMETER_KEYS}
 
 
 def _changed_paths(
@@ -654,16 +659,18 @@ def _validate_sampling(raw: Any) -> dict[str, Any]:
     data = _require_mapping(raw, "sampling")
     _reject_unknown(data, SAMPLING_BLOCK_KEYS, "sampling")
     defaults = job_create_template()["sampling"]
-    common_raw = _present(data, "common_parameters", defaults["common_parameters"])
     samples_raw = _present(data, "samples", defaults["samples"])
-    common = _coerce_sampling_params(
-        {**_sampling_defaults(), **dict(_require_mapping(common_raw, "sampling.common_parameters"))},
-        "sampling.common_parameters",
+    params = _coerce_sampling_params(
+        {
+            **_sampling_defaults(),
+            **{key: data[key] for key in SAMPLING_PARAMETER_KEYS if key in data},
+        },
+        "sampling",
     )
     if not isinstance(samples_raw, list):
         raise TrainingConfigError("sampling.samples must be a list")
     samples = [_validate_sample(item, index) for index, item in enumerate(samples_raw)]
-    return {"common_parameters": common, "samples": samples}
+    return {**params, "samples": samples}
 
 
 def _validate_sample(raw: Any, index: int) -> dict[str, Any]:

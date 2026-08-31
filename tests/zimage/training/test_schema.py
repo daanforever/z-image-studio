@@ -8,7 +8,11 @@ import yaml
 from zimage.prefs import load_ui_prefs
 from zimage.prefs import store as prefs_store
 from zimage.prefs.store import dump_document, load_document
-from zimage.training.schema import load_job_document_for_classify
+from zimage.training.schema import (
+    _sampling_defaults,
+    load_job_document_for_classify,
+    sampling_base_parameters,
+)
 from zimage.training import (
     CACHE_LATENT_CHANNELS,
     CACHE_LATENT_DTYPE,
@@ -85,13 +89,13 @@ def test_load_minimal_job_fixture():
     assert job["epochs"] == 1
     assert job["max_steps"] == 500
     assert job["optimizer"]["learning_rate"] == pytest.approx(1.0e-4)
-    assert job["sampling"]["samples"] == [{"prompt": ""}]
+    assert job["sampling"]["samples"] == [{"prompt": "a photo of a dog"}]
 
 
 def test_create_template_empty_datasets_and_placeholder_sample():
     doc = job_create_template()
     assert doc["datasets"] == []
-    assert doc["sampling"]["samples"] == [{"prompt": ""}]
+    assert doc["sampling"]["samples"] == [{"prompt": "a photo of a dog"}]
     assert doc["job_name"] == "Мой стиль"
     assert doc["model"]["main_transformer"] == {
         "path": KNOWN_MAIN_SOURCE,
@@ -103,7 +107,7 @@ def test_create_template_empty_datasets_and_placeholder_sample():
     }
     parsed = validate_job_document(doc)
     assert parsed["datasets"] == []
-    assert parsed["sampling"]["samples"] == [{"prompt": ""}]
+    assert parsed["sampling"]["samples"] == [{"prompt": "a photo of a dog"}]
     assert parsed["model"]["main_transformer"]["revision"] is None
     assert parsed["model"]["sampling_transformer"]["revision"] is None
 
@@ -256,7 +260,7 @@ def test_load_ui_prefs_when_training_invalid():
 
 def test_merge_sample_overrides_common_parameters():
     job = job_create_template()
-    common = job["sampling"]["common_parameters"]
+    common = sampling_base_parameters(job["sampling"])
     sample = {"prompt": "a cat", "seed": 7, "width": 512}
     merged = merge_sample_parameters(common, sample)
     assert merged["prompt"] == "a cat"
@@ -281,17 +285,24 @@ def test_sampling_uses_exact_diffusers_parameter_names():
         }
     )
     template = job_create_template()
-    assert set(template["sampling"]["common_parameters"]) == SAMPLING_PARAMETER_KEYS
+    assert set(template["sampling"]) - {"samples"} == SAMPLING_PARAMETER_KEYS
+    assert set(_sampling_defaults()) == SAMPLING_PARAMETER_KEYS
+    assert "samples" not in _sampling_defaults()
 
-    for alias in ("guidance", "steps"):
+    for alias in ("guidance", "steps", "common_parameters"):
         job = job_create_template()
         job["sampling"]["samples"] = [{alias: 1}]
         with pytest.raises(TrainingConfigError, match="unknown"):
             validate_job_document(job)
 
+    nested = job_create_template()
+    nested["sampling"]["common_parameters"] = {"prompt": "legacy"}
+    with pytest.raises(TrainingConfigError, match="unknown"):
+        validate_job_document(nested)
+
 
 def test_every_sampling_parameter_may_be_overridden_per_sample():
-    common = job_create_template()["sampling"]["common_parameters"]
+    common = sampling_base_parameters(job_create_template()["sampling"])
     sample = {
         "guidance_scale": 2.5,
         "time_shift": 4.0,
@@ -503,7 +514,7 @@ def test_template_calls_return_independent_documents():
     first["lora"]["targets"].append("changed")
     first["sampling"]["samples"][0]["prompt"] = "changed"
     assert second["lora"]["targets"] == ["to_k", "to_q", "to_v", "to_out.0"]
-    assert second["sampling"]["samples"] == [{"prompt": ""}]
+    assert second["sampling"]["samples"] == [{"prompt": "a photo of a dog"}]
 
 
 @pytest.mark.parametrize(
@@ -514,8 +525,8 @@ def test_template_calls_return_independent_documents():
         (("lora", "dropout"), 1.1),
         (("optimizer", "learning_rate"), 0),
         (("optimizer", "weight_decay"), -1),
-        (("sampling", "common_parameters", "width"), 0),
-        (("sampling", "common_parameters", "guidance_scale"), float("nan")),
+        (("sampling", "width"), 0),
+        (("sampling", "guidance_scale"), float("nan")),
     ],
 )
 def test_invalid_numeric_values_raise(path, value):
@@ -524,5 +535,5 @@ def test_invalid_numeric_values_raise(path, value):
     for key in path[:-1]:
         target = target[key]
     target[path[-1]] = value
-    with pytest.raises(TrainingConfigError):
+    with pytest.raises(TrainingConfigError, match=r"\.".join(path)):
         validate_job_document(job)

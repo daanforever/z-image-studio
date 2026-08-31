@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from zimage.prefs import load_ui_prefs
 from zimage.prefs import store as prefs_store
 from zimage.prefs.store import dump_document, load_document
+from zimage.training.schema import load_job_document_for_classify
 from zimage.training import (
     CACHE_LATENT_CHANNELS,
     CACHE_LATENT_DTYPE,
@@ -467,6 +469,32 @@ def test_top_level_transformer_keys_must_be_nested_under_model():
     job["main_transformer"] = {"path": KNOWN_MAIN_SOURCE}
     with pytest.raises(TrainingConfigError, match="nested under model"):
         validate_job_document(job)
+
+
+def test_classify_load_nests_legacy_top_level_transformers(tmp_path):
+    path = tmp_path / "config.yaml"
+    job = job_create_template()
+    model = job.pop("model")
+    job["main_transformer"] = model["main_transformer"]
+    job["sampling_transformer"] = model["sampling_transformer"]
+    path.write_text(
+        yaml.safe_dump(job, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TrainingConfigError, match="nested under model"):
+        load_job_document(path)
+
+    loaded = load_job_document_for_classify(path)
+    assert loaded is not None
+    assert loaded["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+    assert loaded["model"]["sampling_transformer"]["path"] == KNOWN_TURBO_SOURCE
+
+
+def test_classify_load_returns_none_for_unreadable_job(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("{broken", encoding="utf-8")
+    assert load_job_document_for_classify(path) is None
 
 
 def test_template_calls_return_independent_documents():

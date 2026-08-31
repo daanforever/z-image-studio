@@ -215,6 +215,32 @@ def test_idle_save_discards_stale_pending_commands_after_stop(tmp_path):
     assert load_job_config(root)["seed"] == 22
 
 
+def test_idle_save_replaces_legacy_top_level_transformer_keys(tmp_path):
+    import yaml
+
+    from zimage.training.schema import KNOWN_MAIN_SOURCE, job_create_template
+
+    root = create_or_open_job("job", tmp_path)
+    document = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    model = document.pop("model")
+    document["main_transformer"] = model["main_transformer"]
+    document["sampling_transformer"] = model["sampling_transformer"]
+    (root / "config.yaml").write_text(
+        yaml.safe_dump(
+            document, default_flow_style=False, allow_unicode=True, sort_keys=False
+        ),
+        encoding="utf-8",
+    )
+    nested = job_create_template()
+    nested["job_name"] = "job"
+
+    saved = save_idle_update(root, nested)
+
+    assert saved["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+    persisted = load_job_config(root)
+    assert persisted["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+
+
 def test_invalid_idle_save_preserves_pending_commands(tmp_path):
     root = create_or_open_job("job", tmp_path)
     pending = load_job_config(root)

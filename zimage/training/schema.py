@@ -332,6 +332,43 @@ def load_job_document(path: str | Path) -> dict[str, Any]:
     return validate_job_document(raw)
 
 
+def load_job_document_for_classify(path: str | Path) -> dict[str, Any] | None:
+    """Load the on-disk job for update classification, or ``None`` to skip it.
+
+    A valid candidate must still be able to replace a legacy or otherwise
+    invalid current file. Top-level transformer keys are nested under
+    ``model`` for comparison only so immutable-field checks still apply.
+    """
+    target = Path(path)
+    try:
+        raw = yaml.safe_load(target.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    for document in (raw, _nest_legacy_transformers(raw)):
+        try:
+            return validate_job_document(document)
+        except (TrainingConfigError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _nest_legacy_transformers(raw: Any) -> Any:
+    """Copy top-level transformer keys under ``model`` without mutating ``raw``."""
+    if not isinstance(raw, Mapping):
+        return raw
+    if "main_transformer" not in raw and "sampling_transformer" not in raw:
+        return raw
+    nested = dict(raw)
+    model = dict(nested["model"]) if isinstance(nested.get("model"), Mapping) else {}
+    for key in ("main_transformer", "sampling_transformer"):
+        if key in nested:
+            value = nested.pop(key)
+            if key not in model:
+                model[key] = value
+    nested["model"] = model
+    return nested
+
+
 def validate_job_document(raw: Any) -> dict[str, Any]:
     """Validate job YAML structure and types. Empty ``datasets`` is allowed."""
     data = _require_mapping(raw, "job")

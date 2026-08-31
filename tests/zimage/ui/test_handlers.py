@@ -1131,6 +1131,43 @@ def test_save_and_queue_training_yaml(tmp_path: Path, monkeypatch):
     assert load_job_config(root)["job_name"]
 
 
+def test_save_training_yaml_overwrites_legacy_top_level_transformers(
+    tmp_path: Path, monkeypatch
+):
+    import yaml
+
+    from zimage.training.jobs import create_or_open_job, load_job_config
+    from zimage.training.schema import KNOWN_MAIN_SOURCE, job_create_template
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    document = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    model = document.pop("model")
+    document["main_transformer"] = model["main_transformer"]
+    document["sampling_transformer"] = model["sampling_transformer"]
+    (root / "config.yaml").write_text(
+        yaml.safe_dump(
+            document, default_flow_style=False, allow_unicode=True, sort_keys=False
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    nested = job_create_template()
+    nested["job_name"] = "job"
+    text = yaml.safe_dump(
+        nested, default_flow_style=False, allow_unicode=True, sort_keys=False
+    )
+
+    assert handlers.validate_training_yaml("job", text) == {"ok": True}
+    saved = handlers.save_training_yaml("job", text)
+
+    assert saved["mode"] == "saved"
+    persisted = yaml.safe_load(saved["config_text"])
+    assert "main_transformer" not in persisted
+    assert persisted["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+    assert load_job_config(root)["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+
+
 def test_save_training_yaml_queues_when_state_running(tmp_path: Path, monkeypatch):
     from zimage.training.commands import consume_commands
     from zimage.training.contracts import JobState, JobStatus

@@ -24,6 +24,7 @@ from zimage.training.schema import (
     classify_job_update,
     job_create_template,
     load_job_document,
+    load_job_document_for_classify,
     validate_job_document,
 )
 
@@ -124,12 +125,13 @@ def save_job_config(
     validated = validate_job_document(document)
     current_path = root / CONFIG_FILE
     if current_path.is_file():
-        current = load_job_document(current_path)
-        classification, changed = classify_job_update(current, validated)
-        if classification is UpdateClassification.REJECTED_IMMUTABLE:
-            raise TrainingConfigError(
-                "rejected immutable fields: " + ", ".join(changed)
-            )
+        current = load_job_document_for_classify(current_path)
+        if current is not None:
+            classification, changed = classify_job_update(current, validated)
+            if classification is UpdateClassification.REJECTED_IMMUTABLE:
+                raise TrainingConfigError(
+                    "rejected immutable fields: " + ", ".join(changed)
+                )
     _atomic_write_yaml(current_path, validated)
     return validated
 

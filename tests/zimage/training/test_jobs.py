@@ -16,7 +16,11 @@ from zimage.training.jobs import (
     save_job_config,
     write_job_state,
 )
-from zimage.training.schema import TrainingConfigError
+from zimage.training.schema import (
+    KNOWN_MAIN_SOURCE,
+    TrainingConfigError,
+    job_create_template,
+)
 
 
 def test_resolve_job_id_transliterates_and_normalizes_separators():
@@ -91,6 +95,58 @@ def test_idle_save_validates_before_atomic_replacement(tmp_path):
         save_job_config(root, update)
     assert load_job_config(root)["seed"] == 123
     assert (root / "config.yaml").read_text(encoding="utf-8") != original
+
+
+def _flatten_transformers_to_top_level(path):
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    model = document.pop("model")
+    document["main_transformer"] = model["main_transformer"]
+    document["sampling_transformer"] = model["sampling_transformer"]
+    path.write_text(
+        yaml.safe_dump(
+            document, default_flow_style=False, allow_unicode=True, sort_keys=False
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_idle_save_replaces_legacy_top_level_transformer_keys(tmp_path):
+    root = create_or_open_job("job", tmp_path)
+    _flatten_transformers_to_top_level(root / "config.yaml")
+    nested = job_create_template()
+    nested["job_name"] = "job"
+
+    saved = save_job_config(root, nested)
+
+    persisted = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    assert "main_transformer" not in persisted
+    assert saved["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+    assert load_job_config(root)["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+
+
+def test_idle_save_legacy_current_still_rejects_immutable_path_change(tmp_path):
+    root = create_or_open_job("job", tmp_path)
+    _flatten_transformers_to_top_level(root / "config.yaml")
+    nested = job_create_template()
+    nested["job_name"] = "job"
+    nested["model"]["main_transformer"]["path"] = "org/other-main"
+
+    with pytest.raises(TrainingConfigError, match="immutable"):
+        save_job_config(root, nested)
+    persisted = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    assert persisted["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+
+
+def test_idle_save_replaces_unreadable_current_config(tmp_path):
+    root = create_or_open_job("job", tmp_path)
+    (root / "config.yaml").write_text("{broken", encoding="utf-8")
+    nested = job_create_template()
+    nested["job_name"] = "job"
+
+    saved = save_job_config(root, nested)
+
+    assert saved["job_name"] == "job"
+    assert load_job_config(root)["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
 
 
 @pytest.mark.parametrize(

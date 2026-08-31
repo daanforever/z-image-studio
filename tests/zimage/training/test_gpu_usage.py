@@ -328,6 +328,12 @@ def test_tiny_cuda_cache_place_encode_park():
             assert latent.dtype is torch.bfloat16
             assert prompt.device.type == "cpu"
             assert prompt.dtype is torch.bfloat16
+
+            lifecycle.prepare_preview_prompt_embeddings(
+                ["tiny cuda preview"],
+                max_sequence_length=config.max_sequence_length,
+            )
+            assert _device_type(text_encoder) == "cuda"
         finally:
             lifecycle.park_cache_modules()
 

@@ -314,6 +314,18 @@ def _load_lifecycle(
     return components, TrainingModelLifecycle(components)
 
 
+def _place_cache_modules(
+    placed: list[bool],
+    lifecycle: TrainingModelLifecycle,
+    target: torch.device,
+    injected: Mapping[str, Any],
+    components: TrainingModelComponents,
+) -> None:
+    placed[0] = True
+    lifecycle.place_cache_modules(target)
+    _probe_gpu_usage(injected, "cache_place", components)
+
+
 def _prepare_cache(
     samples: list[DatasetSample],
     job: Mapping[str, Any],
@@ -336,9 +348,7 @@ def _prepare_cache(
             if device is not None
             else _resolve_training_device(injected)
         )
-        flag[0] = True
-        lifecycle.place_cache_modules(target)
-        _probe_gpu_usage(injected, "cache_place", components)
+        _place_cache_modules(flag, lifecycle, target, injected, components)
 
     log.info("cache prepare samples=%s", len(samples))
     return prepare(
@@ -409,6 +419,10 @@ def _build_runtime(
             device=training_device,
             placed=placed,
         )
+        if "preview_sampler" not in injected and not placed[0]:
+            _place_cache_modules(
+                placed, lifecycle, training_device, injected, components
+            )
         if "preview_sampler" not in injected:
             preview_prompt_embeddings, preview_negative_embeddings = (
                 _prepare_preview_embeddings(job, lifecycle)

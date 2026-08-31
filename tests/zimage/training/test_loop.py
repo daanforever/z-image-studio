@@ -1497,6 +1497,25 @@ def test_warm_cache_run_job_probe_omits_cache_place(tmp_path):
     assert phases == ["train_placed", "teardown"]
 
 
+def test_warm_cache_default_sampler_probe_records_place_and_end(
+    tmp_path, monkeypatch
+):
+    _install_fake_default_sampler(monkeypatch)
+    root = make_job(tmp_path, max_steps=1)
+    assert cache_job(root, **injections()) == 0
+    phases: list[str] = []
+    assert (
+        run_job(
+            root,
+            **default_sampler_injections(
+                gpu_usage_probe=_recording_gpu_probe(phases)
+            ),
+        )
+        == 0
+    )
+    assert phases == ["cache_place", "cache_end", "train_placed", "teardown"]
+
+
 def test_raising_gpu_probe_does_not_fail_job(tmp_path):
     def boom(phase, components=None):
         raise RuntimeError("probe failed")
@@ -1546,7 +1565,7 @@ def test_encode_exception_still_parks_cache_modules(tmp_path, monkeypatch):
     assert torch.device(loaders.text_encoder.created[0].moved_to[-1]).type == "cpu"
 
 
-def test_preview_prompts_do_not_place_when_cache_is_valid(tmp_path, monkeypatch):
+def test_preview_prompts_place_when_cache_is_valid(tmp_path, monkeypatch):
     import zimage.training.loop as loop_module
 
     _install_fake_default_sampler(monkeypatch)
@@ -1563,6 +1582,7 @@ def test_preview_prompts_do_not_place_when_cache_is_valid(tmp_path, monkeypatch)
 
     def tracking_preview(self, prompts, *, max_sequence_length):
         events.append("preview")
+        assert next(self.components.text_encoder.parameters()).device.type == "cpu"
         return real_preview(
             self, prompts, max_sequence_length=max_sequence_length
         )
@@ -1574,12 +1594,7 @@ def test_preview_prompts_do_not_place_when_cache_is_valid(tmp_path, monkeypatch)
     )
 
     assert run_job(root, **default_sampler_injections()) == 0
-    assert "preview" in events
-    assert all(
-        item != "place" and not (isinstance(item, tuple) and item[0] == "place")
-        for item in events
-    )
-    assert "park" not in events
+    assert events == [("place", "cpu"), "preview", "park"]
 
 
 def test_stale_cache_preview_runs_after_place_before_park(tmp_path, monkeypatch):

@@ -114,6 +114,18 @@ CUSTOM_CSS = """
     border-color: transparent transparent transparent currentColor;
     font-size: 1rem;
 }
+#studio-training-clear::before {
+    content: "";
+    display: block;
+    box-sizing: border-box;
+    width: 0.85em;
+    height: 0.42em;
+    font-size: 1rem;
+    border: 0.09em solid currentColor;
+    border-radius: 0.1em;
+    background: linear-gradient(90deg, currentColor 0 0.22em, transparent 0.22em);
+    transform: rotate(-35deg);
+}
 #studio-clear-btn {
     position: relative !important;
 }
@@ -238,7 +250,8 @@ pre.studio-training-job-log-pre {
 #studio-training-create-open,
 #studio-training-save,
 #studio-training-start,
-#studio-training-stop {
+#studio-training-stop,
+#studio-training-clear {
     position: relative;
     overflow: visible;
 }
@@ -249,7 +262,9 @@ pre.studio-training-job-log-pre {
 #studio-training-start:hover::after,
 #studio-training-start:focus-within::after,
 #studio-training-stop:hover::after,
-#studio-training-stop:focus-within::after {
+#studio-training-stop:focus-within::after,
+#studio-training-clear:hover::after,
+#studio-training-clear:focus-within::after {
     pointer-events: none;
     position: absolute;
     top: 100%;
@@ -285,10 +300,16 @@ pre.studio-training-job-log-pre {
 #studio-training-stop:focus-within::after {
     content: "Stop the running training job.";
 }
+#studio-training-clear:hover::after,
+#studio-training-clear:focus-within::after {
+    content: "Clear the training log for the selected job.";
+}
 #studio-training-start:hover::after,
 #studio-training-start:focus-within::after,
 #studio-training-stop:hover::after,
-#studio-training-stop:focus-within::after {
+#studio-training-stop:focus-within::after,
+#studio-training-clear:hover::after,
+#studio-training-clear:focus-within::after {
     left: auto;
     right: 0;
 }

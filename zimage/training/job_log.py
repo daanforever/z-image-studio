@@ -1,9 +1,9 @@
 """Append-only per-job training log at ``logs/job.log``.
 
 Gradio-free filesystem helper: the trainer process creates ``logs/`` lazily
-and tees Python stdout/stderr into the file. The Gradio parent never opens
-this file for write. This module does not import the optimizer loop or GPU
-helpers.
+and tees Python stdout/stderr into the file. The Gradio parent may truncate
+the file for Clear; it still must not append or tee. This module does not
+import the optimizer loop or GPU helpers.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ __all__ = [
     "job_log_path",
     "job_log_session",
     "read_job_log_chunk",
+    "truncate_job_log",
 ]
 
 
@@ -170,6 +171,20 @@ def read_job_log_chunk(
         next_offset=start + len(complete),
         reset=reset,
     )
+
+
+def truncate_job_log(job_dir: str | Path) -> None:
+    """Truncate ``{job_dir}/logs/job.log`` to 0 bytes if it exists.
+
+    Missing ``logs/`` or missing file is a no-op and does not create the
+    file. I/O errors from open or truncate propagate.
+    """
+
+    path = job_log_path(job_dir)
+    if not path.is_file():
+        return
+    with path.open("r+b") as handle:
+        handle.truncate(0)
 
 
 def _session_banner() -> str:

@@ -50,7 +50,7 @@ from zimage.engine.lora import (
 from zimage.prefs import load_ui_prefs, save_ui_prefs as dump_ui_prefs
 from zimage.training.commands import enqueue_update, save_idle_update
 from zimage.training.contracts import JobStatus
-from zimage.training.job_log import read_job_log_chunk
+from zimage.training.job_log import read_job_log_chunk, truncate_job_log
 from zimage.training.jobs import (
     CONFIG_FILE,
     create_or_open_job,
@@ -522,6 +522,7 @@ def training_callbacks() -> TrainingCallbacks:
         stop_job=stop_training_job,
         poll_state=poll_training_state,
         poll_log=poll_training_log,
+        clear_log=clear_training_log,
         queue_update=queue_training_update,
     )
 
@@ -639,6 +640,12 @@ def poll_training_state(job_id: str) -> dict[str, Any]:
         "state": _state_mapping(load_job_state(job_dir)),
         "previews": _list_previews(job_dir),
     }
+
+
+def clear_training_log(job_id: str) -> None:
+    """Truncate ``logs/job.log`` for the job. Missing file is a no-op."""
+    job_dir = _require_job_dir(job_id)
+    truncate_job_log(job_dir)
 
 
 def poll_training_log(job_id: str, offset: int) -> dict[str, Any]:

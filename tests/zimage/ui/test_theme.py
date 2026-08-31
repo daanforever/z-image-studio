@@ -93,6 +93,9 @@ def test_training_toolbar_flex_and_button_hints():
     assert "#studio-navbar-generate button" in CUSTOM_CSS
     assert "#studio-navbar-training button" in CUSTOM_CSS
     assert "#studio-training-start::before" in CUSTOM_CSS
+    assert "#studio-training-clear::before" in CUSTOM_CSS
+    assert "#studio-clear-btn::before" in CUSTOM_CSS
+    assert "#studio-clear-btn::after" in CUSTOM_CSS
 
     shared_at = CUSTOM_CSS.index("#studio-navbar-shared {")
     shared = CUSTOM_CSS[shared_at : CUSTOM_CSS.index("}", shared_at) + 1]
@@ -110,6 +113,12 @@ def test_training_toolbar_flex_and_button_hints():
     assert "border-style: solid" in play
     assert "border-width: 0.38em 0 0.38em 0.62em" in play
 
+    eraser_at = CUSTOM_CSS.index("#studio-training-clear::before {")
+    assert eraser_at < CUSTOM_CSS.index("#studio-training-create-open,")
+    eraser = CUSTOM_CSS[eraser_at : CUSTOM_CSS.index("}", eraser_at) + 1]
+    assert 'content: ""' in eraser
+    assert "transform: rotate" in eraser
+
     job_at = CUSTOM_CSS.index("#studio-training-job {")
     job = CUSTOM_CSS[job_at : CUSTOM_CSS.index("}", job_at) + 1]
     assert "flex: 1 1 auto" in job
@@ -121,12 +130,13 @@ def test_training_toolbar_flex_and_button_hints():
     section = CUSTOM_CSS[CUSTOM_CSS.index("#studio-training-create-open,") :]
     assert ":focus-within::after" in section
     assert "pointer-events: none" in section
-    assert section.count('content: "') == 4
+    assert section.count('content: "') == 5
     for elem_id in (
         "studio-training-create-open",
         "studio-training-save",
         "studio-training-start",
         "studio-training-stop",
+        "studio-training-clear",
     ):
         assert f"#{elem_id}:hover::after" in section
         assert f"#{elem_id}:focus-within::after" in section
@@ -143,4 +153,5 @@ def test_training_toolbar_flex_and_button_hints():
                 content_hits += 1
             pos = idx + 1
         assert content_hits == 1, elem_id
+    assert "Clear the training log for the selected job." in section
     assert "MutationObserver" not in CUSTOM_JS

@@ -48,6 +48,9 @@ class TrainingCallbackAPI(Protocol):
     def poll_log(self, job_id: str, offset: int) -> Mapping[str, Any]:
         """Return ``{chunk, next_offset, reset}`` for the job log."""
 
+    def clear_log(self, job_id: str) -> None:
+        """Truncate the job log. Missing file is a no-op."""
+
 
 @dataclass(frozen=True)
 class TrainingCallbacks:
@@ -62,6 +65,7 @@ class TrainingCallbacks:
     stop_job: Callable[[str], Any]
     poll_state: Callable[[str], Mapping[str, Any]]
     poll_log: Callable[[str, int], Mapping[str, Any]]
+    clear_log: Callable[[str], Any]
     queue_update: Callable[[str, str], Mapping[str, Any]] | None = None
 
 
@@ -91,6 +95,7 @@ class TrainingPanel:
     save_btn: gr.Button
     start_btn: gr.Button
     stop_btn: gr.Button
+    clear_btn: gr.Button
     operational_state: gr.Markdown
     preview_gallery: gr.Gallery
     message: gr.Markdown
@@ -143,6 +148,7 @@ def noop_training_callbacks() -> TrainingCallbacks:
             "next_offset": 0 if not isinstance(offset, int) or offset < 0 else offset,
             "reset": isinstance(offset, int) and offset < 0,
         },
+        clear_log=lambda _job_id: None,
         queue_update=lambda job_id, text: {"mode": SAVE_MODE_QUEUED},
     )
 
@@ -165,6 +171,7 @@ def as_training_callbacks(
         stop_job=callbacks.stop_job,
         poll_state=callbacks.poll_state,
         poll_log=callbacks.poll_log,
+        clear_log=callbacks.clear_log,
         queue_update=getattr(callbacks, "queue_update", None),
     )
 
@@ -340,6 +347,24 @@ def handle_stop(job_id: Any, *, callbacks: TrainingCallbacks) -> JobPanelData:
     )
 
 
+def handle_clear_log(
+    job_id: Any,
+    generation: Any,
+    *,
+    callbacks: TrainingCallbacks,
+) -> tuple[int, int, str, str]:
+    """Ask the injected callback to truncate the log. Does not touch the filesystem."""
+    resolved = _require_job_id(job_id)
+    _invoke(callbacks.clear_log, resolved)
+    next_generation = _next_log_generation(generation)
+    return (
+        0,
+        next_generation,
+        _log_delta_payload("", True, next_generation),
+        "Log cleared.",
+    )
+
+
 def handle_poll(job_id: Any, *, callbacks: TrainingCallbacks) -> JobPanelData:
     """Refresh operational state and previews. Does not rewrite the editor."""
     resolved = _job_id_text(job_id)
@@ -392,19 +417,24 @@ def commit_training_log(
     chunk: Any,
     next_offset: Any,
     reset: Any,
-    generation: Any,
+    live_generation: Any,
+    poll_generation: Any,
 ):
-    """CAS: commit log offset/delta only when the live job still matches."""
+    """CAS: commit log offset/delta only when the live job and generation match."""
     if _job_id_text(live_job_id) != _job_id_text(polled_job_id):
         return gr.skip(), gr.skip()
     if not _job_id_text(polled_job_id):
+        return gr.skip(), gr.skip()
+    if _as_generation(live_generation) != _as_generation(poll_generation):
         return gr.skip(), gr.skip()
     text = "" if chunk is None else str(chunk)
     did_reset = bool(reset)
     offset_out = _as_offset(next_offset)
     if not text and not did_reset:
         return offset_out, gr.skip()
-    return offset_out, _log_delta_payload(text, did_reset, _as_generation(generation))
+    return offset_out, _log_delta_payload(
+        text, did_reset, _as_generation(live_generation)
+    )
 
 
 def build_training_panel(
@@ -412,11 +442,12 @@ def build_training_panel(
     callbacks: TrainingCallbacks | TrainingCallbackAPI | None = None,
     start_btn: gr.Button,
     stop_btn: gr.Button,
+    clear_btn: gr.Button,
 ) -> TrainingPanel:
     """Build the Training tab body. Must be called inside a ``gr.Blocks`` tree.
 
-    ``start_btn`` and ``stop_btn`` are injected (navbar-owned). This panel does
-    not construct them or wrap them in a Row/Column/Tab.
+    ``start_btn``, ``stop_btn``, and ``clear_btn`` are injected (navbar-owned).
+    This panel does not construct them or wrap them in a Row/Column/Tab.
     """
     resolved = as_training_callbacks(callbacks)
     job_choices = list(_invoke_list_jobs(resolved))
@@ -430,6 +461,7 @@ def build_training_panel(
         pending_chunk = gr.State("")
         pending_next_offset = gr.State(0)
         pending_reset = gr.State(False)
+        pending_generation = gr.State(0)
         with gr.Row():
             with gr.Column(scale=5):
                 with gr.Row(elem_id="studio-training-job"):
@@ -558,11 +590,14 @@ def build_training_panel(
         data = handle_stop(current_id, callbacks=resolved)
         return _action_outputs(data)
 
-    def on_poll(current_id, offset=-1):
+    def on_clear(current_id, generation=0):
+        return handle_clear_log(current_id, generation, callbacks=resolved)
+
+    def on_poll(current_id, offset=-1, log_generation=0):
         data = handle_poll(current_id, callbacks=resolved)
         log = handle_poll_log(current_id, offset, callbacks=resolved)
         if not data.job_id:
-            return (gr.skip(),) * 9
+            return (gr.skip(),) * 10
         start_vis, stop_vis = _run_button_visibility(data.state)
         return (
             format_operational_state(data.state),
@@ -574,6 +609,7 @@ def build_training_panel(
             log["chunk"],
             log["next_offset"],
             log["reset"],
+            _as_generation(log_generation),
             start_vis,
             stop_vis,
         )
@@ -630,9 +666,16 @@ def build_training_panel(
         ],
         show_progress="minimal",
     )
+    clear_event = clear_btn.click(
+        on_clear,
+        inputs=[job_id, log_generation],
+        outputs=[log_offset, log_generation, log_delta, message],
+        show_progress="minimal",
+    )
+    clear_event.then(None, inputs=[log_delta], js=APPLY_TRAINING_LOG_JS)
     poll_event = poll_timer.tick(
         on_poll,
-        inputs=[job_id, log_offset],
+        inputs=[job_id, log_offset, log_generation],
         outputs=[
             operational_state,
             preview_gallery,
@@ -641,6 +684,7 @@ def build_training_panel(
             pending_chunk,
             pending_next_offset,
             pending_reset,
+            pending_generation,
             start_btn,
             stop_btn,
         ],
@@ -654,6 +698,7 @@ def build_training_panel(
             pending_next_offset,
             pending_reset,
             log_generation,
+            pending_generation,
         ],
         outputs=[log_offset, log_delta],
     ).then(
@@ -672,6 +717,7 @@ def build_training_panel(
         save_btn=save_btn,
         start_btn=start_btn,
         stop_btn=stop_btn,
+        clear_btn=clear_btn,
         operational_state=operational_state,
         preview_gallery=preview_gallery,
         message=message,
@@ -947,6 +993,7 @@ __all__ = [
     "commit_training_log",
     "empty_job_state",
     "format_operational_state",
+    "handle_clear_log",
     "handle_create_or_open",
     "handle_load_job",
     "handle_poll",

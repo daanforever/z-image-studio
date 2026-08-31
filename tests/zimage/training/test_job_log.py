@@ -19,6 +19,7 @@ from zimage.training.job_log import (
     job_log_path,
     job_log_session,
     read_job_log_chunk,
+    truncate_job_log,
 )
 from zimage.training.jobs import JobController, create_or_open_job
 
@@ -89,6 +90,41 @@ def test_empty_file_negative_offset_resets(tmp_path):
     job_dir = _write_log(tmp_path, b"")
     result = read_job_log_chunk(job_dir, -1)
     assert result == JobLogChunk(chunk="", next_offset=0, reset=True)
+
+
+def test_truncate_job_log_zeros_file_in_place(tmp_path):
+    job_dir = _write_log(tmp_path, "hello log")
+    path = job_log_path(job_dir)
+    assert path.stat().st_size > 0
+    truncate_job_log(job_dir)
+    assert path.is_file()
+    assert path.stat().st_size == 0
+    result = read_job_log_chunk(job_dir, -1)
+    assert result == JobLogChunk(chunk="", next_offset=0, reset=True)
+
+
+def test_truncate_job_log_missing_file_is_noop(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    truncate_job_log(job_dir)
+    assert not (job_dir / LOGS_DIR).exists()
+    assert not job_log_path(job_dir).exists()
+
+
+def test_truncate_job_log_missing_logs_file_does_not_create(tmp_path):
+    job_dir = tmp_path / "job"
+    logs = job_dir / LOGS_DIR
+    logs.mkdir(parents=True)
+    truncate_job_log(job_dir)
+    assert logs.is_dir()
+    assert not job_log_path(job_dir).exists()
+    assert list(logs.iterdir()) == []
+
+
+def test_truncate_job_log_is_exported():
+    from zimage.training.job_log import __all__ as exported
+
+    assert "truncate_job_log" in exported
 
 
 def test_mid_offset_read(tmp_path):

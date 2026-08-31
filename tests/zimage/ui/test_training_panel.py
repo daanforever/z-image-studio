@@ -23,6 +23,7 @@ from zimage.ui.training_panel import (
     build_training_panel,
     commit_training_log,
     format_operational_state,
+    handle_clear_log,
     handle_create_or_open,
     handle_load_job,
     handle_poll_log,
@@ -118,6 +119,9 @@ class RecordingCallbacks:
             next_offset = start + len(chunk.encode("utf-8"))
         return {"chunk": chunk, "next_offset": next_offset, "reset": reset}
 
+    def clear_log(self, job_id: str) -> None:
+        self.calls.append(("clear_log", job_id))
+
     def _state(self, *, status: str | None = None, job_id: str | None = None) -> dict:
         return {
             "job_id": job_id or self.job_id,
@@ -162,10 +166,17 @@ def _construct(callbacks=None):
                 size="sm",
                 visible=False,
             )
+            clear_btn = gr.Button(
+                "Clear",
+                elem_id="studio-training-clear",
+                size="sm",
+                visible=True,
+            )
             panel = build_training_panel(
                 callbacks=callbacks,
                 start_btn=start_btn,
                 stop_btn=stop_btn,
+                clear_btn=clear_btn,
             )
     return demo, panel
 
@@ -243,6 +254,7 @@ def test_panel_has_required_controls():
     assert "studio-training-save" in ids
     assert "studio-training-start" in ids
     assert "studio-training-stop" in ids
+    assert "studio-training-clear" in ids
     assert "studio-training-state" in ids
     assert "studio-training-previews" in ids
     assert "studio-training-job-log" in ids
@@ -265,6 +277,9 @@ def test_panel_has_required_controls():
     assert panel.start_btn.visible is True
     assert panel.stop_btn.value == "Stop"
     assert panel.stop_btn.visible is False
+    assert panel.clear_btn.value == "Clear"
+    assert panel.clear_btn.visible is True
+    assert panel.clear_btn.elem_id == "studio-training-clear"
     assert isinstance(panel.yaml_editor, gr.Textbox)
     assert panel.yaml_editor.elem_id == "studio-training-yaml"
     assert isinstance(panel.preview_gallery, gr.Gallery)
@@ -293,6 +308,7 @@ def test_yaml_editor_inside_collapsed_config_accordion():
         panel.save_btn,
         panel.start_btn,
         panel.stop_btn,
+        panel.clear_btn,
         panel.create_open_btn,
         panel.job_selector,
     ):
@@ -328,6 +344,7 @@ def test_training_two_column_job_and_preview_layout():
     assert body_row not in _ancestor_chain(panel.log_accordion)
     assert body_row not in _ancestor_chain(panel.start_btn)
     assert body_row not in _ancestor_chain(panel.stop_btn)
+    assert body_row not in _ancestor_chain(panel.clear_btn)
 
 
 def test_yaml_editor_is_raw_textbox_not_sampling_form():
@@ -487,6 +504,34 @@ def test_start_stop_events_are_wired():
     assert recorder.kinds() == ["start_job", "stop_job"]
 
 
+def test_clear_log_event_is_wired():
+    recorder = RecordingCallbacks()
+    demo, panel = _construct(recorder)
+    clear_fn = _fns_named(demo, "on_clear")[0]
+    assert list(clear_fn.inputs) == [panel.job_id, panel.log_generation]
+    assert list(clear_fn.outputs) == [
+        panel.log_offset,
+        panel.log_generation,
+        panel.log_delta,
+        panel.message,
+    ]
+    assert clear_fn.targets
+    assert clear_fn.targets[0][1] == "click"
+    assert clear_fn.targets[0][0] == getattr(panel.clear_btn, "_id", panel.clear_btn)
+
+    recorder.calls.clear()
+    offset, generation, delta, message = clear_fn.fn("demo-job", 3)
+    assert recorder.kinds() == ["clear_log"]
+    assert recorder.calls == [("clear_log", "demo-job")]
+    assert offset == 0
+    assert generation == 4
+    payload = json.loads(delta)
+    assert payload["reset"] is True
+    assert payload["chunk"] == ""
+    assert payload["generation"] == 4
+    assert message == "Log cleared."
+
+
 def test_start_stop_visibility_follows_running():
     recorder = RecordingCallbacks(status="stopped")
     demo, panel = _construct(recorder)
@@ -496,6 +541,11 @@ def test_start_stop_visibility_follows_running():
     stop_fn = _fns_named(demo, "on_stop")[0]
     poll_fn = _fns_named(demo, "on_poll")[0]
     idle_statuses = ("", "stopped", "completed", "failed")
+    assert panel.clear_btn.visible is True
+    assert panel.clear_btn not in create_fn.outputs
+    assert panel.clear_btn not in start_fn.outputs
+    assert panel.clear_btn not in stop_fn.outputs
+    assert panel.clear_btn not in poll_fn.outputs
 
     def assert_idle(start_update, stop_update):
         assert _as_update_dict(start_update).get("visible") is True
@@ -527,18 +577,18 @@ def test_start_stop_visibility_follows_running():
     assert len(stopped) == 6
     assert_idle(stopped[4], stopped[5])
 
-    assert len(poll_fn.outputs) == 9
-    assert poll_fn.outputs[7] is panel.start_btn
-    assert poll_fn.outputs[8] is panel.stop_btn
+    assert len(poll_fn.outputs) == 10
+    assert poll_fn.outputs[8] is panel.start_btn
+    assert poll_fn.outputs[9] is panel.stop_btn
     for status in idle_statuses:
         recorder.status = status
         polled = poll_fn.fn("demo-job", 0)
-        assert len(polled) == 9
-        assert_idle(polled[7], polled[8])
+        assert len(polled) == 10
+        assert_idle(polled[8], polled[9])
 
     recorder.status = "running"
     polled_running = poll_fn.fn("demo-job", 0)
-    assert_running(polled_running[7], polled_running[8])
+    assert_running(polled_running[8], polled_running[9])
 
 
 def test_operational_state_has_no_metrics_history():
@@ -625,6 +675,8 @@ def test_actions_require_an_open_job():
         handle_start(None, callbacks=callbacks)
     with pytest.raises(gr.Error, match="training job"):
         handle_stop(None, callbacks=callbacks)
+    with pytest.raises(gr.Error, match="training job"):
+        handle_clear_log("", 0, callbacks=callbacks)
 
 
 def test_validate_surfaces_callback_error():
@@ -808,6 +860,9 @@ def test_create_or_open_accepts_attribute_state_objects():
         def poll_log(self, job_id, offset):
             raise AssertionError(job_id)
 
+        def clear_log(self, job_id):
+            raise AssertionError(job_id)
+
     data = handle_create_or_open("attr", callbacks=as_training_callbacks(Host()))
     assert data.job_id == "attr-job"
     assert data.state["step"] == 3
@@ -887,20 +942,36 @@ def test_create_and_load_reset_offset_and_bump_generation():
 
 
 def test_cas_skip_on_mismatched_job_ids():
-    offset, delta = commit_training_log("job-b", "job-a", "stale chunk\n", 99, False, 1)
+    offset, delta = commit_training_log(
+        "job-b", "job-a", "stale chunk\n", 99, False, 1, 1
+    )
     assert _is_skip(offset)
     assert _is_skip(delta)
 
-    offset, delta = commit_training_log("job-a", "job-a", "hello\n", 12, False, 4)
+    offset, delta = commit_training_log("job-a", "job-a", "hello\n", 12, False, 4, 4)
     assert offset == 12
     payload = json.loads(delta)
     assert payload["chunk"] == "hello\n"
     assert payload["reset"] is False
     assert payload["generation"] == 4
 
-    offset, delta = commit_training_log("job-a", "job-a", "", 12, False, 4)
+    offset, delta = commit_training_log("job-a", "job-a", "", 12, False, 4, 4)
     assert offset == 12
     assert _is_skip(delta)
+
+
+def test_cas_skip_on_mismatched_generation():
+    offset, delta = commit_training_log(
+        "job-a", "job-a", "stale chunk\n", 99, False, 5, 4
+    )
+    assert _is_skip(offset)
+    assert _is_skip(delta)
+
+    offset, delta = commit_training_log("job-a", "job-a", "hello\n", 12, False, 4, 4)
+    assert offset == 12
+    payload = json.loads(delta)
+    assert payload["chunk"] == "hello\n"
+    assert payload["generation"] == 4
 
 
 def test_on_poll_returns_delta_not_full_log_and_calls_poll_log():
@@ -913,35 +984,40 @@ def test_on_poll_returns_delta_not_full_log_and_calls_poll_log():
     cas_fn = _fns_named(demo, "commit_training_log")[0]
     assert poll_fn.inputs[0] is panel.job_id
     assert poll_fn.inputs[1] is panel.log_offset
-    assert len(poll_fn.outputs) == 9
-    assert poll_fn.outputs[7] is panel.start_btn
-    assert poll_fn.outputs[8] is panel.stop_btn
+    assert poll_fn.inputs[2] is panel.log_generation
+    assert len(poll_fn.inputs) == 3
+    assert len(poll_fn.outputs) == 10
+    assert poll_fn.outputs[8] is panel.start_btn
+    assert poll_fn.outputs[9] is panel.stop_btn
     assert panel.job_log not in poll_fn.outputs
     assert panel.log_delta not in poll_fn.outputs
+    assert cas_fn.inputs[5] is panel.log_generation
+    assert len(cas_fn.inputs) == 7
     assert cas_fn.outputs[0] is panel.log_offset
     assert cas_fn.outputs[1] is panel.log_delta
     assert cas_fn.trigger_after is not None
 
     recorder.calls.clear()
-    outputs = poll_fn.fn("demo-job", 4)
+    outputs = poll_fn.fn("demo-job", 4, 7)
     assert recorder.kinds() == ["poll_state", "poll_log"]
     assert ("poll_log", "demo-job", 4) in recorder.calls
-    assert len(outputs) == 9
+    assert len(outputs) == 10
     assert outputs[1] == ["jobs/demo-job/previews/step-1.png"]
     assert outputs[3] == "demo-job"
     assert outputs[4] == "new line\n"
     assert outputs[5] == 4 + len("new line\n")
     assert outputs[6] is False
-    for item in outputs[:7]:
+    assert outputs[7] == 7
+    for item in outputs[:8]:
         assert "visible" not in _as_update_dict(item)
-    assert _as_update_dict(outputs[7]).get("visible") is True
-    assert _as_update_dict(outputs[8]).get("visible") is False
+    assert _as_update_dict(outputs[8]).get("visible") is True
+    assert _as_update_dict(outputs[9]).get("visible") is False
     joined = " ".join(str(item) for item in outputs)
     assert "new line\nnew line\n" not in joined
     assert panel.job_log.value == JOB_LOG_HTML
 
-    empty = poll_fn.fn("", 4)
-    assert len(empty) == 9
+    empty = poll_fn.fn("", 4, 7)
+    assert len(empty) == 10
     assert all(_is_skip(item) for item in empty)
 
     js_fns = [
@@ -965,7 +1041,7 @@ def test_js_then_listeners_receive_log_delta():
         for fn in demo.fns.values()
         if getattr(fn, "js", None) and fn.js == APPLY_TRAINING_LOG_JS
     ]
-    assert len(js_fns) == 3
+    assert len(js_fns) == 4
     for fn in js_fns:
         assert list(fn.inputs) == [panel.log_delta]
         assert fn.targets == [(None, "then")]
@@ -1000,8 +1076,39 @@ def test_handle_poll_log_swallows_callback_errors():
         def poll_log(self, job_id, offset):
             raise RuntimeError("read failed")
 
+        def clear_log(self, job_id):
+            raise AssertionError(job_id)
+
     payload = handle_poll_log("demo-job", 8, callbacks=as_training_callbacks(Host()))
     assert payload == {"chunk": "", "next_offset": 8, "reset": False}
+
+
+def test_handle_clear_log_resets_offset_and_bumps_generation():
+    recorder = RecordingCallbacks()
+    callbacks = as_training_callbacks(recorder)
+    offset, generation, delta, message = handle_clear_log(
+        "demo-job", 3, callbacks=callbacks
+    )
+    assert ("clear_log", "demo-job") in recorder.calls
+    assert offset == 0
+    assert generation == 4
+    payload = json.loads(delta)
+    assert payload["reset"] is True
+    assert payload["chunk"] == ""
+    assert payload["generation"] == 4
+    assert message == "Log cleared."
+
+
+def test_clear_log_is_on_callbacks_and_duck_typed_hosts():
+    recorder = RecordingCallbacks()
+    adapted = as_training_callbacks(recorder)
+    adapted.clear_log("demo-job")
+    assert ("clear_log", "demo-job") in recorder.calls
+    noop = noop_training_callbacks()
+    noop.clear_log("x")
+    from zimage.ui import training_panel as panel_mod
+
+    assert "handle_clear_log" in panel_mod.__all__
 
 
 

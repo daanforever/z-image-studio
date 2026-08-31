@@ -1657,6 +1657,37 @@ def test_poll_training_log_reads_chunk(tmp_path: Path, monkeypatch):
     assert second["next_offset"] == payload["next_offset"]
 
 
+def test_clear_training_log_truncates_existing_file(tmp_path: Path, monkeypatch):
+    from zimage.training.job_log import LOG_FILE, LOGS_DIR
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    log_path = root / LOGS_DIR / LOG_FILE
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_bytes(b"hello log\n")
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    handlers.clear_training_log("job")
+    assert log_path.stat().st_size == 0
+
+
+def test_clear_training_log_missing_file_does_not_raise(tmp_path: Path, monkeypatch):
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    create_or_open_job("job", jobs)
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    handlers.clear_training_log("job")
+
+
+def test_clear_training_log_unknown_job_fails(tmp_path: Path, monkeypatch):
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        handlers.clear_training_log("missing")
+
+
 def test_poll_training_log_read_error_does_not_raise(monkeypatch):
     monkeypatch.setattr(
         handlers,
@@ -1691,6 +1722,7 @@ def test_training_callbacks_are_canonical_production_functions():
     assert bundle.validate_yaml is handlers.validate_training_yaml
     assert bundle.poll_state is handlers.poll_training_state
     assert bundle.poll_log is handlers.poll_training_log
+    assert bundle.clear_log is handlers.clear_training_log
 
     noop = noop_training_callbacks()
     assert bundle.start_job is not noop.start_job
@@ -1700,6 +1732,7 @@ def test_training_callbacks_are_canonical_production_functions():
     assert bundle.create_or_open is not noop.create_or_open
     assert bundle.queue_update is not noop.queue_update
     assert bundle.poll_log is not noop.poll_log
+    assert bundle.clear_log is not noop.clear_log
 
 
 def test_start_training_unloads_cached_pipeline_and_next_inference_reloads(

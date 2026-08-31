@@ -44,6 +44,7 @@ class StudioNavbar:
     generate_stop_btn: gr.Button
     training_start_btn: gr.Button
     training_stop_btn: gr.Button
+    training_clear_btn: gr.Button
     shared_actions: gr.Row
     generate_actions: gr.Row
     training_actions: gr.Row
@@ -92,11 +93,18 @@ def build_navbar() -> StudioNavbar:
                     size="sm",
                     visible=False,
                 )
+                training_clear_btn = gr.Button(
+                    "Clear",
+                    elem_id="studio-training-clear",
+                    size="sm",
+                    visible=True,
+                )
     return StudioNavbar(
         clear_btn=clear_btn,
         generate_stop_btn=generate_stop_btn,
         training_start_btn=training_start_btn,
         training_stop_btn=training_stop_btn,
+        training_clear_btn=training_clear_btn,
         shared_actions=shared_actions,
         generate_actions=generate_actions,
         training_actions=training_actions,
@@ -344,6 +352,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                     callbacks=training_callbacks(),
                     start_btn=navbar.training_start_btn,
                     stop_btn=navbar.training_stop_btn,
+                    clear_btn=navbar.training_clear_btn,
                 )
         tabs.select(
             on_studio_tab,

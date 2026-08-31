@@ -400,6 +400,7 @@ def test_generate_and_training_tabs(monkeypatch):
     assert "studio-training-save" in ids
     assert "studio-training-start" in ids
     assert "studio-training-stop" in ids
+    assert "studio-training-clear" in ids
     assert "studio-navbar-shared" in ids
     assert "studio-navbar-generate" in ids
     assert "studio-navbar-training" in ids
@@ -424,6 +425,7 @@ def test_navbar_action_slots_xor_and_training_buttons(monkeypatch):
     training_row = _block_by_elem_id(demo, "studio-navbar-training")
     start_btn = _block_by_elem_id(demo, "studio-training-start")
     stop_btn = _block_by_elem_id(demo, "studio-training-stop")
+    clear_btn = _block_by_elem_id(demo, "studio-training-clear")
     job = _block_by_elem_id(demo, "studio-training-job")
     previews = _block_by_elem_id(demo, "studio-training-previews")
     panel = _block_by_elem_id(demo, "studio-training-panel")
@@ -437,8 +439,10 @@ def test_navbar_action_slots_xor_and_training_buttons(monkeypatch):
     assert generate_row in _ancestor_chain(_block_by_elem_id(demo, "studio-stop-btn"))
     assert training_row in _ancestor_chain(start_btn)
     assert training_row in _ancestor_chain(stop_btn)
+    assert training_row in _ancestor_chain(clear_btn)
     assert panel not in _ancestor_chain(start_btn)
     assert panel not in _ancestor_chain(stop_btn)
+    assert panel not in _ancestor_chain(clear_btn)
 
     preview_anc = _ancestor_chain(previews)
     body_row = next(
@@ -448,9 +452,11 @@ def test_navbar_action_slots_xor_and_training_buttons(monkeypatch):
     )
     assert body_row not in _ancestor_chain(start_btn)
     assert body_row not in _ancestor_chain(stop_btn)
+    assert body_row not in _ancestor_chain(clear_btn)
     yaml_accordion = _block_by_elem_id(demo, "studio-training-yaml-accordion")
     assert yaml_accordion not in _ancestor_chain(start_btn)
     assert yaml_accordion not in _ancestor_chain(stop_btn)
+    assert yaml_accordion not in _ancestor_chain(clear_btn)
 
 
 def test_on_studio_tab_toggles_navbar_visibility(monkeypatch):
@@ -551,10 +557,13 @@ def test_build_ui_passes_training_callbacks_bundle_to_panel(monkeypatch):
         produced["bundle"] = bundle
         return bundle
 
-    def spy_build(*, callbacks=None, start_btn, stop_btn):
+    def spy_build(*, callbacks=None, start_btn, stop_btn, clear_btn):
         captured["callbacks"] = callbacks
         return real_build_training_panel(
-            callbacks=callbacks, start_btn=start_btn, stop_btn=stop_btn
+            callbacks=callbacks,
+            start_btn=start_btn,
+            stop_btn=stop_btn,
+            clear_btn=clear_btn,
         )
 
     monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
@@ -576,9 +585,11 @@ def test_build_ui_passes_training_callbacks_bundle_to_panel(monkeypatch):
     assert bundle.validate_yaml is handlers_mod.validate_training_yaml
     assert bundle.poll_state is handlers_mod.poll_training_state
     assert bundle.poll_log is handlers_mod.poll_training_log
+    assert bundle.clear_log is handlers_mod.clear_training_log
 
     noop = noop_training_callbacks()
     assert bundle.start_job is not noop.start_job
     assert bundle.save_yaml is not noop.save_yaml
     assert bundle.create_or_open is not noop.create_or_open
     assert bundle.poll_log is not noop.poll_log
+    assert bundle.clear_log is not noop.clear_log

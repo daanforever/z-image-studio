@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -80,6 +81,7 @@ def job_log_session(job_dir: str | Path) -> Iterator[Path]:
     )
     original_stdout = sys.stdout
     original_stderr = sys.stderr
+    original_formatwarning = warnings.formatwarning
     logger = logging.getLogger(TRAINING_LOGGER_NAME)
     handler: logging.Handler | None = None
     previous_level = logger.level
@@ -91,6 +93,7 @@ def job_log_session(job_dir: str | Path) -> Iterator[Path]:
         tee_err = _TeeStream(original_stderr, log_file)
         sys.stdout = tee_out
         sys.stderr = tee_err
+        warnings.formatwarning = _format_warning
         handler = logging.StreamHandler(tee_out)
         handler.setLevel(logging.INFO)
         handler.setFormatter(
@@ -118,6 +121,7 @@ def job_log_session(job_dir: str | Path) -> Iterator[Path]:
             tee_err.commit_pending()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
+        warnings.formatwarning = original_formatwarning
         log_file.close()
 
 
@@ -185,6 +189,16 @@ def truncate_job_log(job_dir: str | Path) -> None:
         return
     with path.open("r+b") as handle:
         handle.truncate(0)
+
+
+def _format_warning(
+    message: object,
+    category: type[Warning],
+    filename: str,
+    lineno: int,
+    line: str | None = None,
+) -> str:
+    return f"{filename}:{lineno}: {category.__name__}: {str(message)}\n"
 
 
 def _session_banner() -> str:

@@ -116,6 +116,7 @@ def test_component_loading_uses_main_and_separate_sampling_sources():
     ]
     assert all(kwargs["torch_dtype"] is torch.bfloat16 for kwargs in model_calls)
     assert all(kwargs["disable_mmap"] is True for kwargs in model_calls)
+    assert all("local_dir_use_symlinks" not in kwargs for _, _, kwargs, _ in calls)
     assert "disable_mmap" not in calls[1][2]
     assert "disable_mmap" not in calls[3][2]
     assert components.vae.frozen is True
@@ -829,11 +830,35 @@ def test_sampling_topology_accepts_targets_and_lora_shapes():
     )
 
 
+def test_sampling_topology_accepts_diffusers_bookkeeping():
+    main = TopologyTransformer()
+    sampler = TopologyTransformer()
+    main.config.update(
+        {
+            "_diffusers_version": "0.30.0",
+            "_use_default_values": ["width"],
+            "_name_or_path": "org/model-a",
+        }
+    )
+    sampler.config.update(
+        {
+            "_diffusers_version": "0.40.0",
+            "_use_default_values": ["layers"],
+            "_name_or_path": "org/model-b",
+        }
+    )
+    validate_sampling_topology(main, sampler, ["to_q"], None)
+
+
 @pytest.mark.parametrize(
     ("sampler", "state", "message"),
     [
         (TopologyTransformer(architecture="Other"), None, "architecture mismatch"),
-        (TopologyTransformer(layers=3), None, "config is incompatible"),
+        (
+            TopologyTransformer(layers=3),
+            None,
+            r"config is incompatible.*layers",
+        ),
         (
             TopologyTransformer(width=16),
             {

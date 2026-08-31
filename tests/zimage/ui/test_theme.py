@@ -65,9 +65,9 @@ def test_training_log_pre_is_scoped_monospace():
         "font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace "
         "!important" in CUSTOM_CSS
     )
-    assert "white-space: pre;" in CUSTOM_CSS
+    assert "white-space: pre-wrap;" in CUSTOM_CSS
+    assert "overflow-wrap: anywhere;" in CUSTOM_CSS
     assert "overflow: auto;" in CUSTOM_CSS
-    assert "pre-wrap" not in CUSTOM_CSS
     assert "word-break: break-word" not in CUSTOM_CSS
     assert not any(
         line.lstrip().startswith(prefix)

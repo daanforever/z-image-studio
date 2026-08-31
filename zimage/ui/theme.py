@@ -226,7 +226,8 @@ pre.studio-training-job-log-pre {
     font-size: 0.8125rem;
     color: #e6e6e6;
     background: #0a0a0a;
-    white-space: pre;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
     overflow: auto;
 }
 #studio-training-job-log pre,

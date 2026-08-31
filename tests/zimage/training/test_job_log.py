@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import warnings
 from dataclasses import fields
 from pathlib import Path
 
@@ -388,6 +389,33 @@ def test_session_logs_traceback_before_reraise(tmp_path):
     assert "Traceback (most recent call last):" in text
     assert "RuntimeError: boom" in text
     assert "job failed" in text
+
+
+def test_session_writes_full_warning_without_source_snippet(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    previous = warnings.formatwarning
+    message = (
+        "This UserWarning is a complete sentence that must appear in full "
+        "inside logs/job.log even though the warn call spans several lines."
+    )
+
+    def emit(message, category, filename, lineno, file=None, line=None):
+        stream = sys.stderr if file is None else file
+        stream.write(warnings.formatwarning(message, category, filename, lineno, line))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.showwarning = emit
+        with job_log_session(job_dir):
+            warnings.warn(
+                message,
+                UserWarning,
+            )
+    assert warnings.formatwarning is previous
+    text = job_log_path(job_dir).read_text(encoding="utf-8")
+    assert message in text
+    assert not any(line.strip() == "warnings.warn(" for line in text.splitlines())
 
 
 def test_second_session_does_not_duplicate_logger_lines(tmp_path):

@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 
+from zimage.training.hub_compat import install_hf_local_dir_symlinks_compat
 from zimage.training.schema import KNOWN_TURBO_SOURCE
 
 log = logging.getLogger("zimage.training")
@@ -149,6 +150,7 @@ def load_training_components(
 ) -> TrainingModelComponents:
     """Load train/cache components and an optional distinct preview sampler."""
 
+    install_hf_local_dir_symlinks_compat()
     loaders = loaders or ComponentLoaders.defaults()
     sources = resolve_model_sources(job)
 
@@ -510,9 +512,22 @@ def validate_sampling_topology(
         getattr(sampling_transformer, "config", None)
     )
     if main_config != sampling_config:
-        raise SamplingCompatibilityError(
+        message = (
             "sampling transformer config is incompatible with the main transformer"
         )
+        if isinstance(main_config, Mapping) and isinstance(
+            sampling_config, Mapping
+        ):
+            differing = sorted(
+                key
+                for key in set(main_config) | set(sampling_config)
+                if key not in main_config
+                or key not in sampling_config
+                or main_config[key] != sampling_config[key]
+            )
+            if differing:
+                message = f"{message}: {', '.join(differing)}"
+        raise SamplingCompatibilityError(message)
 
     main_modules = dict(main_transformer.named_modules())
     sampling_modules = dict(sampling_transformer.named_modules())
@@ -1032,17 +1047,15 @@ def _normalise_config(config: Any) -> Any:
         config = vars(config)
     if isinstance(config, Mapping):
         ignored = {
-            "_name_or_path",
             "name_or_path",
             "revision",
-            "_commit_hash",
             "transformers_version",
             "diffusers_version",
         }
         return {
             str(key): _normalise_config(value)
             for key, value in config.items()
-            if key not in ignored
+            if key not in ignored and not str(key).startswith("_")
         }
     if isinstance(config, (list, tuple)):
         return [_normalise_config(value) for value in config]

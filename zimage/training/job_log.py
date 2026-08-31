@@ -59,12 +59,13 @@ def job_log_path(job_dir: str | Path) -> Path:
 def job_log_session(job_dir: str | Path) -> Iterator[Path]:
     """Create ``logs/`` if needed, append a banner, and tee stdio into the file.
 
-    The log file receives ``\\r`` replaced by ``\\n`` with line-buffered
-    flushes. The original console streams receive unmodified text. Logger
-    ``zimage.training`` gets a ``StreamHandler`` on the teed stdout (no
-    ``FileHandler``) and ``propagate`` is off so a parent logger cannot
-    duplicate lines. Streams, handler, and propagate are restored in
-    ``finally``.
+    The log file receives CR-overwrite lines with CSI/OSC stripped:
+    in-progress ``\\r`` updates stay in memory until a newline or session
+    end. ``flush`` does not commit the in-memory line. The original
+    console streams receive unmodified text. Logger ``zimage.training``
+    gets a ``StreamHandler`` on the teed stdout (no ``FileHandler``) and
+    ``propagate`` is off so a parent logger cannot duplicate lines.
+    Streams, handler, and propagate are restored in ``finally``.
     """
 
     path = job_log_path(job_dir)
@@ -82,6 +83,8 @@ def job_log_session(job_dir: str | Path) -> Iterator[Path]:
     handler: logging.Handler | None = None
     previous_level = logger.level
     previous_propagate = logger.propagate
+    tee_out: _TeeStream | None = None
+    tee_err: _TeeStream | None = None
     try:
         tee_out = _TeeStream(original_stdout, log_file)
         tee_err = _TeeStream(original_stderr, log_file)
@@ -108,6 +111,10 @@ def job_log_session(job_dir: str | Path) -> Iterator[Path]:
             handler.close()
             logger.setLevel(previous_level)
         logger.propagate = previous_propagate
+        if tee_out is not None:
+            tee_out.commit_pending()
+        if tee_err is not None:
+            tee_err.commit_pending()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         log_file.close()
@@ -205,22 +212,128 @@ def _utf8_lead_width(byte: int) -> int:
     return 0
 
 
+def _skip_escape(text: str, start: int) -> int | None:
+    """Return the length of a CSI/OSC (or other ESC) sequence, or None if incomplete."""
+
+    remaining = len(text) - start
+    if remaining < 2:
+        return None
+    kind = text[start + 1]
+    if kind == "[":
+        index = start + 2
+        while index < len(text):
+            code = ord(text[index])
+            if 0x20 <= code <= 0x3F:
+                index += 1
+                continue
+            if 0x40 <= code <= 0x7E:
+                return index + 1 - start
+            return index - start
+        return None
+    if kind == "]":
+        index = start + 2
+        while index < len(text):
+            char = text[index]
+            if char == "\x07":
+                return index + 1 - start
+            if char == "\x1b":
+                if index + 1 >= len(text):
+                    return None
+                if text[index + 1] == "\\":
+                    return index + 2 - start
+                index += 1
+                continue
+            if char in "\r\n":
+                return index - start
+            index += 1
+        return None
+    return 2
+
+
+class _JobLogLineBuffer:
+    """Collapse CR overwrites and strip CSI/OSC into committed file lines.
+
+    ``\\r`` moves to column 0 and the next characters overwrite in place
+    without clearing the rest of the line. ``\\n`` emits the current line.
+    ``flush`` is not handled here: callers must not commit on flush.
+    """
+
+    def __init__(self) -> None:
+        self._chars: list[str] = []
+        self._column = 0
+        self._pending = ""
+
+    def feed(self, data: str) -> str:
+        if not data:
+            return ""
+        text = self._pending + data
+        self._pending = ""
+        committed: list[str] = []
+        index = 0
+        length = len(text)
+        while index < length:
+            char = text[index]
+            if char == "\x1b":
+                skipped = _skip_escape(text, index)
+                if skipped is None:
+                    self._pending = text[index:]
+                    break
+                index += skipped if skipped > 0 else 1
+                continue
+            if char == "\r":
+                self._column = 0
+                index += 1
+                continue
+            if char == "\n":
+                committed.append("".join(self._chars) + "\n")
+                self._chars = []
+                self._column = 0
+                index += 1
+                continue
+            self._put(char)
+            index += 1
+        return "".join(committed)
+
+    def close(self) -> str:
+        self._pending = ""
+        if not self._chars:
+            return ""
+        result = "".join(self._chars) + "\n"
+        self._chars = []
+        self._column = 0
+        return result
+
+    def _put(self, char: str) -> None:
+        if self._column < len(self._chars):
+            self._chars[self._column] = char
+        else:
+            self._chars.append(char)
+        self._column += 1
+
+
 class _TeeStream:
-    """Write unmodified text to the console and CR-normalized text to the log."""
+    """Write unmodified text to the console and overwrite-normalized text to the log."""
 
     def __init__(self, original: TextIO, log_file: TextIO) -> None:
         self._original = original
         self._log_file = log_file
+        self._buffer = _JobLogLineBuffer()
 
     def write(self, data: str) -> int:
         if not isinstance(data, str):
             data = os.fsdecode(data) if isinstance(data, bytes) else str(data)
         written = self._original.write(data)
-        normalized = data.replace("\r", "\n")
-        self._log_file.write(normalized)
-        if "\n" in normalized:
+        committed = self._buffer.feed(data)
+        if committed:
+            self._log_file.write(committed)
             self._log_file.flush()
         return written if isinstance(written, int) else len(data)
+
+    def commit_pending(self) -> None:
+        leftover = self._buffer.close()
+        if leftover:
+            self._log_file.write(leftover)
+            self._log_file.flush()
 
     def flush(self) -> None:
         self._original.flush()

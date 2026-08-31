@@ -183,20 +183,25 @@ footer { display: none !important; }
 #studio-training-log-delta {
     display: none !important;
 }
+#studio-training-job-log .html-container,
+#studio-training-job-log .prose,
 #studio-training-job-log pre,
-pre#studio-training-job-log {
+pre.studio-training-job-log-pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+    font-size: 0.8125rem;
+    color: #e6e6e6;
+    background: #0a0a0a;
+    white-space: pre;
+    overflow: auto;
+}
+#studio-training-job-log pre,
+pre.studio-training-job-log-pre {
     box-sizing: border-box;
     margin: 0;
     padding: 0.75rem 1rem;
     min-height: 22.5rem;
     max-height: 30rem;
-    overflow: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.8125rem;
     line-height: 1.45;
-    white-space: pre-wrap;
-    word-break: break-word;
-    background: #0a0a0a;
 }
 """
 
@@ -245,7 +250,7 @@ window.__zimageApplyTrainingLogDelta = function (delta) {
   window.__zimageTrainingLogDeltaSeen = seen;
   const host = document.getElementById("studio-training-job-log");
   if (!host) return;
-  const pre = host.tagName === "PRE" ? host : host.querySelector("pre");
+  const pre = host.tagName === "PRE" ? host : host.querySelector("pre.studio-training-job-log-pre, pre");
   if (!pre) return;
   const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight <= 16;
   if (reset) pre.textContent = "";

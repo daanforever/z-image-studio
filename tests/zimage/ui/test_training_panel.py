@@ -255,7 +255,8 @@ def test_panel_has_required_controls():
     assert panel.log_delta.elem_id == "studio-training-log-delta"
     assert panel.job_log.elem_id == "studio-training-job-log"
     assert panel.job_log.value == JOB_LOG_HTML
-    assert 'id="studio-training-job-log"' in JOB_LOG_HTML
+    assert "id=" not in JOB_LOG_HTML
+    assert 'class="studio-training-job-log-pre"' in JOB_LOG_HTML
     assert isinstance(panel.log_accordion, gr.Accordion)
     assert panel.log_accordion.label == "Log"
     assert panel.log_accordion.open is True

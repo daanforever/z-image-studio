@@ -53,8 +53,31 @@ def test_gallery_preview_click_opens_fullscreen():
     assert "stopImmediatePropagation" in CUSTOM_JS
 
 
+def test_training_log_pre_is_scoped_monospace():
+    assert "#studio-training-job-log pre" in CUSTOM_CSS
+    assert "pre.studio-training-job-log-pre" in CUSTOM_CSS
+    assert "#studio-training-job-log .html-container" in CUSTOM_CSS
+    assert "#studio-training-job-log .prose" in CUSTOM_CSS
+    assert (
+        "font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace "
+        "!important" in CUSTOM_CSS
+    )
+    assert "white-space: pre;" in CUSTOM_CSS
+    assert "overflow: auto;" in CUSTOM_CSS
+    assert "pre-wrap" not in CUSTOM_CSS
+    assert "word-break: break-word" not in CUSTOM_CSS
+    assert not any(
+        line.lstrip().startswith(prefix)
+        for line in CUSTOM_CSS.splitlines()
+        for prefix in (".prose", ".html-container")
+    )
+
+
 def test_training_log_delta_helper_in_custom_js():
     assert "__zimageApplyTrainingLogDelta" in CUSTOM_JS
     assert "studio-training-job-log" in CUSTOM_JS
+    assert "querySelector" in CUSTOM_JS
     assert "textContent" in CUSTOM_JS
+    assert "scrollTop" in CUSTOM_JS
+    assert "scrollHeight" in CUSTOM_JS
     assert "MutationObserver" not in CUSTOM_JS

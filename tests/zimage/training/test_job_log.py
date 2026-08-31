@@ -228,6 +228,15 @@ def test_print_and_logger_info_appear_once_in_file(tmp_path):
     assert "INFO" in text
 
 
+def _log_body_lines(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    return [
+        line
+        for line in text.splitlines()
+        if not line.startswith(SESSION_BANNER_PREFIX)
+    ]
+
+
 def test_tee_keeps_cr_on_console_and_newlines_in_file(tmp_path, capsys):
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -236,8 +245,101 @@ def test_tee_keeps_cr_on_console_and_newlines_in_file(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "ab\rcd\n" in captured.out
     raw = job_log_path(job_dir).read_bytes()
-    assert b"ab\ncd\n" in raw
+    assert b"ab\ncd" not in raw
     assert b"ab\rcd" not in raw
+    assert _log_body_lines(job_log_path(job_dir)) == ["cd"]
+
+
+def test_tee_column_overwrite_keeps_uncovered_suffix(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    with job_log_session(job_dir):
+        sys.stdout.write("hello\rhi\n")
+    text = job_log_path(job_dir).read_text(encoding="utf-8")
+    assert "hillo\n" in text
+    assert "hello" not in text
+
+
+def test_tee_checkpoint_shards_one_completed_line(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    payload = "Loading checkpoint shards:   0%\rLoading checkpoint shards: 100%\n"
+    with job_log_session(job_dir):
+        sys.stdout.write(payload)
+    text = job_log_path(job_dir).read_text(encoding="utf-8")
+    assert "\x1b" not in text
+    body = _log_body_lines(job_log_path(job_dir))
+    assert len(body) == 1
+    assert body[0].endswith("Loading checkpoint shards: 100%")
+
+
+def test_tee_checkpoint_shards_strips_ansi(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    wrapped = (
+        "\x1b[32mLoading checkpoint shards:   0%\x1b[0m\r"
+        "\x1b[32mLoading checkpoint shards: 100%\x1b[0m\n"
+    )
+    with job_log_session(job_dir):
+        sys.stdout.write(wrapped)
+    text = job_log_path(job_dir).read_text(encoding="utf-8")
+    assert "\x1b" not in text
+    body = _log_body_lines(job_log_path(job_dir))
+    assert len(body) == 1
+    assert body[0].endswith("Loading checkpoint shards: 100%")
+
+
+def test_tee_nested_tqdm_sample_collapses_refreshes(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    nested = (
+        "Fetching 5 files:   0%\r"
+        "Fetching 5 files:  20%\r"
+        "Fetching 5 files:  40%\r"
+        "Fetching 5 files:  60%\r"
+        "\x1b[A\x1b[K"
+        "Fetching 5 files:  80%\r"
+        "Fetching 5 files: 100%\n"
+        "Downloading:   0%\r"
+        "Downloading: 100%\n"
+    )
+    with job_log_session(job_dir):
+        sys.stdout.write(nested)
+    text = job_log_path(job_dir).read_text(encoding="utf-8")
+    assert "\x1b" not in text
+    assert text.count("Fetching") < 6
+    assert text.count("Fetching") >= 1
+    body = _log_body_lines(job_log_path(job_dir))
+    fetching_lines = [line for line in body if "Fetching" in line]
+    assert fetching_lines
+    assert fetching_lines[-1].endswith("100%")
+
+
+def test_tee_flush_does_not_commit_cr_updates(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    path = job_log_path(job_dir)
+    with job_log_session(job_dir):
+        after_banner = path.read_text(encoding="utf-8")
+        for percent in range(0, 50, 5):
+            sys.stdout.write(f"Loading checkpoint shards: {percent:3d}%\r")
+            sys.stdout.flush()
+        assert path.read_text(encoding="utf-8") == after_banner
+        sys.stdout.write("Loading checkpoint shards: 100%\n")
+    body = _log_body_lines(path)
+    assert len(body) == 1
+    assert body[0].endswith("100%")
+
+
+def test_session_close_commits_trailing_cr_bar(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    with job_log_session(job_dir):
+        sys.stdout.write("Loading checkpoint shards:  50%\r")
+    text = job_log_path(job_dir).read_text(encoding="utf-8")
+    assert "\r" not in text
+    body = _log_body_lines(job_log_path(job_dir))
+    assert body == ["Loading checkpoint shards:  50%"]
 
 
 def test_session_logs_traceback_before_reraise(tmp_path):
@@ -287,8 +389,9 @@ def test_controller_run_print_and_logger_share_one_file(tmp_path, capsys):
     assert text.count(SESSION_BANNER_PREFIX) == 1
     assert "hello-stdout" in text
     assert "hello-logger" in text
-    assert "ab\ncd\n" in text
+    assert "ab\ncd" not in text
     assert "ab\rcd" not in text
+    assert "\ncd\n" in text
     assert sys.stdout is not None
 
 

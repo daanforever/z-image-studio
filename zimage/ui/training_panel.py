@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 import gradio as gr
 
-JOB_LOG_HTML = '<pre id="studio-training-job-log"></pre>'
+JOB_LOG_HTML = '<pre class="studio-training-job-log-pre"></pre>'
 APPLY_TRAINING_LOG_JS = (
     "(...args) => window.__zimageApplyTrainingLogDelta(args[args.length - 1])"
 )

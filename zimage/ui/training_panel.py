@@ -100,6 +100,7 @@ class TrainingPanel:
     log_offset: gr.State
     log_generation: gr.State
     log_delta: gr.Textbox
+    log_accordion: gr.Accordion
     job_log: gr.HTML
 
 
@@ -495,25 +496,15 @@ def build_training_panel(
                     elem_id="studio-training-state",
                 )
                 message = gr.Markdown("", elem_id="studio-training-message")
-                with gr.Tabs(elem_id="studio-training-result-tabs"):
-                    with gr.Tab(
-                        "Previews",
-                        elem_id="studio-training-previews-tab",
-                    ):
-                        preview_gallery = gr.Gallery(
-                            label="Previews",
-                            columns=2,
-                            height=360,
-                            object_fit="contain",
-                            preview=True,
-                            format="png",
-                            elem_id="studio-training-previews",
-                        )
-                    with gr.Tab("Log", elem_id="studio-training-log-tab"):
-                        job_log = gr.HTML(
-                            JOB_LOG_HTML,
-                            elem_id="studio-training-job-log",
-                        )
+                preview_gallery = gr.Gallery(
+                    label="Previews",
+                    columns=2,
+                    height=360,
+                    object_fit="contain",
+                    preview=True,
+                    format="png",
+                    elem_id="studio-training-previews",
+                )
                 log_delta = gr.Textbox(
                     value="",
                     label="log delta",
@@ -522,6 +513,15 @@ def build_training_panel(
                     interactive=False,
                     elem_id="studio-training-log-delta",
                 )
+        with gr.Accordion(
+            "Log",
+            open=True,
+            elem_id="studio-training-log-accordion",
+        ) as log_accordion:
+            job_log = gr.HTML(
+                JOB_LOG_HTML,
+                elem_id="studio-training-job-log",
+            )
         poll_timer = gr.Timer(2.0, active=False)
 
     load_outputs = [
@@ -687,6 +687,7 @@ def build_training_panel(
         log_offset=log_offset,
         log_generation=log_generation,
         log_delta=log_delta,
+        log_accordion=log_accordion,
         job_log=job_log,
     )
 

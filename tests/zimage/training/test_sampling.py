@@ -4,6 +4,7 @@ import gc
 import inspect
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,7 @@ from zimage.training.contracts import (
 from zimage.training.sampling import (
     PreviewSamplingError,
     UnfusedPreviewSampler,
+    _quantize_float8_weight_only,
     resolve_preview_parameters,
 )
 from zimage.training.schema import merge_sample_parameters
@@ -684,6 +686,45 @@ def test_cpu_preview_skips_quantization_and_never_fuses(tmp_path):
     assert _adapter_names(transformer) == set()
 
 
+def test_float8_preview_quantizer_exposes_peft_requantizer():
+    from peft.tuners.lora.torchao import TorchaoLoraLinear
+    from torchao.quantization import Float8WeightOnlyConfig
+
+    transformer = TinyTransformer().to(dtype=torch.bfloat16).eval()
+    _quantize_float8_weight_only(transformer)
+    getter = transformer.hf_quantizer.quantization_config.get_apply_tensor_subclass
+    assert callable(getter)
+    assert isinstance(getter(), Float8WeightOnlyConfig)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        transformer.add_adapter(_lora_config(), adapter_name="preview")
+    assert not any(
+        "get_apply_tensor_subclass" in str(item.message) for item in caught
+    )
+    layers = [
+        module
+        for module in transformer.modules()
+        if isinstance(module, TorchaoLoraLinear)
+    ]
+    assert layers
+    assert all(module.get_apply_tensor_subclass is not None for module in layers)
+    assert all(
+        isinstance(module.get_apply_tensor_subclass(), Float8WeightOnlyConfig)
+        for module in layers
+    )
+
+
+def test_cuda_survivor_scan_does_not_probe_deprecated_reduce_op():
+    import torch.distributed  # noqa: F401
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        survivors = _cuda_tensor_survivors()
+    assert isinstance(survivors, list)
+    assert not any("reduce_op" in str(item.message) for item in caught)
+
+
 _FP8_MIN_CAPABILITY = (8, 9)
 _CUDA_MEMORY_SLACK_BYTES = 8 * 1024 * 1024
 
@@ -751,7 +792,12 @@ def _cuda_tensor_survivors() -> list[tuple]:
     survivors: list[tuple] = []
     for obj in gc.get_objects():
         try:
-            if torch.is_tensor(obj) and obj.device.type == "cuda":
+            # type()/issubclass avoids torch.is_tensor() / isinstance(..., Tensor)
+            # on gc objects such as torch.distributed.reduce_op, whose deprecated
+            # __getattribute__ fires on any isinstance probe.
+            if not issubclass(type(obj), torch.Tensor):
+                continue
+            if obj.device.type == "cuda":
                 survivors.append((tuple(obj.shape), str(obj.dtype), str(obj.device)))
         except Exception:
             continue
@@ -864,6 +910,9 @@ def test_sample_unfused_real_cuda_lifecycle_quantizes_once_and_restores_cpu(tmp_
         )
         assert first_path.is_file()
         assert sampler._fp8_quantized is True
+        requantizer = transformer.hf_quantizer.quantization_config.get_apply_tensor_subclass
+        assert callable(requantizer)
+        assert type(requantizer()).__name__ == "Float8WeightOnlyConfig"
         assert _adapter_names(transformer) == set()
         _assert_module_device_type(transformer, "cpu")
         _assert_module_device_type(vae, "cpu")

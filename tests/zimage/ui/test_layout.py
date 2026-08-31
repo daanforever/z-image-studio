@@ -376,11 +376,11 @@ def test_generate_and_training_tabs(monkeypatch):
         if label in {"Generate", "Training"}:
             labels.append(label)
     assert labels == ["Generate", "Training"]
-    assert "studio-training-log-tab" in ids
+    assert "studio-training-log-accordion" in ids
     assert "studio-training-job-log" in ids
     assert "studio-training-log-delta" in ids
-    log_tab = _block_by_elem_id(demo, "studio-training-log-tab")
-    assert log_tab.label == "Log"
+    log_accordion = _block_by_elem_id(demo, "studio-training-log-accordion")
+    assert log_accordion.label == "Log"
 
 
 def test_navbar_stop_still_cancels_generate(monkeypatch):

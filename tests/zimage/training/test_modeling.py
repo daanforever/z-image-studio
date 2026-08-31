@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,8 @@ from zimage.training.modeling import (
     SamplingCompatibilityError,
     TrainingModelComponents,
     TrainingModelLifecycle,
+    _patch_torchao_float8_linear_autocast,
+    _current_cuda_autocast_dtype,
     encode_prompt,
     encode_vae_latent,
     load_training_components,
@@ -426,6 +429,31 @@ def test_main_transformer_fp8_setup_order_filter_and_checkpointing():
     assert convert_kwargs["config"].pad_inner_dim is True
     assert result.fp8_enabled is True
     assert result.effective_precision == "fp8"
+
+
+def test_float8_linear_forward_uses_current_autocast_api(monkeypatch):
+    from torchao.float8.config import Float8LinearConfig
+    from torchao.float8.float8_linear import Float8Linear
+
+    _patch_torchao_float8_linear_autocast()
+    assert getattr(Float8Linear.forward, "_zimage_uses_current_autocast", False)
+    helper = inspect.getsource(_current_cuda_autocast_dtype)
+    assert "get_autocast_dtype" in helper
+    assert "get_autocast_gpu_dtype" not in inspect.getsource(Float8Linear.forward)
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("deprecated get_autocast_gpu_dtype")
+
+    monkeypatch.setattr(torch, "get_autocast_gpu_dtype", boom)
+    monkeypatch.setattr(torch, "is_autocast_enabled", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(torch, "get_autocast_dtype", lambda _device: torch.float32)
+
+    converted = Float8Linear.from_float(
+        torch.nn.Linear(8, 8, bias=False),
+        config=Float8LinearConfig(emulate=True),
+    )
+    output = converted(torch.ones(2, 8))
+    assert output.shape == (2, 8)
 
 
 def test_fp8_filter_excludes_output_and_incompatible_linear_dimensions():

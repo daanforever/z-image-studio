@@ -8,6 +8,7 @@ downloading production weights.
 from __future__ import annotations
 
 import gc
+import inspect
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -253,6 +254,9 @@ def setup_main_transformer(
 
     fp8_enabled = requested == "fp8" and bool(fp8_capable)
     if fp8_enabled:
+        # TorchAO Float8Linear.forward still calls the deprecated
+        # torch.get_autocast_gpu_dtype(); swap in the current API first.
+        _patch_torchao_float8_linear_autocast()
         if convert_to_float8_training is None or float8_config_factory is None:
             from torchao.float8 import (
                 Float8LinearConfig,
@@ -675,6 +679,59 @@ class TrainingModelLifecycle:
                 "does not reload them"
             )
         return self.components.tokenizer, self.components.text_encoder
+
+
+def _current_cuda_autocast_dtype() -> torch.dtype:
+    """Return the CUDA autocast dtype using the current PyTorch API."""
+
+    getter = getattr(torch, "get_autocast_dtype", None)
+    if callable(getter):
+        return getter("cuda")
+    return torch.get_autocast_gpu_dtype()
+
+
+def _patch_torchao_float8_linear_autocast() -> None:
+    """Make TorchAO ``Float8Linear.forward`` use ``torch.get_autocast_dtype``.
+
+    Upstream still calls ``torch.get_autocast_gpu_dtype()`` (pytorch/ao#1522,
+    unmerged PR #1528). That C++ binding emits DeprecationWarning on every
+    autocast forward. The replacement matches TorchAO's forward and only
+    changes the dtype lookup.
+    """
+
+    try:
+        from torchao.float8.float8_linear import (
+            Float8Linear,
+            matmul_with_hp_or_float8_args,
+        )
+    except ImportError:
+        return
+
+    current = Float8Linear.forward
+    if getattr(current, "_zimage_uses_current_autocast", False):
+        return
+    try:
+        source = inspect.getsource(current)
+    except (OSError, TypeError):
+        source = ""
+    if source and "get_autocast_gpu_dtype" not in source:
+        return
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if torch.is_autocast_enabled():
+            input = input.to(_current_cuda_autocast_dtype())
+        output = matmul_with_hp_or_float8_args.apply(
+            input,
+            self.weight.t(),
+            self.linear_mm_config,
+            self.config,
+        )
+        if self.bias is not None:
+            output = output + self.bias.to(output.dtype)
+        return output
+
+    forward._zimage_uses_current_autocast = True
+    Float8Linear.forward = forward
 
 
 def _place_trainable_adapter(

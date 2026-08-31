@@ -260,6 +260,7 @@ class UnfusedPreviewSampler:
         transformer = self.transformer
         pipeline = self.pipeline
         if hasattr(transformer, "add_adapter"):
+            _ensure_peft_torchao_requantizer(transformer)
             config = self._build_lora_config(metadata.peft_config)
             transformer.add_adapter(config, adapter_name=name)
             from peft import set_peft_model_state_dict
@@ -475,7 +476,65 @@ def _make_generator(device: torch.device, seed: int) -> torch.Generator:
 def _quantize_float8_weight_only(transformer: Any) -> None:
     from torchao.quantization import Float8WeightOnlyConfig, quantize_
 
-    quantize_(transformer, Float8WeightOnlyConfig())
+    config = Float8WeightOnlyConfig()
+    quantize_(transformer, config)
+    _attach_peft_torchao_requantizer(transformer, config)
+
+
+def _attach_peft_torchao_requantizer(transformer: Any, quant_type: Any) -> None:
+    """Expose the requantizer PEFT needs after post-load ``quantize_``.
+
+    PEFT wraps TorchAO tensors in ``TorchaoLoraLinear`` and looks up
+    ``model.hf_quantizer.quantization_config.get_apply_tensor_subclass`` so
+    ``merge()`` / ``unmerge()`` can re-quantize. That attribute is normally
+    set by ``from_pretrained(..., quantization_config=TorchAoConfig(...))``,
+    which crashes on Windows Blackwell. Preview quantizes after load, so this
+    attaches the same PEFT contract without going through that loader.
+    """
+
+    if _peft_torchao_requantizer(transformer) is not None:
+        return
+    from types import SimpleNamespace
+
+    transformer.hf_quantizer = SimpleNamespace(
+        quantization_config=SimpleNamespace(
+            get_apply_tensor_subclass=lambda: quant_type
+        )
+    )
+
+
+def _peft_torchao_requantizer(transformer: Any) -> Any | None:
+    getter = getattr(
+        getattr(getattr(transformer, "hf_quantizer", None), "quantization_config", None),
+        "get_apply_tensor_subclass",
+        None,
+    )
+    return getter if callable(getter) else None
+
+
+def _ensure_peft_torchao_requantizer(transformer: Any) -> None:
+    if _peft_torchao_requantizer(transformer) is not None:
+        return
+    quant_type = _torchao_preview_quant_type(transformer)
+    if quant_type is None:
+        return
+    _attach_peft_torchao_requantizer(transformer, quant_type)
+
+
+def _torchao_preview_quant_type(transformer: Any) -> Any | None:
+    try:
+        from torchao.quantization import Float8WeightOnlyConfig
+        from torchao.utils import TorchAOBaseTensor
+    except ImportError:
+        return None
+    modules = getattr(transformer, "modules", None)
+    if not callable(modules):
+        return None
+    for module in modules():
+        weight = getattr(module, "weight", None)
+        if isinstance(weight, TorchAOBaseTensor):
+            return Float8WeightOnlyConfig()
+    return None
 
 
 def _move_component(component: Any, device: torch.device) -> None:

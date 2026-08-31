@@ -227,7 +227,7 @@ def test_panel_has_required_controls():
     assert "studio-training-previews" in ids
     assert "studio-training-job-log" in ids
     assert "studio-training-log-delta" in ids
-    assert "studio-training-log-tab" in ids
+    assert "studio-training-log-accordion" in ids
 
     assert not hasattr(panel, "base_name")
     assert panel.create_open_btn.value == "Create"
@@ -256,9 +256,11 @@ def test_panel_has_required_controls():
     assert panel.job_log.elem_id == "studio-training-job-log"
     assert panel.job_log.value == JOB_LOG_HTML
     assert 'id="studio-training-job-log"' in JOB_LOG_HTML
-    log_tab = _block_by_elem_id(demo, "studio-training-log-tab")
-    assert log_tab.label == "Log"
-    assert log_tab in _ancestor_chain(panel.job_log)
+    assert isinstance(panel.log_accordion, gr.Accordion)
+    assert panel.log_accordion.label == "Log"
+    assert panel.log_accordion.open is True
+    assert panel.log_accordion.elem_id == "studio-training-log-accordion"
+    assert panel.log_accordion in _ancestor_chain(panel.job_log)
 
 
 def test_yaml_editor_inside_collapsed_config_accordion():
@@ -712,17 +714,18 @@ def test_poll_log_is_on_callbacks_and_duck_typed_hosts():
     assert empty["reset"] is True
 
 
-def test_log_tab_is_nested_not_top_level():
+def test_log_accordion_is_full_width_not_in_preview_row():
     demo, panel = _construct()
-    log_tab = _block_by_elem_id(demo, "studio-training-log-tab")
-    previews_tab = _block_by_elem_id(demo, "studio-training-previews-tab")
-    result_tabs = _block_by_elem_id(demo, "studio-training-result-tabs")
     panel_root = _block_by_elem_id(demo, "studio-training-panel")
-    assert result_tabs in _ancestor_chain(log_tab)
-    assert result_tabs in _ancestor_chain(previews_tab)
-    assert panel_root in _ancestor_chain(result_tabs)
-    assert log_tab.label == "Log"
-    assert previews_tab.label == "Previews"
+    assert panel_root in _ancestor_chain(panel.preview_gallery)
+    preview_row = next(
+        block
+        for block in _ancestor_chain(panel.preview_gallery)
+        if isinstance(block, gr.Row)
+    )
+    assert preview_row not in _ancestor_chain(panel.job_log)
+    assert panel.log_accordion in _ancestor_chain(panel.job_log)
+    assert panel.log_accordion not in _ancestor_chain(panel.log_delta)
 
 
 def test_create_and_load_reset_offset_and_bump_generation():

@@ -242,7 +242,7 @@ python train.py status <job_id>
 
 ### UI
 
-**Generate** | **Training**. On Training: **Job** dropdown (select an existing job, or type a new name and click **Create**), YAML editor for `jobs/{id}/config.yaml`, **Validate** / **Save** / **Start** / **Stop**, operational status, and nested **Previews** | **Log** tabs. **Log** live-tails `logs/job.log`. **Stop** is immediate: the trainer process is killed and no extra checkpoint is written.
+**Generate** | **Training**. On Training: **Job** dropdown (select an existing job, or type a new name and click **Create**), YAML editor for `jobs/{id}/config.yaml`, **Validate** / **Save** / **Start** / **Stop**, operational status, **Previews** in the right column, and a full-width **Log** accordion (expanded by default) that live-tails `logs/job.log`. **Stop** is immediate: the trainer process is killed and no extra checkpoint is written.
 
 ### Policy
 

@@ -51,3 +51,10 @@ def test_gallery_preview_click_opens_fullscreen():
     assert "#output-gallery .media-button" in CUSTOM_JS
     assert 'button[aria-label="Fullscreen"]' in CUSTOM_JS
     assert "stopImmediatePropagation" in CUSTOM_JS
+
+
+def test_training_log_delta_helper_in_custom_js():
+    assert "__zimageApplyTrainingLogDelta" in CUSTOM_JS
+    assert "studio-training-job-log" in CUSTOM_JS
+    assert "textContent" in CUSTOM_JS
+    assert "MutationObserver" not in CUSTOM_JS

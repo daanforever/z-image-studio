@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import importlib
+import logging
 from collections.abc import Mapping, MutableMapping
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -74,6 +75,8 @@ QWEN_CHAT_TEMPLATE = {
     "enable_thinking": True,
 }
 
+log = logging.getLogger("zimage.training")
+
 
 @dataclass
 class FlowMatchingStepResult:
@@ -122,6 +125,12 @@ def run_job(job_dir: Path, **injected: Any) -> int:
         job_dir,
         load_job_state(job_dir),
         dataset_size=len(samples),
+    )
+    log.info(
+        "run start job=%s step=%s epoch=%s",
+        state.job_id,
+        state.step,
+        state.epoch,
     )
 
     holder = {"runtime": _build_runtime(job_dir, job, injected, device=device)}
@@ -302,6 +311,7 @@ def _prepare_cache(
     if cache_config is None:
         cache_config = cache_config_from_components(job, components)
     prepare = injected.get("prepare_cache", prepare_cache_at_job_start)
+    log.info("cache prepare samples=%s", len(samples))
     return prepare(samples, lifecycle.cache_encoder(), cache_config)
 
 
@@ -504,6 +514,7 @@ def _optimize(
         persisted = _write_running_state(
             job_dir, state.job_id, step, epoch, runtime["last_error"]
         )
+        log.info("step=%s epoch=%s", step, epoch)
         if hook is not None:
             hook.on_optimizer_step(
                 OptimizerStepBoundary(
@@ -527,18 +538,37 @@ def _optimize(
             _write_running_state(
                 job_dir, state.job_id, step, epoch, runtime["last_error"]
             )
+        noteworthy = [
+            decision
+            for decision in reload.decisions
+            if decision.classification
+            in (
+                UpdateClassification.REJECTED_IMMUTABLE,
+                UpdateClassification.INVALID,
+            )
+        ]
+        if noteworthy:
+            log.error("%s", runtime["last_error"])
         try:
+            if any(
+                decision.classification is UpdateClassification.APPLY_AT_STEP
+                for decision in reload.decisions
+            ):
+                log.info("hot-reload step=%s epoch=%s", step, epoch)
             _apply_hot_runtime(runtime, reload, injected)
         except Exception as exc:
+            log.error("hot-reload failed: %s", exc)
             runtime["last_error"] = str(exc)
             _write_running_state(
                 job_dir, state.job_id, step, epoch, runtime["last_error"]
             )
             return 1
         if reload.rebuild_required:
+            log.info("rebuild step=%s epoch=%s", step, epoch)
             try:
                 holder["runtime"] = _rebuild_runtime(job_dir, runtime, injected)
             except Exception as exc:
+                log.error("rebuild failed: %s", exc)
                 runtime["last_error"] = str(exc)
                 _write_running_state(
                     job_dir, state.job_id, step, epoch, runtime["last_error"]
@@ -583,6 +613,7 @@ def _write_checkpoint_then_sample(
     if writer is None:
         return 0
 
+    log.info("checkpoint step=%s epoch=%s", state.step, state.epoch)
     transformer = runtime["transformer"]
     unwrap = getattr(runtime["accelerator"], "unwrap_model", None)
     if callable(unwrap):
@@ -611,6 +642,7 @@ def _write_checkpoint_then_sample(
     )
     if sampler is None:
         return 0
+    log.info("preview step=%s", state.step)
     training_device = _training_device_from_runtime(runtime, injected)
     cuda_handoff = training_device.type == "cuda"
     failure: Exception | None = None
@@ -644,6 +676,7 @@ def _write_checkpoint_then_sample(
                         f"{failure}; additionally, {restore_failure}"
                     )
     if failure is not None:
+        log.error("checkpoint/preview failed: %s", failure)
         runtime["last_error"] = str(failure)
         _write_running_state(
             job_dir, state.job_id, state.step, state.epoch, runtime["last_error"]

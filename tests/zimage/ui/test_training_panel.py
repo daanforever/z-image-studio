@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -11,15 +12,20 @@ from types import SimpleNamespace
 import gradio as gr
 import pytest
 
+from zimage.ui.theme import CUSTOM_JS
 from zimage.ui.training_panel import (
+    APPLY_TRAINING_LOG_JS,
+    JOB_LOG_HTML,
     JobPanelData,
     TrainingCallbacks,
     TrainingPanel,
     as_training_callbacks,
     build_training_panel,
+    commit_training_log,
     format_operational_state,
     handle_create_or_open,
     handle_load_job,
+    handle_poll_log,
     handle_save,
     handle_start,
     handle_stop,
@@ -49,6 +55,9 @@ class RecordingCallbacks:
     epoch: int = 0
     last_error: str | None = None
     previews: list[str] = field(default_factory=list)
+    log_chunk: str = ""
+    log_reset: bool | None = None
+    log_next_offset: int | None = None
     validate_ok: bool = True
     validate_error: str = "invalid"
     save_mode: str = "saved"
@@ -98,6 +107,17 @@ class RecordingCallbacks:
     def poll_state(self, job_id: str) -> dict:
         self.calls.append(("poll_state", job_id))
         return {"state": self._state(job_id=job_id), "previews": list(self.previews)}
+
+    def poll_log(self, job_id: str, offset: int) -> dict:
+        self.calls.append(("poll_log", job_id, offset))
+        reset = offset < 0 if self.log_reset is None else self.log_reset
+        chunk = self.log_chunk
+        if self.log_next_offset is not None:
+            next_offset = self.log_next_offset
+        else:
+            start = 0 if offset < 0 else offset
+            next_offset = start + len(chunk.encode("utf-8"))
+        return {"chunk": chunk, "next_offset": next_offset, "reset": reset}
 
     def _state(self, *, status: str | None = None, job_id: str | None = None) -> dict:
         return {
@@ -205,6 +225,9 @@ def test_panel_has_required_controls():
     assert "studio-training-stop" in ids
     assert "studio-training-state" in ids
     assert "studio-training-previews" in ids
+    assert "studio-training-job-log" in ids
+    assert "studio-training-log-delta" in ids
+    assert "studio-training-log-tab" in ids
 
     assert not hasattr(panel, "base_name")
     assert panel.create_open_btn.value == "Create"
@@ -224,6 +247,18 @@ def test_panel_has_required_controls():
     assert panel.yaml_editor.elem_id == "studio-training-yaml"
     assert isinstance(panel.preview_gallery, gr.Gallery)
     assert panel.preview_gallery.preview is True
+    assert isinstance(panel.log_offset, gr.State)
+    assert panel.log_offset.value == -1
+    assert isinstance(panel.log_generation, gr.State)
+    assert panel.log_generation.value == 0
+    assert isinstance(panel.log_delta, gr.Textbox)
+    assert panel.log_delta.elem_id == "studio-training-log-delta"
+    assert panel.job_log.elem_id == "studio-training-job-log"
+    assert panel.job_log.value == JOB_LOG_HTML
+    assert 'id="studio-training-job-log"' in JOB_LOG_HTML
+    log_tab = _block_by_elem_id(demo, "studio-training-log-tab")
+    assert log_tab.label == "Log"
+    assert log_tab in _ancestor_chain(panel.job_log)
 
 
 def test_yaml_editor_inside_collapsed_config_accordion():
@@ -444,7 +479,7 @@ def test_selector_custom_name_skips_load_and_create():
     select_fn = _fns_named(demo, "on_select_job")[0]
     recorder.calls.clear()
     outputs = select_fn.fn("Brand new style")
-    assert len(outputs) == 8
+    assert len(outputs) == 11
     for item in outputs:
         assert _is_skip(item)
     assert "load_job" not in recorder.kinds()
@@ -655,10 +690,188 @@ def test_create_or_open_accepts_attribute_state_objects():
         def poll_state(self, job_id):
             raise AssertionError(job_id)
 
+        def poll_log(self, job_id, offset):
+            raise AssertionError(job_id)
+
     data = handle_create_or_open("attr", callbacks=as_training_callbacks(Host()))
     assert data.job_id == "attr-job"
     assert data.state["step"] == 3
     assert format_operational_state(data.state).startswith("**Status:** `stopped`")
+
+
+def test_poll_log_is_on_callbacks_and_duck_typed_hosts():
+    recorder = RecordingCallbacks(log_chunk="step 1\n")
+    adapted = as_training_callbacks(recorder)
+    payload = adapted.poll_log("demo-job", -1)
+    assert payload["chunk"] == "step 1\n"
+    assert payload["reset"] is True
+    assert ("poll_log", "demo-job", -1) in recorder.calls
+    noop = noop_training_callbacks()
+    empty = noop.poll_log("x", -1)
+    assert empty["chunk"] == ""
+    assert empty["reset"] is True
+
+
+def test_log_tab_is_nested_not_top_level():
+    demo, panel = _construct()
+    log_tab = _block_by_elem_id(demo, "studio-training-log-tab")
+    previews_tab = _block_by_elem_id(demo, "studio-training-previews-tab")
+    result_tabs = _block_by_elem_id(demo, "studio-training-result-tabs")
+    panel_root = _block_by_elem_id(demo, "studio-training-panel")
+    assert result_tabs in _ancestor_chain(log_tab)
+    assert result_tabs in _ancestor_chain(previews_tab)
+    assert panel_root in _ancestor_chain(result_tabs)
+    assert log_tab.label == "Log"
+    assert previews_tab.label == "Previews"
+
+
+def test_create_and_load_reset_offset_and_bump_generation():
+    recorder = RecordingCallbacks(
+        job_id="job-a",
+        jobs=["job-a", "job-b"],
+        config_text=CANONICAL_YAML,
+    )
+    demo, panel = _construct(recorder)
+    create_fn = _fns_named(demo, "on_create_or_open")[0]
+    select_fn = _fns_named(demo, "on_select_job")[0]
+    assert create_fn.outputs[8] is panel.log_offset
+    assert create_fn.outputs[9] is panel.log_generation
+    assert create_fn.outputs[10] is panel.log_delta
+    assert panel.job_log not in create_fn.outputs
+
+    first = create_fn.fn("job-a", 0)
+    assert first[8] == -1
+    assert first[9] == 1
+    delta_a = json.loads(first[10])
+    assert delta_a["reset"] is True
+    assert delta_a["chunk"] == ""
+    assert delta_a["generation"] == 1
+
+    recorder.job_id = "job-b"
+    recorder.config_text = "job_name: b\n"
+    second = select_fn.fn("job-b", first[9])
+    assert second[8] == -1
+    assert second[9] == 2
+    delta_b = json.loads(second[10])
+    assert delta_b["reset"] is True
+    assert delta_b["generation"] == 2
+
+    recorder.job_id = "job-a"
+    recorder.config_text = CANONICAL_YAML
+    again = select_fn.fn("job-a", second[9])
+    assert again[8] == -1
+    assert again[9] == 3
+    delta_again = json.loads(again[10])
+    assert delta_again["reset"] is True
+    assert delta_again["generation"] == 3
+    assert again[10] != first[10]
+
+
+def test_cas_skip_on_mismatched_job_ids():
+    offset, delta = commit_training_log("job-b", "job-a", "stale chunk\n", 99, False, 1)
+    assert _is_skip(offset)
+    assert _is_skip(delta)
+
+    offset, delta = commit_training_log("job-a", "job-a", "hello\n", 12, False, 4)
+    assert offset == 12
+    payload = json.loads(delta)
+    assert payload["chunk"] == "hello\n"
+    assert payload["reset"] is False
+    assert payload["generation"] == 4
+
+    offset, delta = commit_training_log("job-a", "job-a", "", 12, False, 4)
+    assert offset == 12
+    assert _is_skip(delta)
+
+
+def test_on_poll_returns_delta_not_full_log_and_calls_poll_log():
+    recorder = RecordingCallbacks(
+        log_chunk="new line\n",
+        previews=["jobs/demo-job/previews/step-1.png"],
+    )
+    demo, panel = _construct(recorder)
+    poll_fn = _fns_named(demo, "on_poll")[0]
+    cas_fn = _fns_named(demo, "commit_training_log")[0]
+    assert poll_fn.inputs[0] is panel.job_id
+    assert poll_fn.inputs[1] is panel.log_offset
+    assert panel.job_log not in poll_fn.outputs
+    assert panel.log_delta not in poll_fn.outputs
+    assert cas_fn.outputs[0] is panel.log_offset
+    assert cas_fn.outputs[1] is panel.log_delta
+    assert cas_fn.trigger_after is not None
+
+    recorder.calls.clear()
+    outputs = poll_fn.fn("demo-job", 4)
+    assert recorder.kinds() == ["poll_state", "poll_log"]
+    assert ("poll_log", "demo-job", 4) in recorder.calls
+    assert outputs[1] == ["jobs/demo-job/previews/step-1.png"]
+    assert outputs[3] == "demo-job"
+    assert outputs[4] == "new line\n"
+    assert outputs[5] == 4 + len("new line\n")
+    assert outputs[6] is False
+    joined = " ".join(str(item) for item in outputs)
+    assert "new line\nnew line\n" not in joined
+    assert panel.job_log.value == JOB_LOG_HTML
+
+    js_fns = [
+        fn
+        for fn in demo.fns.values()
+        if getattr(fn, "js", None) and "__zimageApplyTrainingLogDelta" in str(fn.js)
+    ]
+    assert js_fns
+    assert APPLY_TRAINING_LOG_JS in {fn.js for fn in js_fns}
+    assert "MutationObserver" not in CUSTOM_JS
+    assert "textContent" in CUSTOM_JS
+    source = PANEL_SOURCE.read_text(encoding="utf-8")
+    assert "MutationObserver" not in source
+    assert "zimage.training" not in source
+
+
+def test_js_then_listeners_receive_log_delta():
+    demo, panel = _construct()
+    js_fns = [
+        fn
+        for fn in demo.fns.values()
+        if getattr(fn, "js", None) and fn.js == APPLY_TRAINING_LOG_JS
+    ]
+    assert len(js_fns) == 3
+    for fn in js_fns:
+        assert list(fn.inputs) == [panel.log_delta]
+        assert fn.targets == [(None, "then")]
+
+
+def test_handle_poll_log_swallows_callback_errors():
+    class Host:
+        def list_jobs(self):
+            return []
+
+        def create_or_open(self, name):
+            raise AssertionError(name)
+
+        def load_job(self, job_id):
+            raise AssertionError(job_id)
+
+        def validate_yaml(self, job_id, text):
+            raise AssertionError(job_id)
+
+        def save_yaml(self, job_id, text):
+            raise AssertionError(job_id)
+
+        def start_job(self, job_id):
+            raise AssertionError(job_id)
+
+        def stop_job(self, job_id):
+            raise AssertionError(job_id)
+
+        def poll_state(self, job_id):
+            raise AssertionError(job_id)
+
+        def poll_log(self, job_id, offset):
+            raise RuntimeError("read failed")
+
+    payload = handle_poll_log("demo-job", 8, callbacks=as_training_callbacks(Host()))
+    assert payload == {"chunk": "", "next_offset": 8, "reset": False}
+
 
 
 def _choice_values(choices) -> list:

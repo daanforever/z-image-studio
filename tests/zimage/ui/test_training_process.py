@@ -84,6 +84,9 @@ def test_start_uses_exact_build_process_spec_argv_cwd_env(tmp_path):
         for key, value in spec.environment.items():
             assert env[key] == value
         assert spec.environment == {"PYTHONUNBUFFERED": "1"}
+        assert recorded["kwargs"]["stdin"] is subprocess.DEVNULL
+        assert recorded["kwargs"]["stdout"] is subprocess.DEVNULL
+        assert recorded["kwargs"]["stderr"] is subprocess.DEVNULL
         assert manager.is_running()
         with pytest.raises(RuntimeError, match="already running"):
             manager.start("job")

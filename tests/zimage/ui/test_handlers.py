@@ -1599,6 +1599,46 @@ def test_poll_training_state_lists_previews(tmp_path: Path, monkeypatch):
     assert payload["previews"] == [str(preview)]
 
 
+def test_poll_training_log_reads_chunk(tmp_path: Path, monkeypatch):
+    from zimage.training.job_log import LOG_FILE, LOGS_DIR
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    log_path = root / LOGS_DIR / LOG_FILE
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    text = "hello log\n"
+    log_path.write_bytes(text.encode("utf-8"))
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    payload = handlers.poll_training_log("job", -1)
+    assert payload["chunk"] == text
+    assert payload["reset"] is True
+    assert payload["next_offset"] == len(text.encode("utf-8"))
+    second = handlers.poll_training_log("job", payload["next_offset"])
+    assert second["chunk"] == ""
+    assert second["reset"] is False
+    assert second["next_offset"] == payload["next_offset"]
+
+
+def test_poll_training_log_read_error_does_not_raise(monkeypatch):
+    monkeypatch.setattr(
+        handlers,
+        "_require_job_dir",
+        lambda job_id: (_ for _ in ()).throw(OSError("missing")),
+    )
+    payload = handlers.poll_training_log("job", 12)
+    assert payload == {"chunk": "", "next_offset": 12, "reset": False}
+
+    monkeypatch.setattr(handlers, "_require_job_dir", lambda job_id: Path("/tmp/job"))
+    monkeypatch.setattr(
+        handlers,
+        "read_job_log_chunk",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("read")),
+    )
+    payload = handlers.poll_training_log("job", 7)
+    assert payload == {"chunk": "", "next_offset": 7, "reset": False}
+
+
 def test_training_callbacks_are_canonical_production_functions():
     from zimage.ui.training_panel import TrainingCallbacks, noop_training_callbacks
 
@@ -1613,6 +1653,7 @@ def test_training_callbacks_are_canonical_production_functions():
     assert bundle.load_job is handlers.load_training_job
     assert bundle.validate_yaml is handlers.validate_training_yaml
     assert bundle.poll_state is handlers.poll_training_state
+    assert bundle.poll_log is handlers.poll_training_log
 
     noop = noop_training_callbacks()
     assert bundle.start_job is not noop.start_job
@@ -1621,6 +1662,7 @@ def test_training_callbacks_are_canonical_production_functions():
     assert bundle.list_jobs is not noop.list_jobs
     assert bundle.create_or_open is not noop.create_or_open
     assert bundle.queue_update is not noop.queue_update
+    assert bundle.poll_log is not noop.poll_log
 
 
 def test_start_training_unloads_cached_pipeline_and_next_inference_reloads(

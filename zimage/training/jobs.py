@@ -18,6 +18,7 @@ from zimage.training.contracts import (
     RuntimeGuard,
     UpdateClassification,
 )
+from zimage.training.job_log import LOGS_DIR, job_log_session
 from zimage.training.schema import (
     TrainingConfigError,
     classify_job_update,
@@ -28,7 +29,7 @@ from zimage.training.schema import (
 
 CONFIG_FILE = "config.yaml"
 STATE_FILE = "state.json"
-JOB_DIRECTORIES = ("commands", "checkpoints", "previews")
+JOB_DIRECTORIES = ("commands", "checkpoints", "previews", LOGS_DIR)
 JOB_ROOT_ENTRIES = (CONFIG_FILE, STATE_FILE, *JOB_DIRECTORIES)
 
 _WINDOWS_RESERVED_STEMS = {
@@ -180,78 +181,81 @@ class JobController:
     def cache(self, job_dir: str | Path) -> int:
         """Run the cache backend without acquiring the GPU lease (CPU encode)."""
 
-        backend = self.cache_backend
-        if backend is None:
-            raise RuntimeError("cache backend is not configured")
-        result = backend(Path(job_dir))
-        return 0 if result is None else int(result)
+        root = Path(job_dir)
+        with job_log_session(root):
+            backend = self.cache_backend
+            if backend is None:
+                raise RuntimeError("cache backend is not configured")
+            result = backend(root)
+            return 0 if result is None else int(result)
 
     def run(self, job_dir: str | Path) -> int:
         root = Path(job_dir)
-        backend = self.run_backend
-        if backend is None:
-            raise RuntimeError("run backend is not configured")
-        if not self.runtime_guard.acquire():
-            state = load_job_state(root)
-            write_job_state(
-                root,
-                JobState(
-                    job_id=state.job_id,
-                    status=JobStatus.FAILED,
-                    step=state.step,
-                    epoch=state.epoch,
-                    last_error="training runtime is already in use",
-                    exit_code=1,
-                ),
-            )
-            raise RuntimeError("training runtime is already in use")
-        try:
-            state = load_job_state(root)
-            write_job_state(
-                root,
-                JobState(
-                    job_id=state.job_id,
-                    status=JobStatus.RUNNING,
-                    step=state.step,
-                    epoch=state.epoch,
-                    last_error=state.last_error,
-                ),
-            )
+        with job_log_session(root):
+            backend = self.run_backend
+            if backend is None:
+                raise RuntimeError("run backend is not configured")
+            if not self.runtime_guard.acquire():
+                state = load_job_state(root)
+                write_job_state(
+                    root,
+                    JobState(
+                        job_id=state.job_id,
+                        status=JobStatus.FAILED,
+                        step=state.step,
+                        epoch=state.epoch,
+                        last_error="training runtime is already in use",
+                        exit_code=1,
+                    ),
+                )
+                raise RuntimeError("training runtime is already in use")
             try:
-                result = backend(root)
-                exit_code = 0 if result is None else int(result)
-            except Exception as exc:
+                state = load_job_state(root)
+                write_job_state(
+                    root,
+                    JobState(
+                        job_id=state.job_id,
+                        status=JobStatus.RUNNING,
+                        step=state.step,
+                        epoch=state.epoch,
+                        last_error=state.last_error,
+                    ),
+                )
+                try:
+                    result = backend(root)
+                    exit_code = 0 if result is None else int(result)
+                except Exception as exc:
+                    latest = load_job_state(root)
+                    write_job_state(
+                        root,
+                        JobState(
+                            job_id=latest.job_id,
+                            status=JobStatus.FAILED,
+                            step=latest.step,
+                            epoch=latest.epoch,
+                            last_error=str(exc),
+                            exit_code=1,
+                        ),
+                    )
+                    raise
                 latest = load_job_state(root)
+                final_status = (
+                    JobStatus.COMPLETED if exit_code == 0 else JobStatus.FAILED
+                )
                 write_job_state(
                     root,
                     JobState(
                         job_id=latest.job_id,
-                        status=JobStatus.FAILED,
+                        status=final_status,
                         step=latest.step,
                         epoch=latest.epoch,
-                        last_error=str(exc),
-                        exit_code=1,
+                        last_error=latest.last_error,
+                        exit_code=exit_code,
                     ),
                 )
-                raise
-            latest = load_job_state(root)
-            final_status = (
-                JobStatus.COMPLETED if exit_code == 0 else JobStatus.FAILED
-            )
-            write_job_state(
-                root,
-                JobState(
-                    job_id=latest.job_id,
-                    status=final_status,
-                    step=latest.step,
-                    epoch=latest.epoch,
-                    last_error=latest.last_error,
-                    exit_code=exit_code,
-                ),
-            )
-            return exit_code
-        finally:
-            self.runtime_guard.release()
+                return exit_code
+            finally:
+                self.runtime_guard.release()
 
 
 def _atomic_write_yaml(target: Path, document: Mapping[str, Any]) -> None:

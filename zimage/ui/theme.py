@@ -180,6 +180,24 @@ CUSTOM_CSS = """
     max-height: none !important;
 }
 footer { display: none !important; }
+#studio-training-log-delta {
+    display: none !important;
+}
+#studio-training-job-log pre,
+pre#studio-training-job-log {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0.75rem 1rem;
+    min-height: 22.5rem;
+    max-height: 30rem;
+    overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #0a0a0a;
+}
 """
 
 # Gradio Gallery preview click cycles prev/next; map it onto the existing fullscreen control.
@@ -206,6 +224,34 @@ CUSTOM_JS = """
     true
   );
 })();
+window.__zimageApplyTrainingLogDelta = function (delta) {
+  if (delta == null || delta === "") return;
+  let payload = delta;
+  if (typeof delta === "string") {
+    const trimmed = delta.trim();
+    if (!trimmed) return;
+    try {
+      payload = JSON.parse(trimmed);
+    } catch (err) {
+      return;
+    }
+  }
+  if (typeof payload !== "object") return;
+  const chunk = payload.chunk == null ? "" : String(payload.chunk);
+  const reset = Boolean(payload.reset);
+  if (!reset && chunk === "") return;
+  const seen = typeof delta === "string" ? delta : JSON.stringify(payload);
+  if (seen === window.__zimageTrainingLogDeltaSeen) return;
+  window.__zimageTrainingLogDeltaSeen = seen;
+  const host = document.getElementById("studio-training-job-log");
+  if (!host) return;
+  const pre = host.tagName === "PRE" ? host : host.querySelector("pre");
+  if (!pre) return;
+  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight <= 16;
+  if (reset) pre.textContent = "";
+  if (chunk) pre.textContent += chunk;
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+};
 """
 
 

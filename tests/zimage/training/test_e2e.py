@@ -354,16 +354,25 @@ def test_immediate_stop_does_not_write_checkpoint(tmp_path: Path, monkeypatch):
     assert list((root / "checkpoints").iterdir()) == []
 
 
-def test_job_directory_has_no_metrics_debug_or_logs(tmp_path: Path):
+def test_job_directory_has_no_metrics_debug_or_top_level_logs(tmp_path: Path):
     root = make_job(tmp_path, max_steps=1)
     assert cache_job(root, **injections()) == 0
     assert run_job(root, **injections()) == 0
     names = _job_names(root)
     assert names <= ALLOWED_JOB_ENTRIES
-    assert names >= {"config.yaml", "state.json", "commands", "checkpoints", "previews"}
-    forbidden = ("metrics", "debug", "logs", "log", "metrics.json", "debug.json")
+    assert names >= {
+        "config.yaml",
+        "state.json",
+        "commands",
+        "checkpoints",
+        "previews",
+        "logs",
+    }
+    forbidden = ("metrics", "debug", "log", "metrics.json", "debug.json")
     assert not (names & set(forbidden))
+    assert (root / "logs").is_dir()
     assert not any(child.suffix in {".log", ".metrics"} for child in root.iterdir())
+    assert not (root / "logs" / "job.log").exists()
 
 
 @pytest.mark.skipif(

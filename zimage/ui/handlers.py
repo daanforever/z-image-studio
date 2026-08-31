@@ -50,6 +50,7 @@ from zimage.engine.lora import (
 from zimage.prefs import load_ui_prefs, save_ui_prefs as dump_ui_prefs
 from zimage.training.commands import enqueue_update, save_idle_update
 from zimage.training.contracts import JobStatus
+from zimage.training.job_log import read_job_log_chunk
 from zimage.training.jobs import (
     CONFIG_FILE,
     create_or_open_job,
@@ -520,6 +521,7 @@ def training_callbacks() -> TrainingCallbacks:
         start_job=start_training_job,
         stop_job=stop_training_job,
         poll_state=poll_training_state,
+        poll_log=poll_training_log,
         queue_update=queue_training_update,
     )
 
@@ -636,6 +638,20 @@ def poll_training_state(job_id: str) -> dict[str, Any]:
     return {
         "state": _state_mapping(load_job_state(job_dir)),
         "previews": _list_previews(job_dir),
+    }
+
+
+def poll_training_log(job_id: str, offset: int) -> dict[str, Any]:
+    """Return a bounded ``logs/job.log`` delta. Never raises into the poller."""
+    try:
+        job_dir = _require_job_dir(job_id)
+        result = read_job_log_chunk(job_dir, offset)
+    except Exception:
+        return {"chunk": "", "next_offset": offset, "reset": False}
+    return {
+        "chunk": result.chunk,
+        "next_offset": result.next_offset,
+        "reset": result.reset,
     }
 
 

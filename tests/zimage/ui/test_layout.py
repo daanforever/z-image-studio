@@ -376,6 +376,11 @@ def test_generate_and_training_tabs(monkeypatch):
         if label in {"Generate", "Training"}:
             labels.append(label)
     assert labels == ["Generate", "Training"]
+    assert "studio-training-log-tab" in ids
+    assert "studio-training-job-log" in ids
+    assert "studio-training-log-delta" in ids
+    log_tab = _block_by_elem_id(demo, "studio-training-log-tab")
+    assert log_tab.label == "Log"
 
 
 def test_navbar_stop_still_cancels_generate(monkeypatch):
@@ -477,8 +482,10 @@ def test_build_ui_passes_training_callbacks_bundle_to_panel(monkeypatch):
     assert bundle.load_job is handlers_mod.load_training_job
     assert bundle.validate_yaml is handlers_mod.validate_training_yaml
     assert bundle.poll_state is handlers_mod.poll_training_state
+    assert bundle.poll_log is handlers_mod.poll_training_log
 
     noop = noop_training_callbacks()
     assert bundle.start_job is not noop.start_job
     assert bundle.save_yaml is not noop.save_yaml
     assert bundle.create_or_open is not noop.create_or_open
+    assert bundle.poll_log is not noop.poll_log

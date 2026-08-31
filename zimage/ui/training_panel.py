@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 import gradio as gr
+
+JOB_LOG_HTML = '<pre id="studio-training-job-log"></pre>'
+APPLY_TRAINING_LOG_JS = (
+    "(...args) => window.__zimageApplyTrainingLogDelta(args[args.length - 1])"
+)
 
 ACTIVE_JOB_STATUS = "running"
 SAVE_MODE_QUEUED = "queued"
@@ -39,6 +45,9 @@ class TrainingCallbackAPI(Protocol):
     def poll_state(self, job_id: str) -> Mapping[str, Any]:
         """Return the latest operational state and preview paths."""
 
+    def poll_log(self, job_id: str, offset: int) -> Mapping[str, Any]:
+        """Return ``{chunk, next_offset, reset}`` for the job log."""
+
 
 @dataclass(frozen=True)
 class TrainingCallbacks:
@@ -52,6 +61,7 @@ class TrainingCallbacks:
     start_job: Callable[[str], Any]
     stop_job: Callable[[str], Any]
     poll_state: Callable[[str], Mapping[str, Any]]
+    poll_log: Callable[[str, int], Mapping[str, Any]]
     queue_update: Callable[[str, str], Mapping[str, Any]] | None = None
 
 
@@ -87,6 +97,10 @@ class TrainingPanel:
     message: gr.Markdown
     status_state: gr.State
     poll_timer: gr.Timer
+    log_offset: gr.State
+    log_generation: gr.State
+    log_delta: gr.Textbox
+    job_log: gr.HTML
 
 
 def empty_job_state(job_id: str = "") -> dict[str, Any]:
@@ -124,6 +138,11 @@ def noop_training_callbacks() -> TrainingCallbacks:
             "state": empty_job_state(job_id),
             "previews": [],
         },
+        poll_log=lambda _job_id, offset: {
+            "chunk": "",
+            "next_offset": 0 if not isinstance(offset, int) or offset < 0 else offset,
+            "reset": isinstance(offset, int) and offset < 0,
+        },
         queue_update=lambda job_id, text: {"mode": SAVE_MODE_QUEUED},
     )
 
@@ -145,6 +164,7 @@ def as_training_callbacks(
         start_job=callbacks.start_job,
         stop_job=callbacks.stop_job,
         poll_state=callbacks.poll_state,
+        poll_log=callbacks.poll_log,
         queue_update=getattr(callbacks, "queue_update", None),
     )
 
@@ -336,6 +356,57 @@ def handle_poll(job_id: Any, *, callbacks: TrainingCallbacks) -> JobPanelData:
     )
 
 
+def handle_poll_log(
+    job_id: Any,
+    offset: Any,
+    *,
+    callbacks: TrainingCallbacks,
+) -> dict[str, Any]:
+    """Read a log delta. Never raises; failures yield an empty non-reset chunk."""
+    offset_i = _as_offset(offset)
+    resolved = _job_id_text(job_id)
+    if not resolved:
+        return {"chunk": "", "next_offset": offset_i, "reset": False}
+    try:
+        payload = callbacks.poll_log(resolved, offset_i)
+    except Exception:
+        return {"chunk": "", "next_offset": offset_i, "reset": False}
+    if not isinstance(payload, Mapping):
+        return {"chunk": "", "next_offset": offset_i, "reset": False}
+    chunk = payload.get("chunk")
+    chunk_text = "" if chunk is None else str(chunk)
+    try:
+        next_offset = int(payload.get("next_offset", offset_i))
+    except (TypeError, ValueError):
+        next_offset = offset_i
+    return {
+        "chunk": chunk_text,
+        "next_offset": next_offset,
+        "reset": bool(payload.get("reset")),
+    }
+
+
+def commit_training_log(
+    live_job_id: Any,
+    polled_job_id: Any,
+    chunk: Any,
+    next_offset: Any,
+    reset: Any,
+    generation: Any,
+):
+    """CAS: commit log offset/delta only when the live job still matches."""
+    if _job_id_text(live_job_id) != _job_id_text(polled_job_id):
+        return gr.skip(), gr.skip()
+    if not _job_id_text(polled_job_id):
+        return gr.skip(), gr.skip()
+    text = "" if chunk is None else str(chunk)
+    did_reset = bool(reset)
+    offset_out = _as_offset(next_offset)
+    if not text and not did_reset:
+        return offset_out, gr.skip()
+    return offset_out, _log_delta_payload(text, did_reset, _as_generation(generation))
+
+
 def build_training_panel(
     *,
     callbacks: TrainingCallbacks | TrainingCallbackAPI | None = None,
@@ -351,6 +422,12 @@ def build_training_panel(
     with gr.Column(elem_id="studio-training-panel") as root:
         status_state = gr.State("")
         job_id = gr.State("")
+        log_offset = gr.State(-1)
+        log_generation = gr.State(0)
+        polled_job_id = gr.State("")
+        pending_chunk = gr.State("")
+        pending_next_offset = gr.State(0)
+        pending_reset = gr.State(False)
         with gr.Row():
             with gr.Column(scale=5):
                 with gr.Row():
@@ -418,14 +495,32 @@ def build_training_panel(
                     elem_id="studio-training-state",
                 )
                 message = gr.Markdown("", elem_id="studio-training-message")
-                preview_gallery = gr.Gallery(
-                    label="Previews",
-                    columns=2,
-                    height=360,
-                    object_fit="contain",
-                    preview=True,
-                    format="png",
-                    elem_id="studio-training-previews",
+                with gr.Tabs(elem_id="studio-training-result-tabs"):
+                    with gr.Tab(
+                        "Previews",
+                        elem_id="studio-training-previews-tab",
+                    ):
+                        preview_gallery = gr.Gallery(
+                            label="Previews",
+                            columns=2,
+                            height=360,
+                            object_fit="contain",
+                            preview=True,
+                            format="png",
+                            elem_id="studio-training-previews",
+                        )
+                    with gr.Tab("Log", elem_id="studio-training-log-tab"):
+                        job_log = gr.HTML(
+                            JOB_LOG_HTML,
+                            elem_id="studio-training-job-log",
+                        )
+                log_delta = gr.Textbox(
+                    value="",
+                    label="log delta",
+                    show_label=False,
+                    visible=False,
+                    interactive=False,
+                    elem_id="studio-training-log-delta",
                 )
         poll_timer = gr.Timer(2.0, active=False)
 
@@ -438,22 +533,33 @@ def build_training_panel(
         status_state,
         message,
         poll_timer,
+        log_offset,
+        log_generation,
+        log_delta,
     ]
 
-    def on_create_or_open(name):
+    def on_create_or_open(name, generation=0):
         data = handle_create_or_open(name, callbacks=resolved)
-        return _load_outputs(data)
+        return _load_outputs(data, log_generation=_next_log_generation(generation))
 
-    def on_select_job(selected):
+    def on_select_job(selected, generation=0):
         text = _job_id_text(selected)
         if not text:
             data = handle_load_job("", callbacks=resolved)
-            return _load_outputs(data, update_selector=False)
+            return _load_outputs(
+                data,
+                update_selector=False,
+                log_generation=_next_log_generation(generation),
+            )
         known = set(_invoke_list_jobs(resolved))
         if text not in known:
             return _skip_load_outputs()
         data = handle_load_job(text, callbacks=resolved)
-        return _load_outputs(data, update_selector=False)
+        return _load_outputs(
+            data,
+            update_selector=False,
+            log_generation=_next_log_generation(generation),
+        )
 
     def on_validate(current_id, text):
         data = handle_validate(current_id, text, callbacks=resolved)
@@ -471,28 +577,37 @@ def build_training_panel(
         data = handle_stop(current_id, callbacks=resolved)
         return _action_outputs(data)
 
-    def on_poll(current_id):
+    def on_poll(current_id, offset=-1):
         data = handle_poll(current_id, callbacks=resolved)
+        log = handle_poll_log(current_id, offset, callbacks=resolved)
         if not data.job_id:
-            return gr.skip(), gr.skip(), gr.skip()
+            return (gr.skip(),) * 7
         return (
             format_operational_state(data.state),
             list(data.previews or ()),
-            _status_value(data.state.get("status") if isinstance(data.state, Mapping) else ""),
+            _status_value(
+                data.state.get("status") if isinstance(data.state, Mapping) else ""
+            ),
+            data.job_id,
+            log["chunk"],
+            log["next_offset"],
+            log["reset"],
         )
 
-    create_open_btn.click(
+    create_event = create_open_btn.click(
         on_create_or_open,
-        inputs=[job_selector],
+        inputs=[job_selector, log_generation],
         outputs=load_outputs,
         show_progress="minimal",
     )
-    job_selector.change(
+    create_event.then(None, inputs=[log_delta], js=APPLY_TRAINING_LOG_JS)
+    select_event = job_selector.change(
         on_select_job,
-        inputs=[job_selector],
+        inputs=[job_selector, log_generation],
         outputs=load_outputs,
         show_progress="minimal",
     )
+    select_event.then(None, inputs=[log_delta], js=APPLY_TRAINING_LOG_JS)
     validate_btn.click(
         on_validate,
         inputs=[job_id, yaml_editor],
@@ -523,10 +638,34 @@ def build_training_panel(
         outputs=[operational_state, preview_gallery, status_state, message],
         show_progress="minimal",
     )
-    poll_timer.tick(
+    poll_event = poll_timer.tick(
         on_poll,
-        inputs=[job_id],
-        outputs=[operational_state, preview_gallery, status_state],
+        inputs=[job_id, log_offset],
+        outputs=[
+            operational_state,
+            preview_gallery,
+            status_state,
+            polled_job_id,
+            pending_chunk,
+            pending_next_offset,
+            pending_reset,
+        ],
+    )
+    poll_event.then(
+        commit_training_log,
+        inputs=[
+            job_id,
+            polled_job_id,
+            pending_chunk,
+            pending_next_offset,
+            pending_reset,
+            log_generation,
+        ],
+        outputs=[log_offset, log_delta],
+    ).then(
+        None,
+        inputs=[log_delta],
+        js=APPLY_TRAINING_LOG_JS,
     )
 
     return TrainingPanel(
@@ -545,10 +684,19 @@ def build_training_panel(
         message=message,
         status_state=status_state,
         poll_timer=poll_timer,
+        log_offset=log_offset,
+        log_generation=log_generation,
+        log_delta=log_delta,
+        job_log=job_log,
     )
 
 
-def _load_outputs(data: JobPanelData, *, update_selector: bool = True):
+def _load_outputs(
+    data: JobPanelData,
+    *,
+    update_selector: bool = True,
+    log_generation: int = 0,
+):
     job_id = data.job_id or ""
     if update_selector:
         jobs = list(data.jobs or ())
@@ -561,6 +709,7 @@ def _load_outputs(data: JobPanelData, *, update_selector: bool = True):
         )
     else:
         selector = gr.update(value=job_id or None, allow_custom_value=True)
+    generation = _as_generation(log_generation)
     return (
         job_id,
         data.config_text if data.config_text is not None else "",
@@ -570,12 +719,18 @@ def _load_outputs(data: JobPanelData, *, update_selector: bool = True):
         _status_of(data.state),
         data.message,
         gr.update(active=bool(job_id)),
+        -1,
+        generation,
+        _log_delta_payload("", True, generation),
     )
 
 
 def _skip_load_outputs():
     """Leave panel outputs unchanged (e.g. typed custom name not yet Create'd)."""
     return (
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
         gr.skip(),
         gr.skip(),
         gr.skip(),
@@ -756,8 +911,39 @@ def _status_of(state: Mapping[str, Any] | None) -> str:
     return _status_value(state.get("status") if isinstance(state, Mapping) else state)
 
 
+def _as_offset(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return -1
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _as_generation(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _next_log_generation(value: Any) -> int:
+    return _as_generation(value) + 1
+
+
+def _log_delta_payload(chunk: str, reset: bool, generation: int) -> str:
+    return json.dumps(
+        {"chunk": chunk, "reset": bool(reset), "generation": int(generation)},
+        ensure_ascii=False,
+    )
+
+
 __all__ = [
     "ACTIVE_JOB_STATUS",
+    "APPLY_TRAINING_LOG_JS",
+    "JOB_LOG_HTML",
     "JobPanelData",
     "SAVE_MODE_QUEUED",
     "SAVE_MODE_SAVED",
@@ -767,11 +953,13 @@ __all__ = [
     "as_training_callbacks",
     "build_training_panel",
     "coerce_job_state",
+    "commit_training_log",
     "empty_job_state",
     "format_operational_state",
     "handle_create_or_open",
     "handle_load_job",
     "handle_poll",
+    "handle_poll_log",
     "handle_save",
     "handle_start",
     "handle_stop",

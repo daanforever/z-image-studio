@@ -47,7 +47,9 @@ def test_create_has_exact_layout_and_preserves_original_name(tmp_path):
         "commands",
         "checkpoints",
         "previews",
+        "logs",
     }
+    assert not (root / "logs" / "job.log").exists()
     persisted = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
     assert persisted["job_name"] == "  Мой Стиль  "
     assert load_job_state(root) == JobState(
@@ -154,6 +156,9 @@ def test_controller_uses_injected_guard_and_backend(tmp_path):
     assert guard.calls == ["acquire", "release"]
     assert backend_calls == [root]
     assert load_job_state(root).status is JobStatus.COMPLETED
+    assert (root / "logs" / "job.log").is_file()
+    assert "job.log" not in {path.name for path in root.iterdir()}
+    assert {path.name for path in root.iterdir()} == set(JOB_ROOT_ENTRIES)
 
 
 def test_controller_cache_does_not_acquire_gpu_lease(tmp_path):
@@ -168,6 +173,8 @@ def test_controller_cache_does_not_acquire_gpu_lease(tmp_path):
     assert controller.cache(root) == 0
     assert guard.calls == []
     assert backend_calls == [root]
+    assert (root / "logs" / "job.log").is_file()
+    assert "job.log" not in {path.name for path in root.iterdir()}
 
 
 def test_controller_cache_raises_when_backend_missing(tmp_path):
@@ -246,6 +253,21 @@ def test_run_preserves_backend_updated_progress_in_final_state(tmp_path):
         exit_code=0,
     )
     assert guard.calls == ["acquire", "release"]
+
+
+def test_two_controller_runs_append_two_session_banners(tmp_path):
+    root = create_or_open_job("job", tmp_path)
+    controller = JobController(
+        RecordingGuard(),
+        run_backend=lambda _: 0,
+    )
+
+    assert controller.run(root) == 0
+    assert controller.run(root) == 0
+
+    text = (root / "logs" / "job.log").read_text(encoding="utf-8")
+    assert text.count("===== session start") == 2
+    assert {path.name for path in root.iterdir()} == set(JOB_ROOT_ENTRIES)
 
 
 def test_idle_save_rejects_immutable_lora_after_checkpoint(tmp_path):

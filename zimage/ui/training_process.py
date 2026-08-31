@@ -1,8 +1,9 @@
 """Windows-safe trainer subprocess lifecycle. No Gradio and no training loop.
 
 The process manager launches the frozen CLI command from
-``build_process_spec("run", job_id)`` and tracks exit status in memory only
-(no persistent training logs).
+``build_process_spec("run", job_id)`` and tracks exit status in memory only.
+The child writes ``logs/job.log`` itself; this manager does not redirect
+pipes or open that file for write.
 
 Lease ownership: ``python -u train.py run`` acquires the GPU lease via
 ``create_runtime_guard`` inside ``JobController.run``. This manager does not

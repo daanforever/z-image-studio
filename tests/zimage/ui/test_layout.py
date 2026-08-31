@@ -10,7 +10,12 @@ import gradio as gr
 from zimage.config import DEFAULT_IMAGE_FORMAT, DEFAULT_LORA_DIR, DEFAULT_OUTPUT_DIR
 from zimage.engine.lora import normalize_lora_dir
 from zimage.ui.handlers import generate
-from zimage.ui.layout import build_ui
+from zimage.ui.layout import (
+    SYNC_STUDIO_TAB_URL_JS,
+    _studio_tab_from_query,
+    build_ui,
+    restore_studio_tab,
+)
 from zimage.ui.training_panel import build_training_panel as real_build_training_panel
 
 
@@ -478,6 +483,75 @@ def test_on_studio_tab_toggles_navbar_visibility(monkeypatch):
     gen1, train1 = fn.fn(SimpleNamespace(index=1))
     assert _as_update_dict(gen1).get("visible") is False
     assert _as_update_dict(train1).get("visible") is True
+
+
+def test_studio_tab_block_ids(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    assert _block_by_elem_id(demo, "studio-tab-generate").id == "generate"
+    assert _block_by_elem_id(demo, "studio-tab-training").id == "training"
+
+
+def test_studio_tab_from_query():
+    assert _studio_tab_from_query(None) == "generate"
+    assert _studio_tab_from_query({}) == "generate"
+    assert _studio_tab_from_query("generate") == "generate"
+    assert _studio_tab_from_query("garbage") == "generate"
+    assert _studio_tab_from_query("training") == "training"
+    assert _studio_tab_from_query("Training") == "training"
+
+
+def test_restore_studio_tab_defaults_to_generate():
+    requests = [
+        None,
+        SimpleNamespace(query_params={}),
+        SimpleNamespace(query_params={"tab": "generate"}),
+        SimpleNamespace(query_params={"tab": "garbage"}),
+    ]
+    for request in requests:
+        tabs, gen, train = restore_studio_tab(request)
+        assert _as_update_dict(tabs).get("selected") == "generate"
+        assert _as_update_dict(gen).get("visible") is True
+        assert _as_update_dict(train).get("visible") is False
+
+
+def test_restore_studio_tab_selects_training():
+    for tab in ("training", "Training"):
+        tabs, gen, train = restore_studio_tab(
+            SimpleNamespace(query_params={"tab": tab})
+        )
+        assert _as_update_dict(tabs).get("selected") == "training"
+        assert _as_update_dict(gen).get("visible") is False
+        assert _as_update_dict(train).get("visible") is True
+
+
+def test_restore_studio_tab_wired_on_load(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    restore_fns = _fns_named(demo, "restore_studio_tab")
+    assert len(restore_fns) == 1
+    restore_fn = restore_fns[0]
+    output_ids = [getattr(block, "elem_id", None) for block in restore_fn.outputs]
+    assert output_ids == [
+        "studio-tabs",
+        "studio-navbar-generate",
+        "studio-navbar-training",
+    ]
+    assert restore_fn.targets
+    assert restore_fn.targets[0][1] == "load"
+
+
+def test_sync_studio_tab_url_js_wired(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    js_fns = [
+        fn
+        for fn in demo.fns.values()
+        if getattr(fn, "js", None) and fn.js == SYNC_STUDIO_TAB_URL_JS
+    ]
+    assert len(js_fns) == 1
+    for fn in js_fns:
+        assert fn.targets == [(None, "then")]
 
 
 def test_navbar_stop_still_cancels_generate(monkeypatch):

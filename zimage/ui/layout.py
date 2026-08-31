@@ -35,6 +35,17 @@ from zimage.ui.handlers import (
 from zimage.ui.status import format_status
 from zimage.ui.training_panel import build_training_panel
 
+SYNC_STUDIO_TAB_URL_JS = (
+    "(...args) => {"
+    " const url = new URL(window.location.href);"
+    " const training = document.querySelector('#studio-tab-training-button')"
+    "?.getAttribute('aria-selected') === 'true';"
+    " if (training) { url.searchParams.set('tab', 'training'); }"
+    " else { url.searchParams.delete('tab'); }"
+    " history.replaceState(null, '', url.pathname + url.search + url.hash);"
+    "}"
+)
+
 
 @dataclass
 class StudioNavbar:
@@ -111,10 +122,34 @@ def build_navbar() -> StudioNavbar:
     )
 
 
+def _studio_tab_from_query(value: object) -> str:
+    if isinstance(value, str) and value.lower() == "training":
+        return "training"
+    return "generate"
+
+
+def _navbar_tab_visibility(show_training: bool):
+    return gr.update(visible=not show_training), gr.update(visible=show_training)
+
+
 def on_studio_tab(evt: gr.SelectData):
     """Show Generate or Training navbar rows from the selected tab index."""
-    show_training = getattr(evt, "index", None) == 1
-    return gr.update(visible=not show_training), gr.update(visible=show_training)
+    show_training = getattr(evt, "index", None) == 1 or getattr(evt, "value", None) in {
+        "training",
+        "Training",
+    }
+    return _navbar_tab_visibility(show_training)
+
+
+def restore_studio_tab(request: gr.Request | None = None):
+    if request is None:
+        tab_id = "generate"
+    else:
+        tab_id = _studio_tab_from_query(
+            dict(getattr(request, "query_params", None) or {}).get("tab")
+        )
+    generate_actions, training_actions = _navbar_tab_visibility(tab_id == "training")
+    return gr.update(selected=tab_id), generate_actions, training_actions
 
 
 def _gallery_buttons(delete_btn, *, share: bool) -> list:
@@ -182,7 +217,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
     ) as demo:
         navbar = build_navbar()
         with gr.Tabs(elem_id="studio-tabs") as tabs:
-            with gr.Tab("Generate", elem_id="studio-tab-generate"):
+            with gr.Tab("Generate", id="generate", elem_id="studio-tab-generate"):
                 with gr.Row():
                     with gr.Column(scale=5):
                         prompt = gr.Textbox(
@@ -347,7 +382,7 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                             elem_id="studio-examples",
                         )
 
-            with gr.Tab("Training", elem_id="studio-tab-training"):
+            with gr.Tab("Training", id="training", elem_id="studio-tab-training"):
                 training = build_training_panel(
                     callbacks=training_callbacks(),
                     start_btn=navbar.training_start_btn,
@@ -357,6 +392,10 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
         tabs.select(
             on_studio_tab,
             outputs=[navbar.generate_actions, navbar.training_actions],
+        ).then(None, js=SYNC_STUDIO_TAB_URL_JS)
+        demo.load(
+            restore_studio_tab,
+            outputs=[tabs, navbar.generate_actions, navbar.training_actions],
         )
 
         pref_inputs = _pref_inputs(

@@ -410,11 +410,13 @@ def commit_training_log(
 def build_training_panel(
     *,
     callbacks: TrainingCallbacks | TrainingCallbackAPI | None = None,
+    start_btn: gr.Button,
+    stop_btn: gr.Button,
 ) -> TrainingPanel:
     """Build the Training tab body. Must be called inside a ``gr.Blocks`` tree.
 
-    The returned ``TrainingPanel`` is a dataclass of components so layout can
-    mount this on a Generate | Training tab later. No Gradio server is started.
+    ``start_btn`` and ``stop_btn`` are injected (navbar-owned). This panel does
+    not construct them or wrap them in a Row/Column/Tab.
     """
     resolved = as_training_callbacks(callbacks)
     job_choices = list(_invoke_list_jobs(resolved))
@@ -428,41 +430,25 @@ def build_training_panel(
         pending_chunk = gr.State("")
         pending_next_offset = gr.State(0)
         pending_reset = gr.State(False)
-        with gr.Row(elem_id="studio-training-toolbar"):
-            with gr.Row(elem_id="studio-training-job"):
-                job_selector = gr.Dropdown(
-                    choices=job_choices,
-                    value=None,
-                    label="Job",
-                    info=(
-                        "Select an existing job, or type a new name and click "
-                        "Create. Existing jobs open without rewriting files."
-                    ),
-                    allow_custom_value=True,
-                    elem_id="studio-training-job-selector",
-                )
-                create_open_btn = gr.Button(
-                    "Create",
-                    variant="primary",
-                    elem_id="studio-training-create-open",
-                )
-            with gr.Row(elem_id="studio-training-run"):
-                start_btn = gr.Button(
-                    "Start",
-                    variant="primary",
-                    elem_id="studio-training-start",
-                    size="sm",
-                    visible=True,
-                )
-                stop_btn = gr.Button(
-                    "Stop",
-                    variant="stop",
-                    elem_id="studio-training-stop",
-                    size="sm",
-                    visible=False,
-                )
         with gr.Row():
             with gr.Column(scale=5):
+                with gr.Row(elem_id="studio-training-job"):
+                    job_selector = gr.Dropdown(
+                        choices=job_choices,
+                        value=None,
+                        label="Job",
+                        info=(
+                            "Select an existing job, or type a new name and click "
+                            "Create. Existing jobs open without rewriting files."
+                        ),
+                        allow_custom_value=True,
+                        elem_id="studio-training-job-selector",
+                    )
+                    create_open_btn = gr.Button(
+                        "Create",
+                        variant="primary",
+                        elem_id="studio-training-create-open",
+                    )
                 with gr.Accordion(
                     "config.yaml",
                     open=False,

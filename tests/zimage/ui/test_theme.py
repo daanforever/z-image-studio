@@ -12,7 +12,10 @@ def test_build_theme_and_css():
     assert "#studio-navbar-actions" in CUSTOM_CSS
     assert "#studio-clear-btn" in CUSTOM_CSS
     assert "#studio-stop-btn" in CUSTOM_CSS
-    assert "#studio-navbar-actions button" in CUSTOM_CSS
+    assert "#studio-navbar-actions button" not in CUSTOM_CSS
+    assert "#studio-navbar-generate button" in CUSTOM_CSS
+    assert "#studio-navbar-training button" in CUSTOM_CSS
+    assert "#studio-navbar-shared" in CUSTOM_CSS
     assert "border-radius: 0.5rem" in CUSTOM_CSS
     assert ".studio-brand" in CUSTOM_CSS
     assert ".studio-footer" in CUSTOM_CSS
@@ -84,25 +87,38 @@ def test_training_log_delta_helper_in_custom_js():
 
 
 def test_training_toolbar_flex_and_button_hints():
-    toolbar_at = CUSTOM_CSS.index("#studio-training-toolbar {")
+    assert "#studio-training-toolbar" not in CUSTOM_CSS
+    assert "#studio-training-run" not in CUSTOM_CSS
+    assert "#studio-navbar-actions button" not in CUSTOM_CSS
+    assert "#studio-navbar-generate button" in CUSTOM_CSS
+    assert "#studio-navbar-training button" in CUSTOM_CSS
+    assert "#studio-training-start::before" in CUSTOM_CSS
+
+    shared_at = CUSTOM_CSS.index("#studio-navbar-shared {")
+    shared = CUSTOM_CSS[shared_at : CUSTOM_CSS.index("}", shared_at) + 1]
+    assert "display: none !important" in shared
+
+    icon_at = CUSTOM_CSS.index("#studio-navbar-generate button,")
+    icon = CUSTOM_CSS[icon_at : CUSTOM_CSS.index("}", icon_at) + 1]
+    assert "#studio-navbar-training button" in icon
+    assert "width: 2.25rem" in icon
+    assert "height: 2.25rem" in icon
+    assert "border-radius: 0.5rem" in icon
+
+    play_at = CUSTOM_CSS.index("#studio-training-start::before {")
+    play = CUSTOM_CSS[play_at : CUSTOM_CSS.index("}", play_at) + 1]
+    assert "border-style: solid" in play
+    assert "border-width: 0.38em 0 0.38em 0.62em" in play
+
     job_at = CUSTOM_CSS.index("#studio-training-job {")
-    run_at = CUSTOM_CSS.index("#studio-training-run {")
-    save_at = CUSTOM_CSS.index("#studio-training-save {")
-    toolbar = CUSTOM_CSS[toolbar_at : CUSTOM_CSS.index("}", toolbar_at) + 1]
     job = CUSTOM_CSS[job_at : CUSTOM_CSS.index("}", job_at) + 1]
-    run = CUSTOM_CSS[run_at : CUSTOM_CSS.index("}", run_at) + 1]
-    save = CUSTOM_CSS[save_at : CUSTOM_CSS.index("}", save_at) + 1]
-    assert "display: flex" in toolbar
-    assert "flex-wrap: nowrap" in toolbar
-    assert "justify-content: space-between" in toolbar
-    assert "align-items: flex-start" in toolbar
-    assert "width: 100%" in toolbar
     assert "flex: 1 1 auto" in job
     assert "min-width: 0" in job
-    assert "flex: 0 0 auto" in run
-    assert "justify-content: flex-end" in run
+    save_at = CUSTOM_CSS.index("#studio-training-save {")
+    save = CUSTOM_CSS[save_at : CUSTOM_CSS.index("}", save_at) + 1]
     assert "width: auto !important" in save
-    section = CUSTOM_CSS[toolbar_at:]
+
+    section = CUSTOM_CSS[CUSTOM_CSS.index("#studio-training-create-open,") :]
     assert ":focus-within::after" in section
     assert "pointer-events: none" in section
     assert section.count('content: "') == 4

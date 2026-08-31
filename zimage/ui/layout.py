@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from zimage.config import (
     EXAMPLE_PROMPTS,
     IMAGE_FORMAT_CHOICES,
@@ -34,26 +36,77 @@ from zimage.ui.status import format_status
 from zimage.ui.training_panel import build_training_panel
 
 
-def build_navbar() -> tuple[gr.Button, gr.Button]:
-    """Bootstrap-style top bar: brand on the left, Clear and Stop on the right."""
+@dataclass
+class StudioNavbar:
+    """Top-bar components: shared (empty), generate, and training action rows."""
+
+    clear_btn: gr.Button
+    generate_stop_btn: gr.Button
+    training_start_btn: gr.Button
+    training_stop_btn: gr.Button
+    shared_actions: gr.Row
+    generate_actions: gr.Row
+    training_actions: gr.Row
+
+
+def build_navbar() -> StudioNavbar:
+    """Bootstrap-style top bar: brand on the left, tab-specific actions on the right."""
     with gr.Row(elem_id="studio-navbar", equal_height=True, min_height=52):
         gr.HTML(
             '<span class="studio-brand">Studio</span>',
             elem_id="studio-brand",
         )
         with gr.Row(elem_id="studio-navbar-actions", equal_height=True):
-            clear_btn = gr.Button(
-                "Clear",
-                elem_id="studio-clear-btn",
-                size="sm",
-            )
-            stop_btn = gr.Button(
-                "Stop",
-                variant="stop",
-                elem_id="studio-stop-btn",
-                size="sm",
-            )
-    return clear_btn, stop_btn
+            with gr.Row(elem_id="studio-navbar-shared") as shared_actions:
+                pass
+            with gr.Row(
+                elem_id="studio-navbar-generate",
+                visible=True,
+            ) as generate_actions:
+                clear_btn = gr.Button(
+                    "Clear",
+                    elem_id="studio-clear-btn",
+                    size="sm",
+                )
+                generate_stop_btn = gr.Button(
+                    "Stop",
+                    variant="stop",
+                    elem_id="studio-stop-btn",
+                    size="sm",
+                )
+            with gr.Row(
+                elem_id="studio-navbar-training",
+                visible=False,
+            ) as training_actions:
+                training_start_btn = gr.Button(
+                    "Start",
+                    variant="primary",
+                    elem_id="studio-training-start",
+                    size="sm",
+                    visible=True,
+                )
+                training_stop_btn = gr.Button(
+                    "Stop",
+                    variant="stop",
+                    elem_id="studio-training-stop",
+                    size="sm",
+                    visible=False,
+                )
+    return StudioNavbar(
+        clear_btn=clear_btn,
+        generate_stop_btn=generate_stop_btn,
+        training_start_btn=training_start_btn,
+        training_stop_btn=training_stop_btn,
+        shared_actions=shared_actions,
+        generate_actions=generate_actions,
+        training_actions=training_actions,
+    )
+
+
+def on_studio_tab(evt: gr.SelectData):
+    """Show Generate or Training navbar rows from the selected tab index."""
+    show_training = getattr(evt, "index", None) == 1
+    return gr.update(visible=not show_training), gr.update(visible=show_training)
 
 
 def _gallery_buttons(delete_btn, *, share: bool) -> list:
@@ -119,8 +172,8 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
         title="Z-Image-Turbo Studio",
         fill_height=True,
     ) as demo:
-        clear_btn, stop_btn = build_navbar()
-        with gr.Tabs(elem_id="studio-tabs"):
+        navbar = build_navbar()
+        with gr.Tabs(elem_id="studio-tabs") as tabs:
             with gr.Tab("Generate", elem_id="studio-tab-generate"):
                 with gr.Row():
                     with gr.Column(scale=5):
@@ -287,7 +340,15 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
                         )
 
             with gr.Tab("Training", elem_id="studio-tab-training"):
-                training = build_training_panel(callbacks=training_callbacks())
+                training = build_training_panel(
+                    callbacks=training_callbacks(),
+                    start_btn=navbar.training_start_btn,
+                    stop_btn=navbar.training_stop_btn,
+                )
+        tabs.select(
+            on_studio_tab,
+            outputs=[navbar.generate_actions, navbar.training_actions],
+        )
 
         pref_inputs = _pref_inputs(
             prompt,
@@ -393,9 +454,9 @@ def build_ui(*, share: bool = False) -> gr.Blocks:
             show_progress_on=status,
         )
         generate_btn.click(save_ui_prefs, inputs=pref_inputs)
-        stop_btn.click(request_stop, cancels=[generate_event])
+        navbar.generate_stop_btn.click(request_stop, cancels=[generate_event])
         training.start_btn.click(cancel_generate_for_training, cancels=[generate_event])
-        clear_btn.click(
+        navbar.clear_btn.click(
             clear_preview_images,
             inputs=[output_dir],
             outputs=[gallery, gallery_index, status],

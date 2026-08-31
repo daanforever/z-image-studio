@@ -33,6 +33,7 @@ CUSTOM_CSS = """
     padding: 0.15rem 0 0.85rem !important;
     border-bottom: 1px solid var(--border-color-primary);
     background: transparent;
+    overflow: visible !important;
 }
 #studio-navbar .block,
 #studio-navbar .form,
@@ -52,7 +53,9 @@ CUSTOM_CSS = """
     color: var(--body-text-color);
     user-select: none;
 }
-#studio-navbar-actions {
+#studio-navbar-actions,
+#studio-navbar-generate,
+#studio-navbar-training {
     display: flex !important;
     flex: 0 0 auto !important;
     justify-content: flex-end !important;
@@ -61,14 +64,23 @@ CUSTOM_CSS = """
     width: auto !important;
     min-width: 0 !important;
     max-width: none !important;
+    overflow: visible !important;
 }
 #studio-navbar-actions > .block,
-#studio-navbar-actions > .form {
+#studio-navbar-actions > .form,
+#studio-navbar-generate > .block,
+#studio-navbar-generate > .form,
+#studio-navbar-training > .block,
+#studio-navbar-training > .form {
     flex: 0 0 auto !important;
     width: auto !important;
     max-width: none !important;
 }
-#studio-navbar-actions button {
+#studio-navbar-shared {
+    display: none !important;
+}
+#studio-navbar-generate button,
+#studio-navbar-training button {
     box-sizing: border-box !important;
     width: 2.25rem !important;
     height: 2.25rem !important;
@@ -82,7 +94,8 @@ CUSTOM_CSS = """
     align-items: center !important;
     justify-content: center !important;
 }
-#studio-stop-btn::before {
+#studio-stop-btn::before,
+#studio-training-stop::before {
     content: "";
     display: block;
     width: 0.7em;
@@ -90,6 +103,16 @@ CUSTOM_CSS = """
     font-size: 1rem;
     background: currentColor;
     border-radius: 0.08em;
+}
+#studio-training-start::before {
+    content: "";
+    display: block;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 0.38em 0 0.38em 0.62em;
+    border-color: transparent transparent transparent currentColor;
+    font-size: 1rem;
 }
 #studio-clear-btn {
     position: relative !important;
@@ -203,24 +226,9 @@ pre.studio-training-job-log-pre {
     max-height: 30rem;
     line-height: 1.45;
 }
-#studio-training-toolbar {
-    display: flex !important;
-    flex-wrap: nowrap !important;
-    align-items: flex-start !important;
-    justify-content: space-between !important;
-    width: 100%;
-    overflow: visible;
-}
 #studio-training-job {
     flex: 1 1 auto !important;
     min-width: 0 !important;
-    overflow: visible;
-}
-#studio-training-run {
-    display: flex !important;
-    flex: 0 0 auto !important;
-    justify-content: flex-end !important;
-    width: auto !important;
     overflow: visible;
 }
 #studio-training-save {

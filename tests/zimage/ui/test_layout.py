@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import gradio as gr
 
@@ -36,6 +37,9 @@ def test_build_ui_has_navbar(monkeypatch):
     assert "studio-navbar" in ids
     assert "studio-brand" in ids
     assert "studio-navbar-actions" in ids
+    assert "studio-navbar-shared" in ids
+    assert "studio-navbar-generate" in ids
+    assert "studio-navbar-training" in ids
     assert "studio-clear-btn" in ids
     assert "studio-stop-btn" in ids
     brand = next(
@@ -72,6 +76,27 @@ def _block_by_elem_id(demo, elem_id: str):
         for block in demo.blocks.values()
         if getattr(block, "elem_id", None) == elem_id
     )
+
+
+def _ancestor_chain(block):
+    chain = []
+    current = block
+    while current is not None:
+        chain.append(current)
+        current = getattr(current, "parent", None)
+    return chain
+
+
+def _as_update_dict(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "keys"):
+        return dict(value)
+    return {
+        key: getattr(value, key)
+        for key in ("choices", "value", "allow_custom_value", "visible", "__type__")
+        if hasattr(value, key)
+    }
 
 
 def test_examples_follow_status_in_output_column(monkeypatch):
@@ -369,11 +394,15 @@ def test_generate_and_training_tabs(monkeypatch):
     assert "generate-btn" in ids
     assert "studio-training-panel" in ids
     assert "studio-training-validate" not in ids
-    assert "studio-training-toolbar" in ids
-    assert "studio-training-run" in ids
+    assert "studio-training-toolbar" not in ids
+    assert "studio-training-run" not in ids
+    assert "studio-training-job" in ids
     assert "studio-training-save" in ids
     assert "studio-training-start" in ids
     assert "studio-training-stop" in ids
+    assert "studio-navbar-shared" in ids
+    assert "studio-navbar-generate" in ids
+    assert "studio-navbar-training" in ids
     labels = []
     for block in demo.blocks.values():
         label = getattr(block, "label", None)
@@ -385,6 +414,64 @@ def test_generate_and_training_tabs(monkeypatch):
     assert "studio-training-log-delta" in ids
     log_accordion = _block_by_elem_id(demo, "studio-training-log-accordion")
     assert log_accordion.label == "Log"
+
+
+def test_navbar_action_slots_xor_and_training_buttons(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    shared = _block_by_elem_id(demo, "studio-navbar-shared")
+    generate_row = _block_by_elem_id(demo, "studio-navbar-generate")
+    training_row = _block_by_elem_id(demo, "studio-navbar-training")
+    start_btn = _block_by_elem_id(demo, "studio-training-start")
+    stop_btn = _block_by_elem_id(demo, "studio-training-stop")
+    job = _block_by_elem_id(demo, "studio-training-job")
+    previews = _block_by_elem_id(demo, "studio-training-previews")
+    panel = _block_by_elem_id(demo, "studio-training-panel")
+
+    assert not any(
+        isinstance(child, gr.Button) for child in (getattr(shared, "children", None) or [])
+    )
+    assert generate_row.visible is True
+    assert training_row.visible is False
+    assert generate_row in _ancestor_chain(_block_by_elem_id(demo, "studio-clear-btn"))
+    assert generate_row in _ancestor_chain(_block_by_elem_id(demo, "studio-stop-btn"))
+    assert training_row in _ancestor_chain(start_btn)
+    assert training_row in _ancestor_chain(stop_btn)
+    assert panel not in _ancestor_chain(start_btn)
+    assert panel not in _ancestor_chain(stop_btn)
+
+    preview_anc = _ancestor_chain(previews)
+    body_row = next(
+        block
+        for block in _ancestor_chain(job)
+        if isinstance(block, gr.Row) and block in preview_anc
+    )
+    assert body_row not in _ancestor_chain(start_btn)
+    assert body_row not in _ancestor_chain(stop_btn)
+    yaml_accordion = _block_by_elem_id(demo, "studio-training-yaml-accordion")
+    assert yaml_accordion not in _ancestor_chain(start_btn)
+    assert yaml_accordion not in _ancestor_chain(stop_btn)
+
+
+def test_on_studio_tab_toggles_navbar_visibility(monkeypatch):
+    monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
+    demo = build_ui()
+    fns = _fns_named(demo, "on_studio_tab")
+    assert len(fns) == 1
+    fn = fns[0]
+    generate_row = _block_by_elem_id(demo, "studio-navbar-generate")
+    training_row = _block_by_elem_id(demo, "studio-navbar-training")
+    assert list(fn.outputs) == [generate_row, training_row]
+    assert fn.targets
+    assert fn.targets[0][1] == "select"
+
+    gen0, train0 = fn.fn(SimpleNamespace(index=0))
+    assert _as_update_dict(gen0).get("visible") is True
+    assert _as_update_dict(train0).get("visible") is False
+
+    gen1, train1 = fn.fn(SimpleNamespace(index=1))
+    assert _as_update_dict(gen1).get("visible") is False
+    assert _as_update_dict(train1).get("visible") is True
 
 
 def test_navbar_stop_still_cancels_generate(monkeypatch):
@@ -464,9 +551,11 @@ def test_build_ui_passes_training_callbacks_bundle_to_panel(monkeypatch):
         produced["bundle"] = bundle
         return bundle
 
-    def spy_build(*, callbacks=None):
+    def spy_build(*, callbacks=None, start_btn, stop_btn):
         captured["callbacks"] = callbacks
-        return real_build_training_panel(callbacks=callbacks)
+        return real_build_training_panel(
+            callbacks=callbacks, start_btn=start_btn, stop_btn=stop_btn
+        )
 
     monkeypatch.setattr("zimage.ui.layout.format_status", lambda: "ready")
     monkeypatch.setattr("zimage.ui.layout.training_callbacks", tracking_callbacks)

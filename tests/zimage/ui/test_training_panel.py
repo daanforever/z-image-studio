@@ -148,7 +148,25 @@ def _construct(callbacks=None):
             category=UserWarning,
         )
         with gr.Blocks(title="Training panel test") as demo:
-            panel = build_training_panel(callbacks=callbacks)
+            start_btn = gr.Button(
+                "Start",
+                variant="primary",
+                elem_id="studio-training-start",
+                size="sm",
+                visible=True,
+            )
+            stop_btn = gr.Button(
+                "Stop",
+                variant="stop",
+                elem_id="studio-training-stop",
+                size="sm",
+                visible=False,
+            )
+            panel = build_training_panel(
+                callbacks=callbacks,
+                start_btn=start_btn,
+                stop_btn=stop_btn,
+            )
     return demo, panel
 
 
@@ -219,8 +237,9 @@ def test_panel_has_required_controls():
     assert "studio-training-yaml-accordion" in ids
     assert "studio-training-yaml" in ids
     assert "studio-training-validate" not in ids
-    assert "studio-training-toolbar" in ids
-    assert "studio-training-run" in ids
+    assert "studio-training-toolbar" not in ids
+    assert "studio-training-run" not in ids
+    assert "studio-training-job" in ids
     assert "studio-training-save" in ids
     assert "studio-training-start" in ids
     assert "studio-training-stop" in ids
@@ -278,9 +297,37 @@ def test_yaml_editor_inside_collapsed_config_accordion():
         panel.job_selector,
     ):
         assert panel.yaml_accordion not in _ancestor_chain(btn)
-    toolbar = _block_by_elem_id(demo, "studio-training-toolbar")
-    assert toolbar in _ancestor_chain(panel.start_btn)
-    assert toolbar in _ancestor_chain(panel.stop_btn)
+
+
+def test_training_two_column_job_and_preview_layout():
+    demo, panel = _construct()
+    job = _block_by_elem_id(demo, "studio-training-job")
+    assert job in _ancestor_chain(panel.job_selector)
+    assert job in _ancestor_chain(panel.create_open_btn)
+    assert job not in _ancestor_chain(panel.preview_gallery)
+    assert job not in _ancestor_chain(panel.yaml_accordion)
+    assert job not in _ancestor_chain(panel.save_btn)
+
+    left_col = job.parent
+    assert isinstance(left_col, gr.Column)
+    assert getattr(left_col, "scale", None) == 5
+    assert left_col in _ancestor_chain(panel.yaml_accordion)
+    assert left_col in _ancestor_chain(panel.save_btn)
+    assert left_col not in _ancestor_chain(panel.preview_gallery)
+    assert left_col not in _ancestor_chain(panel.operational_state)
+
+    body_row = left_col.parent
+    assert isinstance(body_row, gr.Row)
+    columns = [child for child in body_row.children if isinstance(child, gr.Column)]
+    assert len(columns) == 2
+    right_col = columns[1]
+    assert getattr(right_col, "scale", None) == 6
+    assert right_col in _ancestor_chain(panel.preview_gallery)
+    assert right_col in _ancestor_chain(panel.operational_state)
+    assert right_col not in _ancestor_chain(job)
+    assert body_row not in _ancestor_chain(panel.log_accordion)
+    assert body_row not in _ancestor_chain(panel.start_btn)
+    assert body_row not in _ancestor_chain(panel.stop_btn)
 
 
 def test_yaml_editor_is_raw_textbox_not_sampling_form():

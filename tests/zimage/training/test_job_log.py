@@ -416,12 +416,16 @@ def test_legacy_job_without_logs_dir_still_writes(tmp_path):
 def test_loop_logs_step_and_epoch_without_loss_item():
     source = (ROOT / "zimage" / "training" / "loop.py").read_text(encoding="utf-8")
     assert "run start job=%s step=%s epoch=%s" in source
-    assert 'log.info("step=%s epoch=%s"' in source
+    assert 'log.info("step=%s epoch=%s"' not in source
     assert "loss.item()" not in source
     for line in source.splitlines():
         stripped = line.strip()
         if stripped.startswith("log.") and "loss" in stripped:
             raise AssertionError(f"log call mentions loss: {stripped}")
+    optimize_start = source.index("def _optimize(")
+    next_def = source.find("\ndef ", optimize_start + 1)
+    optimize_source = source[optimize_start:next_def]
+    assert "tqdm(" in optimize_source
 
 
 def test_process_manager_source_keeps_popen_devnull():

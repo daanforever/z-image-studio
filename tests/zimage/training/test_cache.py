@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from pathlib import Path
 
@@ -148,24 +149,44 @@ def test_exact_tensors_and_complete_metadata_round_trip(tmp_path):
     }
 
 
-def test_valid_cache_is_reused_and_stale_cache_is_replaced(tmp_path):
+def _cache_ready_counts(caplog) -> tuple[int, int]:
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "zimage.training"
+        and record.getMessage().startswith("cache ready encoded=")
+    ]
+    assert messages, "expected cache ready log"
+    encoded_token, reused_token = messages[-1].removeprefix("cache ready ").split()
+    return int(encoded_token.split("=", 1)[1]), int(reused_token.split("=", 1)[1])
+
+
+def test_valid_cache_is_reused_and_stale_cache_is_replaced(tmp_path, caplog):
     sample = _sample(tmp_path)
     encoder = FakeEncoder()
     cache_dir = tmp_path / "cache"
+    samples = [sample]
+    caplog.set_level(logging.INFO, logger="zimage.training")
     first = prepare_cache_at_job_start(
-        [sample],
+        samples,
         encoder,
         _config(),
         cache_dir=cache_dir,
     )[0]
+    encoded, _reused = _cache_ready_counts(caplog)
+    assert encoded > 0
     first_bytes = first.path.read_bytes()
 
+    caplog.clear()
     reused = prepare_cache_at_job_start(
-        [sample],
+        samples,
         encoder,
         _config(),
         cache_dir=cache_dir,
     )[0]
+    encoded, reused_count = _cache_ready_counts(caplog)
+    assert encoded == 0
+    assert reused_count == len(samples)
     assert encoder.image_calls == 1
     assert reused.path.read_bytes() == first_bytes
 

@@ -20,6 +20,7 @@ from diffusers.training_utils import (
     compute_density_for_timestep_sampling,
     compute_loss_weighting_for_sd3,
 )
+from tqdm import tqdm
 
 from zimage.training.cache import (
     CacheConfig,
@@ -102,6 +103,7 @@ def cache_job(job_dir: Path, **injected: Any) -> int:
 
     job_dir = Path(job_dir)
     job = load_job_config(job_dir)
+    log.info("cache start")
     _validate_batch_settings(injected)
     samples = _discover(job, injected)
     components, lifecycle = _load_lifecycle(job, injected)
@@ -497,6 +499,12 @@ def _setup_transformer(
     return setup.transformer, setup
 
 
+def _progress_total(kind: str, limit: int, n_cached: int) -> int:
+    if kind == "max_steps":
+        return int(limit)
+    return int(limit) * int(n_cached)
+
+
 def _optimize(
     job_dir: Path,
     state: JobState,
@@ -511,131 +519,145 @@ def _optimize(
     hook: TrainingHook | None = injected.get("training_hook")
     ran = False
 
-    while True:
-        runtime = holder["runtime"]
-        config = runtime["config"]
-        device = torch.device(runtime["device"])
-        kind, limit = resolve_stop_condition(config)
-        if kind == "max_steps" and step >= limit:
-            break
-        if kind == "epochs" and epoch >= limit:
-            break
+    kind, limit = resolve_stop_condition(runtime["config"])
+    pbar = tqdm(
+        total=_progress_total(kind, limit, len(cached)),
+        initial=step,
+        disable=None,
+    )
+    try:
+        while True:
+            runtime = holder["runtime"]
+            config = runtime["config"]
+            device = torch.device(runtime["device"])
+            kind, limit = resolve_stop_condition(config)
+            if kind == "max_steps" and step >= limit:
+                break
+            if kind == "epochs" and epoch >= limit:
+                break
 
-        sample = cached[sample_index]
-        transformer = runtime["transformer"]
-        if callable(getattr(transformer, "train", None)):
-            transformer.train()
+            sample = cached[sample_index]
+            transformer = runtime["transformer"]
+            if callable(getattr(transformer, "train", None)):
+                transformer.train()
 
-        result = official_flow_matching_step(
-            transformer=transformer,
-            scheduler=runtime["components"].training_scheduler,
-            latent=sample.latent,
-            prompt_embedding=sample.prompt_embedding,
-            weighting_scheme=str(config["weighting_scheme"]),
-            logit_mean=float(config["logit_mean"]),
-            logit_std=float(config["logit_std"]),
-            mode_scale=float(config["mode_scale"]),
-            noise=_resolve_noise(injected, sample.latent),
-            density_u=injected.get("density_u"),
-            device=device,
-        )
-        ran = True
+            result = official_flow_matching_step(
+                transformer=transformer,
+                scheduler=runtime["components"].training_scheduler,
+                latent=sample.latent,
+                prompt_embedding=sample.prompt_embedding,
+                weighting_scheme=str(config["weighting_scheme"]),
+                logit_mean=float(config["logit_mean"]),
+                logit_std=float(config["logit_std"]),
+                mode_scale=float(config["mode_scale"]),
+                noise=_resolve_noise(injected, sample.latent),
+                density_u=injected.get("density_u"),
+                device=device,
+            )
+            ran = True
 
-        accelerator = runtime["accelerator"]
-        accumulate = getattr(accelerator, "accumulate", None)
-        context = accumulate(transformer) if callable(accumulate) else nullcontext()
-        with context:
-            backward = getattr(accelerator, "backward", None)
-            if callable(backward):
-                backward(result.loss)
-            else:
-                result.loss.backward()
-            runtime["optimizer"].step()
-            runtime["optimizer"].zero_grad()
+            accelerator = runtime["accelerator"]
+            accumulate = getattr(accelerator, "accumulate", None)
+            context = accumulate(transformer) if callable(accumulate) else nullcontext()
+            with context:
+                backward = getattr(accelerator, "backward", None)
+                if callable(backward):
+                    backward(result.loss)
+                else:
+                    result.loss.backward()
+                runtime["optimizer"].step()
+                runtime["optimizer"].zero_grad()
 
-        step += 1
-        sample_index += 1
-        if sample_index >= len(cached):
-            sample_index = 0
-            epoch += 1
+            step += 1
+            sample_index += 1
+            if sample_index >= len(cached):
+                sample_index = 0
+                epoch += 1
 
-        persisted = _write_running_state(
-            job_dir, state.job_id, step, epoch, runtime["last_error"]
-        )
-        log.info("step=%s epoch=%s", step, epoch)
-        if hook is not None:
-            hook.on_optimizer_step(
-                OptimizerStepBoundary(
-                    job_dir=job_dir,
-                    state=persisted,
-                    config=config,
+            persisted = _write_running_state(
+                job_dir, state.job_id, step, epoch, runtime["last_error"]
+            )
+            pbar.update(1)
+            pbar.set_postfix_str(f"step={step} epoch={epoch}")
+            if hook is not None:
+                hook.on_optimizer_step(
+                    OptimizerStepBoundary(
+                        job_dir=job_dir,
+                        state=persisted,
+                        config=config,
+                    )
                 )
-            )
 
-        if _should_checkpoint(step, config):
-            exit_code = _write_checkpoint_then_sample(
-                job_dir, persisted, runtime, injected
-            )
-            if exit_code:
-                return exit_code
+            if _should_checkpoint(step, config):
+                exit_code = _write_checkpoint_then_sample(
+                    job_dir, persisted, runtime, injected
+                )
+                if exit_code:
+                    return exit_code
 
-        reload = _reload_at_step(job_dir, persisted, runtime["config"], injected)
-        runtime["config"] = dict(reload.effective_config)
-        runtime["last_error"] = _error_from_reload(reload, runtime["last_error"])
-        if runtime["last_error"]:
-            _write_running_state(
-                job_dir, state.job_id, step, epoch, runtime["last_error"]
-            )
-        noteworthy = [
-            decision
-            for decision in reload.decisions
-            if decision.classification
-            in (
-                UpdateClassification.REJECTED_IMMUTABLE,
-                UpdateClassification.INVALID,
-            )
-        ]
-        if noteworthy:
-            log.error("%s", runtime["last_error"])
-        try:
-            if any(
-                decision.classification is UpdateClassification.APPLY_AT_STEP
+            reload = _reload_at_step(job_dir, persisted, runtime["config"], injected)
+            runtime["config"] = dict(reload.effective_config)
+            runtime["last_error"] = _error_from_reload(reload, runtime["last_error"])
+            if runtime["last_error"]:
+                _write_running_state(
+                    job_dir, state.job_id, step, epoch, runtime["last_error"]
+                )
+            noteworthy = [
+                decision
                 for decision in reload.decisions
-            ):
-                log.info("hot-reload step=%s epoch=%s", step, epoch)
-            _apply_hot_runtime(runtime, reload, injected)
-        except Exception as exc:
-            log.error("hot-reload failed: %s", exc)
-            runtime["last_error"] = str(exc)
-            _write_running_state(
-                job_dir, state.job_id, step, epoch, runtime["last_error"]
-            )
-            return 1
-        if reload.rebuild_required:
-            log.info("rebuild step=%s epoch=%s", step, epoch)
+                if decision.classification
+                in (
+                    UpdateClassification.REJECTED_IMMUTABLE,
+                    UpdateClassification.INVALID,
+                )
+            ]
+            if noteworthy:
+                log.error("%s", runtime["last_error"])
             try:
-                holder["runtime"] = _rebuild_runtime(job_dir, runtime, injected)
+                if any(
+                    decision.classification is UpdateClassification.APPLY_AT_STEP
+                    for decision in reload.decisions
+                ):
+                    log.info("hot-reload step=%s epoch=%s", step, epoch)
+                _apply_hot_runtime(runtime, reload, injected)
             except Exception as exc:
-                log.error("rebuild failed: %s", exc)
+                log.error("hot-reload failed: %s", exc)
                 runtime["last_error"] = str(exc)
                 _write_running_state(
                     job_dir, state.job_id, step, epoch, runtime["last_error"]
                 )
                 return 1
-            runtime = holder["runtime"]
-            cached = runtime["cached"]
-            sample_index = step % len(cached)
+            kind, limit = resolve_stop_condition(runtime["config"])
+            pbar.total = _progress_total(kind, limit, len(cached))
+            if reload.rebuild_required:
+                log.info("rebuild step=%s epoch=%s", step, epoch)
+                try:
+                    holder["runtime"] = _rebuild_runtime(job_dir, runtime, injected)
+                except Exception as exc:
+                    log.error("rebuild failed: %s", exc)
+                    runtime["last_error"] = str(exc)
+                    _write_running_state(
+                        job_dir, state.job_id, step, epoch, runtime["last_error"]
+                    )
+                    return 1
+                runtime = holder["runtime"]
+                cached = runtime["cached"]
+                sample_index = step % len(cached)
+                kind, limit = resolve_stop_condition(runtime["config"])
+                pbar.total = _progress_total(kind, limit, len(cached))
 
-    if ran and not _should_checkpoint(step, runtime["config"]):
-        persisted = _write_running_state(
-            job_dir, state.job_id, step, epoch, runtime["last_error"]
-        )
-        exit_code = _write_checkpoint_then_sample(
-            job_dir, persisted, runtime, injected
-        )
-        if exit_code:
-            return exit_code
-    return 0
+        if ran and not _should_checkpoint(step, runtime["config"]):
+            persisted = _write_running_state(
+                job_dir, state.job_id, step, epoch, runtime["last_error"]
+            )
+            exit_code = _write_checkpoint_then_sample(
+                job_dir, persisted, runtime, injected
+            )
+            if exit_code:
+                return exit_code
+        return 0
+    finally:
+        pbar.close()
 
 
 def _should_checkpoint(step: int, config: Mapping[str, Any]) -> bool:
@@ -1316,6 +1338,7 @@ def _maybe_warm_start(
         return
     if job is not None:
         _validate_warm_start_metadata(job, metadata, adapter_name=adapter_name)
+    log.info("warm-start adapter")
     _apply_adapter_state(transformer, state_dict, adapter_name, injected)
 
 
@@ -1728,6 +1751,7 @@ def _prepare_preview_embeddings(
     unique = list(dict.fromkeys([*prompts, *negatives]))
     if not unique:
         return {}, {}
+    log.info("encoding preview prompts")
     encoded = lifecycle.prepare_preview_prompt_embeddings(
         unique,
         max_sequence_length=int(job["max_sequence_length"]),

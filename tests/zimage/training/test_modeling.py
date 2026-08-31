@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -120,6 +121,36 @@ def test_component_loading_uses_main_and_separate_sampling_sources():
     assert components.vae.frozen is True
     assert components.text_encoder.frozen is True
     assert components.sources.has_separate_sampler is True
+
+
+def test_load_training_components_logs_loading_order(caplog):
+    calls = []
+    job = {
+        "model": {
+            "main_transformer": {"path": "org/main", "revision": "main-rev"},
+            "sampling_transformer": {
+                "path": "Tongyi-MAI/Z-Image-Turbo",
+                "revision": "sample-rev",
+            },
+        },
+    }
+    required = [
+        "loading vae",
+        "loading text encoder",
+        "loading main transformer",
+        "loading sampling transformer",
+    ]
+
+    with caplog.at_level(logging.INFO, logger="zimage.training"):
+        load_training_components(job, loaders=make_loaders(calls))
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "zimage.training"
+    ]
+    assert [message for message in messages if message in required] == required
+    assert [kind for kind, *_ in calls][:1] == ["vae"]
 
 
 def test_omitted_sampling_source_loads_distinct_instances_from_main():
@@ -518,6 +549,45 @@ def test_fp8_request_uses_bf16_fallback_when_capability_gate_fails():
     assert result.effective_precision == "bf16"
     assert "checkpoint" not in [event[0] for event in events]
     assert [event[0] for event in events] == ["freeze", "to", "adapter"]
+
+
+def test_setup_main_transformer_logs_quantize_only_when_fp8_enabled(caplog):
+    lora = {"rank": 2, "alpha": 2, "dropout": 0.0, "targets": ["linear"]}
+
+    def convert(model, **kwargs):
+        return None
+
+    caplog.set_level(logging.INFO, logger="zimage.training")
+    setup_main_transformer(
+        SetupTransformer([]),
+        precision="fp8",
+        fp8_capable=False,
+        lora=lora,
+        gradient_checkpointing=False,
+        device="cpu",
+        convert_to_float8_training=lambda *_args, **_kwargs: pytest.fail(
+            "FP8 converter must not run"
+        ),
+        float8_config_factory=lambda **_kwargs: pytest.fail(
+            "FP8 config must not be built"
+        ),
+        lora_config_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    assert "quantize main transformer precision=fp8" not in caplog.text
+
+    caplog.clear()
+    setup_main_transformer(
+        SetupTransformer([]),
+        precision="fp8",
+        fp8_capable=True,
+        lora=lora,
+        gradient_checkpointing=False,
+        device="cpu",
+        convert_to_float8_training=convert,
+        float8_config_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+        lora_config_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    assert "quantize main transformer precision=fp8" in caplog.text
 
 
 class TinyPeftTransformer(PeftAdapterMixin, torch.nn.Module):

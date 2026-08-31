@@ -7,6 +7,7 @@ deletes a checkpoint when preview rendering fails.
 from __future__ import annotations
 
 import inspect
+import logging
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -18,6 +19,8 @@ from PIL import Image
 from zimage.training.checkpoints import load_lora_state
 from zimage.training.contracts import SavedCheckpoint
 from zimage.training.schema import merge_sample_parameters
+
+log = logging.getLogger("zimage.training")
 
 LoraConfigFactory = Callable[..., Any]
 PreviewQuantizer = Callable[[Any], None]
@@ -144,6 +147,7 @@ class UnfusedPreviewSampler:
             return
         try:
             quantizer = self._quantizer or _quantize_float8_weight_only
+            log.info("quantize sampling transformer precision=fp8")
             quantizer(self.transformer)
         except PreviewSamplingError:
             raise

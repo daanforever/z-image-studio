@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -27,6 +28,8 @@ from zimage.training.schema import (
     CACHE_PROMPT_EMBED_HIDDEN_SIZE,
     CACHE_TENSOR_SCHEMA_VERSION,
 )
+
+log = logging.getLogger("zimage.training")
 
 LATENT_KEY = "latent"
 PROMPT_EMBEDDING_KEY = "prompt_embedding"
@@ -420,12 +423,15 @@ def prepare_cache_at_job_start(
 
     cached: list[CachedSample] = []
     encode_hook = on_before_encode
+    encoded = 0
+    reused = 0
     for sample in samples:
         image = load_training_image(sample.image_path)
         metadata = expected_metadata(sample, config, image_size=image.size)
         path = cache_path_for(sample, cache_dir)
         inspection = inspect_cache(path, metadata)
         if inspection.state is not CacheState.VALID:
+            encoded += 1
             if encode_hook is not None:
                 encode_hook()
                 encode_hook = None
@@ -436,7 +442,10 @@ def prepare_cache_at_job_start(
                 config,
             )
             write_cache_atomic(path, latent, prompt_embedding, metadata)
+        else:
+            reused += 1
         cached.append(load_cache(path, expected=metadata))
+    log.info("cache ready encoded=%s reused=%s", encoded, reused)
     return cached
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import gc
 import inspect
 import json
+import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from typing import Any
 import torch
 
 from zimage.training.schema import KNOWN_TURBO_SOURCE
+
+log = logging.getLogger("zimage.training")
 
 
 class ModelConfigurationError(ValueError):
@@ -155,11 +158,13 @@ def load_training_components(
         subfolder="vae",
         torch_dtype=torch.bfloat16,
         disable_mmap=disable_mmap,
+        what="vae",
     )
     tokenizer = _load_component(
         loaders.tokenizer,
         sources.main,
         subfolder="tokenizer",
+        what="tokenizer",
     )
     text_encoder = _load_model_component(
         loaders.text_encoder,
@@ -167,11 +172,13 @@ def load_training_components(
         subfolder="text_encoder",
         torch_dtype=torch.bfloat16,
         disable_mmap=disable_mmap,
+        what="text encoder",
     )
     training_scheduler = _load_component(
         loaders.scheduler,
         sources.main,
         subfolder="scheduler",
+        what="training scheduler",
     )
     main_transformer = _load_model_component(
         loaders.transformer,
@@ -179,6 +186,7 @@ def load_training_components(
         subfolder="transformer",
         torch_dtype=torch.bfloat16,
         disable_mmap=disable_mmap,
+        what="main transformer",
     )
 
     # The sampler must remain pristine while the main instance is frozen,
@@ -190,11 +198,13 @@ def load_training_components(
         subfolder="transformer",
         torch_dtype=torch.bfloat16,
         disable_mmap=disable_mmap,
+        what="sampling transformer",
     )
     sampling_scheduler = _load_component(
         loaders.scheduler,
         sources.sampling,
         subfolder="scheduler",
+        what="sampling scheduler",
     )
 
     for frozen_component in (vae, text_encoder):
@@ -254,6 +264,7 @@ def setup_main_transformer(
 
     fp8_enabled = requested == "fp8" and bool(fp8_capable)
     if fp8_enabled:
+        log.info("quantize main transformer precision=fp8")
         # TorchAO Float8Linear.forward still calls the deprecated
         # torch.get_autocast_gpu_dtype(); swap in the current API first.
         _patch_torchao_float8_linear_autocast()
@@ -284,6 +295,7 @@ def setup_main_transformer(
                 "gradient checkpointing was requested but the main transformer "
                 "does not support enable_gradient_checkpointing()"
             )
+        log.info("gradient checkpointing enabled")
         enable_checkpointing()
 
     if lora_config_factory is None:
@@ -296,6 +308,11 @@ def setup_main_transformer(
         lora_dropout=float(lora.get("dropout", 0.0)),
         init_lora_weights="gaussian",
         target_modules=list(lora["targets"]),
+    )
+    log.info(
+        "adding lora adapter rank=%s alpha=%s",
+        lora["rank"],
+        lora["alpha"],
     )
     transformer.add_adapter(lora_config, adapter_name=adapter_name)
     _place_trainable_adapter(transformer, adapter_name, device)
@@ -649,6 +666,8 @@ class TrainingModelLifecycle:
     def release_text_resources(self) -> None:
         """Drop all tokenizer/Qwen references and reclaim accelerator memory."""
 
+        if self.text_resources_loaded:
+            log.info("releasing text encoder")
         encoder = self.components.text_encoder
         if encoder is not None and hasattr(encoder, "to"):
             encoder.to("cpu")
@@ -686,6 +705,7 @@ class TrainingModelLifecycle:
             loaders.tokenizer,
             source,
             subfolder="tokenizer",
+            what="tokenizer",
         )
         text_encoder = _load_model_component(
             loaders.text_encoder,
@@ -693,6 +713,7 @@ class TrainingModelLifecycle:
             subfolder="text_encoder",
             torch_dtype=torch.bfloat16,
             disable_mmap=disable_mmap,
+            what="text encoder",
         )
         if hasattr(text_encoder, "to"):
             text_encoder.to("cpu")
@@ -909,8 +930,11 @@ def _load_component(
     source: ModelSource,
     *,
     subfolder: str,
+    what: str | None = None,
     **kwargs: Any,
 ) -> Any:
+    if what:
+        log.info("loading %s", what)
     load = getattr(owner, "from_pretrained", owner)
     return load(
         source.path,
@@ -927,11 +951,13 @@ def _load_model_component(
     subfolder: str,
     torch_dtype: torch.dtype,
     disable_mmap: bool,
+    what: str | None = None,
 ) -> Any:
     return _load_component(
         owner,
         source,
         subfolder=subfolder,
+        what=what,
         torch_dtype=torch_dtype,
         low_cpu_mem_usage=True,
         disable_mmap=disable_mmap,

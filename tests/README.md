@@ -46,7 +46,7 @@ A test's **designed claim** is what a green result would prove. An **observed re
 
 **Default mocked / unit tests.** Fast validation of schema, math, contracts, UI wiring, and mocked training hand-offs. They do **not** prove production GPU execution, real weight loads, or TorchAO kernels on device.
 
-**Tiny CUDA tests.** Real CUDA kernels and tensors on synthetic modules or tiny adapters. No production Z-Image weights. These can skip when CUDA (or FP8 compute capability) is missing. This tier includes production-path calls to `setup_main_transformer` + `official_flow_matching_step`, and a real `UnfusedPreviewSampler` CUDA lifecycle (no injected mover/quantizer).
+**Tiny CUDA tests.** Real CUDA kernels and tensors on synthetic modules or tiny adapters. No production Z-Image weights. Most skip when CUDA (or FP8 compute capability) is missing; the cache place/encode/park node skips only when CUDA is missing. This tier includes production-path calls to `setup_main_transformer` + `official_flow_matching_step`, a real `UnfusedPreviewSampler` CUDA lifecycle (no injected mover/quantizer), and cache VAE+TE CUDA place → `encode_sample` → CPU park.
 
 **Real-model capability gate.** Opt-in. Designed claim: load a persistent FP8 Turbo transformer from a local snapshot and replace unfused adapters; latent forwards differ across adapters and match on repeat. This is Diffusers + PEFT + TorchAO **latent** sampling on Blackwell, not the training loop, not `UnfusedPreviewSampler`, and not VAE PNG decode.
 
@@ -100,6 +100,7 @@ D:\Projects\Python312\python.exe -m pytest tests/zimage/engine/test_lora_quantiz
 D:\Projects\Python312\python.exe -m pytest tests/zimage/engine/test_lora_quantize.py::test_fuse_and_fp8_quantize_on_cuda -q --tb=line
 D:\Projects\Python312\python.exe -m pytest tests/zimage/training/test_capabilities.py::test_main_training_transformer_uses_official_fp8_setup_order -q --tb=line
 D:\Projects\Python312\python.exe -m pytest tests/zimage/training/test_sampling.py::test_sample_unfused_real_cuda_lifecycle_quantizes_once_and_restores_cpu -q --tb=line
+D:\Projects\Python312\python.exe -m pytest tests/zimage/training/test_gpu_usage.py::test_tiny_cuda_cache_place_encode_park -q --tb=line
 ```
 
 Real-model capability gate (Turbo snapshot required):
@@ -169,6 +170,12 @@ Snapshots must be absolute existing directories. The tests set Hub/Transformers 
 - **How:** `pytest tests/zimage/training/test_sampling.py::test_sample_unfused_real_cuda_lifecycle_quantizes_once_and_restores_cpu`
 - **Why CPU mocks are insufficient:** The mocked CUDA preview tests inject a fake quantizer and device mover. This one runs the real sampler lifecycle on CUDA.
 
+### `test_tiny_cuda_cache_place_encode_park`
+
+- **What:** Place VAE + text encoder on CUDA, `encode_sample`, park both to CPU. VRAM after park is within 8 MiB slack of the pre-place baseline. Skips only if CUDA is missing (not FP8).
+- **How:** `pytest tests/zimage/training/test_gpu_usage.py::test_tiny_cuda_cache_place_encode_park`
+- **Why CPU mocks are insufficient:** Fake residency flags do not allocate CUDA or prove VRAM reclaim.
+
 ### `test_real_sampling_pipeline_replaces_unfused_adapters_on_blackwell`
 
 - **Designed claim:** Persistent FP8 Turbo transformer: CPU prompt encode, BF16 load, post-load FP8, unfused adapter A then B, **latent-only** forwards (`output_type="latent"`) differ across adapters and match on repeat, base weights unchanged. Pipeline `vae` is `None`. Does **not** exercise `UnfusedPreviewSampler` or VAE PNG decode.
@@ -202,7 +209,7 @@ Turbo (`ZIMAGE_REAL_SAMPLING_MODEL`) likewise needs its own `scheduler/` plus `t
 
 ## Skip behavior
 
-Opt-in GPU tests use `@pytest.mark.skipif` on the env flag. Additional runtime skips happen when CUDA is missing, compute capability is too low (FP8 needs 8.9+; Blackwell gates need 12.0+), or a required snapshot path is unset / not an absolute existing directory.
+Opt-in GPU tests use `@pytest.mark.skipif` on the env flag. Additional runtime skips happen when CUDA is missing, compute capability is too low (FP8 needs 8.9+; Blackwell gates need 12.0+), or a required snapshot path is unset / not an absolute existing directory. `test_tiny_cuda_cache_place_encode_park` skips only when CUDA is missing; it does not require FP8.
 
 Show skip reasons:
 

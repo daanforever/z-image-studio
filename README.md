@@ -250,7 +250,7 @@ python train.py status <job_id>
 - **FP8 training** uses TorchAO `convert_to_float8_training` on the main transformer (not inference `apply_quantization`). If the GPU is not FP8-capable (needs Ada 8.9+ / Blackwell), the run falls back to **BF16**.
 - **Warm start** loads the latest complete LoRA checkpoint and builds a **new** optimizer. Checkpoints do not store optimizer state. There is no `init_adapter` field.
 - **Immediate Stop** does not write a checkpoint.
-- **GPU lease.** Generate (inference) and training cannot own the GPU at the same time. Start training after Generate is idle (or stop Generate first).
+- **GPU lease.** Generate (inference) and training (`cache` and `run`) cannot own the GPU at the same time. Start training after Generate is idle (or stop Generate first).
 - **System RAM** is not validated or limited.
 
 ## Tests

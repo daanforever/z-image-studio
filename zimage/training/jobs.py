@@ -181,15 +181,20 @@ class JobController:
         self.run_backend = run_backend
 
     def cache(self, job_dir: str | Path) -> int:
-        """Run the cache backend without acquiring the GPU lease (CPU encode)."""
+        """Run the cache backend under the GPU lease, without trainer job status writes."""
 
         root = Path(job_dir)
         with job_log_session(root):
             backend = self.cache_backend
             if backend is None:
                 raise RuntimeError("cache backend is not configured")
-            result = backend(root)
-            return 0 if result is None else int(result)
+            if not self.runtime_guard.acquire():
+                raise RuntimeError("training runtime is already in use")
+            try:
+                result = backend(root)
+                return 0 if result is None else int(result)
+            finally:
+                self.runtime_guard.release()
 
     def run(self, job_dir: str | Path) -> int:
         root = Path(job_dir)

@@ -380,3 +380,48 @@ def test_invalid_dimensions_fail_before_injected_encoder(tmp_path):
 
     assert encoder.image_calls == 0
     assert encoder.prompt_calls == 0
+
+
+def test_on_before_encode_runs_once_on_stale_and_never_on_valid(tmp_path):
+    valid_sample = _sample(tmp_path, "valid.png")
+    stale_sample = _sample(tmp_path, "stale.png")
+    cache_dir = tmp_path / "cache"
+    prepare_cache_at_job_start(
+        [valid_sample],
+        FakeEncoder(),
+        _config(),
+        cache_dir=cache_dir,
+    )
+
+    events: list[str] = []
+
+    class TrackingEncoder(FakeEncoder):
+        def encode_image(self, image):
+            events.append("encode")
+            return super().encode_image(image)
+
+    encoder = TrackingEncoder()
+
+    def on_before_encode() -> None:
+        events.append("before")
+
+    prepare_cache_at_job_start(
+        [valid_sample, stale_sample],
+        encoder,
+        _config(),
+        cache_dir=cache_dir,
+        on_before_encode=on_before_encode,
+    )
+    assert events == ["before", "encode"]
+    assert encoder.image_calls == 1
+
+    events.clear()
+    prepare_cache_at_job_start(
+        [valid_sample, stale_sample],
+        encoder,
+        _config(),
+        cache_dir=cache_dir,
+        on_before_encode=on_before_encode,
+    )
+    assert events == []
+    assert encoder.image_calls == 1

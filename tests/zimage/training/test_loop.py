@@ -1377,7 +1377,254 @@ def test_cache_job_prepares_cache_without_running_optimizer(tmp_path):
     assert load_job_state(root).step == 0
     assert "step" not in events
     assert "forward" not in events
-    assert loaders.text_encoder.created[0].moved_to[-1] == "cpu"
+    moved = loaders.text_encoder.created[0].moved_to
+    assert moved[-1] == "cpu"
+    assert "cuda" not in moved
+
+
+def _track_place_park(monkeypatch, events: list, *, call_real: bool = True):
+    import zimage.training.loop as loop_module
+
+    real_place = loop_module.TrainingModelLifecycle.place_cache_modules
+    real_park = loop_module.TrainingModelLifecycle.park_cache_modules
+
+    def tracking_place(self, device):
+        events.append(("place", torch.device(device).type))
+        if call_real:
+            return real_place(self, device)
+        return None
+
+    def tracking_park(self):
+        events.append("park")
+        if call_real:
+            return real_park(self)
+        return None
+
+    monkeypatch.setattr(
+        loop_module.TrainingModelLifecycle, "place_cache_modules", tracking_place
+    )
+    monkeypatch.setattr(
+        loop_module.TrainingModelLifecycle, "park_cache_modules", tracking_park
+    )
+    return loop_module
+
+
+def test_stale_cache_places_before_encode_and_parks_after(tmp_path, monkeypatch):
+    events: list = []
+    _track_place_park(monkeypatch, events)
+
+    class TrackingVae(FakeVae):
+        def encode(self, pixels):
+            events.append("encode")
+            return super().encode(pixels)
+
+    loaders = ComponentLoaders(
+        vae=Factory(TrackingVae),
+        tokenizer=Factory(FakeTokenizer),
+        text_encoder=Factory(FakeTextEncoder),
+        transformer=Factory(lambda: FakeTransformer([], trainable=False)),
+        scheduler=Factory(FakeScheduler),
+    )
+    root = make_job(tmp_path)
+
+    assert cache_job(root, loaders=loaders, device="cpu", fp8_capable=False) == 0
+    assert events == [("place", "cpu"), "encode", "park"]
+    moved = loaders.text_encoder.created[0].moved_to
+    assert "cuda" not in moved
+    assert torch.device(moved[-1]).type == "cpu"
+
+
+def test_valid_cache_never_places_cache_modules(tmp_path, monkeypatch):
+    root = make_job(tmp_path)
+    assert cache_job(root, **injections()) == 0
+
+    events: list = []
+
+    def forbid_place(self, device):
+        events.append("place")
+        raise AssertionError("place_cache_modules must not run for VALID cache")
+
+    def forbid_park(self):
+        events.append("park")
+        raise AssertionError("park_cache_modules must not run when place was skipped")
+
+    import zimage.training.loop as loop_module
+
+    monkeypatch.setattr(
+        loop_module.TrainingModelLifecycle, "place_cache_modules", forbid_place
+    )
+    monkeypatch.setattr(
+        loop_module.TrainingModelLifecycle, "park_cache_modules", forbid_park
+    )
+
+    assert cache_job(root, **injections()) == 0
+    assert events == []
+
+
+def _recording_gpu_probe(phases: list):
+    def probe(phase, components=None):
+        phases.append(phase)
+
+    return probe
+
+
+def test_stale_cache_job_probe_records_place_and_end(tmp_path):
+    phases: list[str] = []
+    root = make_job(tmp_path)
+    assert (
+        cache_job(root, **injections(gpu_usage_probe=_recording_gpu_probe(phases)))
+        == 0
+    )
+    assert phases == ["cache_place", "cache_end"]
+
+
+def test_stale_run_job_probe_phase_order(tmp_path):
+    phases: list[str] = []
+    root = make_job(tmp_path, max_steps=1)
+    assert (
+        run_job(root, **injections(gpu_usage_probe=_recording_gpu_probe(phases)))
+        == 0
+    )
+    assert phases == ["cache_place", "cache_end", "train_placed", "teardown"]
+
+
+def test_warm_cache_run_job_probe_omits_cache_place(tmp_path):
+    root = make_job(tmp_path, max_steps=1)
+    assert cache_job(root, **injections()) == 0
+    phases: list[str] = []
+    assert (
+        run_job(root, **injections(gpu_usage_probe=_recording_gpu_probe(phases)))
+        == 0
+    )
+    assert "cache_place" not in phases
+    assert "cache_end" not in phases
+    assert phases == ["train_placed", "teardown"]
+
+
+def test_raising_gpu_probe_does_not_fail_job(tmp_path):
+    def boom(phase, components=None):
+        raise RuntimeError("probe failed")
+
+    root = make_job(tmp_path, max_steps=1)
+    assert run_job(root, **injections(gpu_usage_probe=boom)) == 0
+
+
+def test_stale_cache_without_cuda_or_device_inject_requires_cuda(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    events: list = []
+    _track_place_park(monkeypatch, events)
+    root = make_job(tmp_path)
+    payload = injections()
+    del payload["device"]
+
+    with pytest.raises(TrainingConfigError, match="training requires CUDA"):
+        cache_job(root, **payload)
+
+    assert events == []
+
+
+def test_encode_exception_still_parks_cache_modules(tmp_path, monkeypatch):
+    events: list = []
+    _track_place_park(monkeypatch, events)
+
+    class BoomVae(FakeVae):
+        def encode(self, pixels):
+            events.append("encode")
+            raise RuntimeError("encode failed")
+
+    loaders = ComponentLoaders(
+        vae=Factory(BoomVae),
+        tokenizer=Factory(FakeTokenizer),
+        text_encoder=Factory(FakeTextEncoder),
+        transformer=Factory(lambda: FakeTransformer([], trainable=False)),
+        scheduler=Factory(FakeScheduler),
+    )
+    root = make_job(tmp_path)
+
+    with pytest.raises(RuntimeError, match="encode failed"):
+        cache_job(root, loaders=loaders, device="cpu", fp8_capable=False)
+
+    assert events == [("place", "cpu"), "encode", "park"]
+    assert torch.device(loaders.text_encoder.created[0].moved_to[-1]).type == "cpu"
+
+
+def test_preview_prompts_do_not_place_when_cache_is_valid(tmp_path, monkeypatch):
+    import zimage.training.loop as loop_module
+
+    _install_fake_default_sampler(monkeypatch)
+    root = make_job(
+        tmp_path,
+        max_steps=1,
+        sampling=_sampling_block(prompt="preview only"),
+    )
+    assert cache_job(root, **injections()) == 0
+
+    events: list = []
+    _track_place_park(monkeypatch, events)
+    real_preview = loop_module.TrainingModelLifecycle.prepare_preview_prompt_embeddings
+
+    def tracking_preview(self, prompts, *, max_sequence_length):
+        events.append("preview")
+        return real_preview(
+            self, prompts, max_sequence_length=max_sequence_length
+        )
+
+    monkeypatch.setattr(
+        loop_module.TrainingModelLifecycle,
+        "prepare_preview_prompt_embeddings",
+        tracking_preview,
+    )
+
+    assert run_job(root, **default_sampler_injections()) == 0
+    assert "preview" in events
+    assert all(
+        item != "place" and not (isinstance(item, tuple) and item[0] == "place")
+        for item in events
+    )
+    assert "park" not in events
+
+
+def test_stale_cache_preview_runs_after_place_before_park(tmp_path, monkeypatch):
+    events: list = []
+    loop_module = _track_place_park(monkeypatch, events)
+    _install_fake_default_sampler(monkeypatch)
+    real_preview = loop_module.TrainingModelLifecycle.prepare_preview_prompt_embeddings
+
+    def tracking_preview(self, prompts, *, max_sequence_length):
+        events.append("preview")
+        return real_preview(
+            self, prompts, max_sequence_length=max_sequence_length
+        )
+
+    monkeypatch.setattr(
+        loop_module.TrainingModelLifecycle,
+        "prepare_preview_prompt_embeddings",
+        tracking_preview,
+    )
+
+    class TrackingVae(FakeVae):
+        def encode(self, pixels):
+            events.append("encode")
+            return super().encode(pixels)
+
+    root = make_job(
+        tmp_path,
+        max_steps=1,
+        sampling=_sampling_block(prompt="preview after cache"),
+    )
+    payload = default_sampler_injections()
+    payload["loaders"] = ComponentLoaders(
+        vae=Factory(TrackingVae),
+        tokenizer=Factory(FakeTokenizer),
+        text_encoder=Factory(FakeTextEncoder),
+        transformer=Factory(lambda: FakeTransformer([], trainable=False)),
+        scheduler=Factory(FakeScheduler),
+    )
+
+    assert run_job(root, **payload) == 0
+    assert events == [("place", "cpu"), "encode", "preview", "park"]
 
 
 def test_loop_does_not_import_gradio_or_implementations():
@@ -1738,6 +1985,8 @@ def test_explicit_fp8_capable_cuda_path_cannot_silently_disable_fp8(
 
     monkeypatch.setattr(loop_module, "setup_main_transformer", fake_setup)
     root = make_job(tmp_path, max_steps=1, precision="fp8")
+    # Materialize cache on CPU so injecting device="cuda" does not place.
+    assert cache_job(root, **injections(device="cpu")) == 0
 
     with pytest.raises(
         (TrainingConfigError, RuntimeError),

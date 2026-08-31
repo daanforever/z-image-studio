@@ -51,9 +51,17 @@ class FakeLoadedComponent:
         self.source = source
         self.kwargs = kwargs
         self.frozen = False
+        self.device = "cpu"
+        self.to_calls: list = []
 
     def requires_grad_(self, value):
         self.frozen = not value
+        return self
+
+    def to(self, *args, **kwargs):
+        target = args[0] if args else kwargs.get("device")
+        self.to_calls.append(target)
+        self.device = target
         return self
 
 
@@ -168,6 +176,12 @@ class FakeTokenizer:
     def __init__(self) -> None:
         self.template_calls = []
         self.token_calls = []
+        self.to_calls: list = []
+
+    def to(self, *args, **kwargs):
+        target = args[0] if args else kwargs.get("device")
+        self.to_calls.append(target)
+        raise AssertionError("HF tokenizer is not an nn.Module")
 
     def apply_chat_template(self, messages, **kwargs):
         self.template_calls.append((messages, kwargs))
@@ -186,6 +200,12 @@ class FakeTextEncoder(torch.nn.Module):
         super().__init__()
         self.anchor = torch.nn.Parameter(torch.zeros(()))
         self.calls = []
+        self.to_calls: list = []
+
+    def to(self, *args, **kwargs):
+        target = args[0] if args else kwargs.get("device")
+        self.to_calls.append(target)
+        return super().to(*args, **kwargs)
 
     def forward(self, **kwargs):
         self.calls.append(kwargs)
@@ -257,9 +277,15 @@ class FakeVae(torch.nn.Module):
         self.anchor = torch.nn.Parameter(torch.zeros((), dtype=torch.bfloat16))
         self.config = SimpleNamespace(shift_factor=0.25, scaling_factor=2.0)
         self.inputs = []
+        self.to_calls: list = []
         self.distribution = FakeLatentDistribution(
             torch.ones((1, 16, 2, 3), dtype=torch.bfloat16)
         )
+
+    def to(self, *args, **kwargs):
+        target = args[0] if args else kwargs.get("device")
+        self.to_calls.append(target)
+        return super().to(*args, **kwargs)
 
     def encode(self, pixels):
         self.inputs.append(pixels)
@@ -782,8 +808,8 @@ def make_lifecycle() -> TrainingModelLifecycle:
             tokenizer=FakeTokenizer(),
             text_encoder=FakeTextEncoder(),
             training_scheduler=object(),
-            main_transformer=object(),
-            sampling_transformer=object(),
+            main_transformer=FakeLoadedComponent("transformer", "main", {}),
+            sampling_transformer=FakeLoadedComponent("transformer", "sampling", {}),
             sampling_scheduler=object(),
         )
     )
@@ -857,3 +883,52 @@ def test_reload_text_resources_on_cpu_then_release(monkeypatch):
     lifecycle.reload_text_resources_on_cpu(loaders=loaders)
     with pytest.raises(RuntimeError, match="already loaded"):
         lifecycle.reload_text_resources_on_cpu(loaders=loaders)
+
+
+def test_place_cache_modules_moves_vae_and_text_encoder_not_transformer():
+    lifecycle = make_lifecycle()
+    encoder = lifecycle.cache_encoder()
+    device = torch.device("cpu")
+    assert encoder.device is None
+
+    lifecycle.place_cache_modules(device)
+
+    assert lifecycle.components.vae.to_calls == [device]
+    assert lifecycle.components.text_encoder.to_calls == [device]
+    assert next(lifecycle.components.vae.parameters()).device.type == device.type
+    assert next(lifecycle.components.text_encoder.parameters()).device.type == (
+        device.type
+    )
+    assert encoder.device == device
+    assert lifecycle.cache_encoder() is encoder
+    assert lifecycle.components.main_transformer.to_calls == []
+    assert lifecycle.components.sampling_transformer.to_calls == []
+    assert lifecycle.components.tokenizer.to_calls == []
+
+
+def test_park_cache_modules_is_idempotent_and_keeps_text_refs_until_release():
+    lifecycle = make_lifecycle()
+    tokenizer = lifecycle.components.tokenizer
+    text_encoder = lifecycle.components.text_encoder
+    lifecycle.place_cache_modules(torch.device("cpu"))
+
+    lifecycle.park_cache_modules()
+
+    assert lifecycle.components.vae.to_calls[-1] == "cpu"
+    assert lifecycle.components.text_encoder.to_calls[-1] == "cpu"
+    assert next(lifecycle.components.vae.parameters()).device.type == "cpu"
+    assert next(lifecycle.components.text_encoder.parameters()).device.type == "cpu"
+    assert lifecycle.components.tokenizer is tokenizer
+    assert lifecycle.components.text_encoder is text_encoder
+    assert lifecycle.text_resources_loaded is True
+    assert tokenizer.to_calls == []
+
+    lifecycle.park_cache_modules()
+    assert lifecycle.components.vae.to_calls[-1] == "cpu"
+    assert lifecycle.components.text_encoder is text_encoder
+    assert lifecycle.components.tokenizer is tokenizer
+
+    lifecycle.release_text_resources()
+    assert lifecycle.text_resources_loaded is False
+    assert lifecycle.components.text_encoder is None
+    assert lifecycle.components.tokenizer is None

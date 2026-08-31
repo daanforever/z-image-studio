@@ -604,6 +604,34 @@ class TrainingModelLifecycle:
             )
         return self._cache_encoder
 
+    def place_cache_modules(self, device: str | torch.device) -> None:
+        """Move VAE and text encoder onto ``device`` for cache encoding.
+
+        Updates ``ModelBackedCacheEncoder.device`` when the adapter already
+        exists. Does not move the training or sampling transformer, does not
+        quantize, and does not call ``tokenizer.to``.
+        """
+
+        for module in (self.components.vae, self.components.text_encoder):
+            if module is not None and hasattr(module, "to"):
+                module.to(device)
+        if self._cache_encoder is not None:
+            self._cache_encoder.device = device
+
+    def park_cache_modules(self) -> None:
+        """Move VAE and text encoder to CPU and reclaim accelerator memory.
+
+        Idempotent. Does not drop tokenizer or text-encoder references;
+        call ``release_text_resources`` to unload them.
+        """
+
+        for module in (self.components.vae, self.components.text_encoder):
+            if module is not None and hasattr(module, "to"):
+                module.to("cpu")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def validate_sampler(
         self,
         target_modules: Sequence[str],

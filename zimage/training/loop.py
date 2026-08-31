@@ -46,6 +46,7 @@ from zimage.training.dataset import (
     discover_samples,
     validate_mvp_batch_settings,
 )
+from zimage.training.gpu_usage import GpuUsageProbe
 from zimage.training.jobs import (
     load_job_config,
     load_job_state,
@@ -77,6 +78,7 @@ QWEN_CHAT_TEMPLATE = {
 }
 
 log = logging.getLogger("zimage.training")
+_DEFAULT_GPU_USAGE_PROBE = GpuUsageProbe()
 
 
 @dataclass
@@ -103,9 +105,15 @@ def cache_job(job_dir: Path, **injected: Any) -> int:
     _validate_batch_settings(injected)
     samples = _discover(job, injected)
     components, lifecycle = _load_lifecycle(job, injected)
+    placed = [False]
     try:
-        _prepare_cache(samples, job, components, lifecycle, injected)
+        _prepare_cache(
+            samples, job, components, lifecycle, injected, placed=placed
+        )
     finally:
+        if placed[0]:
+            lifecycle.park_cache_modules()
+            _probe_gpu_usage(injected, "cache_end", components)
         lifecycle.release_text_resources()
     return 0
 
@@ -138,7 +146,9 @@ def run_job(job_dir: Path, **injected: Any) -> int:
     try:
         return _optimize(job_dir, state, holder, injected)
     finally:
-        _teardown_runtime(holder["runtime"])
+        runtime = holder["runtime"]
+        _teardown_runtime(runtime)
+        _probe_gpu_usage(injected, "teardown", runtime.get("components"))
 
 
 def get_scheduler_sigmas(
@@ -307,13 +317,33 @@ def _prepare_cache(
     components: TrainingModelComponents,
     lifecycle: TrainingModelLifecycle,
     injected: Mapping[str, Any],
+    *,
+    device: torch.device | str | None = None,
+    placed: list[bool] | None = None,
 ) -> list[CachedSample]:
     cache_config = injected.get("cache_config")
     if cache_config is None:
         cache_config = cache_config_from_components(job, components)
     prepare = injected.get("prepare_cache", prepare_cache_at_job_start)
+    flag = placed if placed is not None else [False]
+
+    def on_before_encode() -> None:
+        target = (
+            torch.device(device)
+            if device is not None
+            else _resolve_training_device(injected)
+        )
+        flag[0] = True
+        lifecycle.place_cache_modules(target)
+        _probe_gpu_usage(injected, "cache_place", components)
+
     log.info("cache prepare samples=%s", len(samples))
-    return prepare(samples, lifecycle.cache_encoder(), cache_config)
+    return prepare(
+        samples,
+        lifecycle.cache_encoder(),
+        cache_config,
+        on_before_encode=on_before_encode,
+    )
 
 
 def cache_config_from_components(
@@ -362,26 +392,40 @@ def _build_runtime(
     if not samples:
         raise DatasetError("job has no training samples")
     components, lifecycle = _load_lifecycle(job, injected)
-    cached = _prepare_cache(samples, job, components, lifecycle, injected)
     preview_prompt_embeddings: dict[str, Any] = {}
     preview_negative_embeddings: dict[str, Any] = {}
     preview_sampler = None
-    if "preview_sampler" not in injected:
-        preview_prompt_embeddings, preview_negative_embeddings = (
-            _prepare_preview_embeddings(job, lifecycle)
-        )
-        preview_sampler = _default_preview_sampler(
-            {
-                "components": components,
-                "lifecycle": lifecycle,
-                "config": job,
-                "preview_prompt_embeddings": preview_prompt_embeddings,
-                "preview_negative_embeddings": preview_negative_embeddings,
-                "device": training_device,
-            },
+    placed = [False]
+    try:
+        cached = _prepare_cache(
+            samples,
+            job,
+            components,
+            lifecycle,
             injected,
+            device=training_device,
+            placed=placed,
         )
-    lifecycle.release_text_resources()
+        if "preview_sampler" not in injected:
+            preview_prompt_embeddings, preview_negative_embeddings = (
+                _prepare_preview_embeddings(job, lifecycle)
+            )
+            preview_sampler = _default_preview_sampler(
+                {
+                    "components": components,
+                    "lifecycle": lifecycle,
+                    "config": job,
+                    "preview_prompt_embeddings": preview_prompt_embeddings,
+                    "preview_negative_embeddings": preview_negative_embeddings,
+                    "device": training_device,
+                },
+                injected,
+            )
+    finally:
+        if placed[0]:
+            lifecycle.park_cache_modules()
+            _probe_gpu_usage(injected, "cache_end", components)
+        lifecycle.release_text_resources()
     transformer, setup = _setup_transformer(
         components.main_transformer, job, injected, training_device
     )
@@ -412,6 +456,7 @@ def _build_runtime(
         job=job,
         injected=injected,
     )
+    _probe_gpu_usage(injected, "train_placed", components)
     _seed_everything(int(job["seed"]))
     return {
         "config": job,
@@ -1430,12 +1475,12 @@ def _resolve_noise(
 
 
 def _resolve_training_device(injected: Mapping[str, Any]) -> torch.device:
-    """Resolve the single optimizer-training device for this runtime.
+    """Resolve the device for optimizer training and cache encoding.
 
     Production jobs omit ``device`` and must run on CUDA. Explicit
     ``device="cpu"`` is an internal unit-test injection path only and is
-    not a supported production MVP target. Cache encoding stays
-    CPU-resident and does not use this helper.
+    not a supported production MVP target. Cache encoding reuses this
+    helper when ``encode_sample`` will run; it is not a CPU-only path.
     """
 
     raw = injected.get("device")
@@ -1611,6 +1656,22 @@ def _first_text(*values: Any) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return "local"
+
+
+def _probe_gpu_usage(
+    injected: Mapping[str, Any],
+    phase: str,
+    components: Any = None,
+) -> None:
+    """Log a child-process GPU snapshot. Never raises into the job."""
+
+    try:
+        probe = injected.get("gpu_usage_probe", _DEFAULT_GPU_USAGE_PROBE)
+        if probe is None:
+            return
+        probe(phase, components)
+    except Exception:
+        return
 
 
 def _injected_or_default(injected: Mapping[str, Any], key: str, factory):

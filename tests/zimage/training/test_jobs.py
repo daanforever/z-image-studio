@@ -217,7 +217,7 @@ def test_controller_uses_injected_guard_and_backend(tmp_path):
     assert {path.name for path in root.iterdir()} == set(JOB_ROOT_ENTRIES)
 
 
-def test_controller_cache_does_not_acquire_gpu_lease(tmp_path):
+def test_controller_cache_acquires_and_releases_gpu_lease(tmp_path):
     root = create_or_open_job("job", tmp_path)
     guard = RecordingGuard()
     backend_calls = []
@@ -227,10 +227,24 @@ def test_controller_cache_does_not_acquire_gpu_lease(tmp_path):
     )
 
     assert controller.cache(root) == 0
-    assert guard.calls == []
+    assert guard.calls == ["acquire", "release"]
     assert backend_calls == [root]
+    assert load_job_state(root).status is JobStatus.STOPPED
     assert (root / "logs" / "job.log").is_file()
     assert "job.log" not in {path.name for path in root.iterdir()}
+
+
+def test_cache_busy_guard_does_not_run_backend_or_write_job_status(tmp_path):
+    root = create_or_open_job("job", tmp_path)
+    initial = load_job_state(root)
+    guard = RecordingGuard(acquired=False)
+    controller = JobController(guard, cache_backend=lambda _: pytest.fail("called"))
+
+    with pytest.raises(RuntimeError, match="already in use"):
+        controller.cache(root)
+
+    assert load_job_state(root) == initial
+    assert guard.calls == ["acquire"]
 
 
 def test_controller_cache_raises_when_backend_missing(tmp_path):

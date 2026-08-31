@@ -13,7 +13,7 @@ import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 import torch
 from PIL import Image
@@ -410,16 +410,25 @@ def prepare_cache_at_job_start(
     config: CacheConfig,
     *,
     cache_dir: str | Path | None = None,
+    on_before_encode: Callable[[], None] | None = None,
 ) -> list[CachedSample]:
-    """Inspect and materialize all caches at an explicit job-start boundary."""
+    """Inspect and materialize all caches at an explicit job-start boundary.
+
+    ``on_before_encode`` runs once, immediately before the first
+    ``encode_sample``. VALID caches never invoke it.
+    """
 
     cached: list[CachedSample] = []
+    encode_hook = on_before_encode
     for sample in samples:
         image = load_training_image(sample.image_path)
         metadata = expected_metadata(sample, config, image_size=image.size)
         path = cache_path_for(sample, cache_dir)
         inspection = inspect_cache(path, metadata)
         if inspection.state is not CacheState.VALID:
+            if encode_hook is not None:
+                encode_hook()
+                encode_hook = None
             latent, prompt_embedding = encode_sample(
                 sample,
                 image,

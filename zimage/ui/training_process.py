@@ -5,11 +5,12 @@ The process manager launches the frozen CLI command from
 The child writes ``logs/job.log`` itself; this manager does not redirect
 pipes or open that file for write.
 
-Lease ownership: ``python -u train.py run`` acquires the GPU lease via
-``create_runtime_guard`` inside ``JobController.run``. This manager does not
-hold the lease while the child is alive (a held parent lease would make the
-frozen CLI fail to acquire). After Immediate Stop, crash, or normal
-completion it reclaims a dead-holder lock so inference can acquire again.
+Lease ownership: ``python -u train.py run`` and ``python -u train.py cache``
+acquire the GPU lease via ``create_runtime_guard`` inside ``JobController``.
+This manager launches ``run`` only and does not hold the lease while the
+child is alive (a held parent lease would make the frozen CLI fail to
+acquire). After Immediate Stop, crash, or normal completion it reclaims a
+dead-holder lock so inference can acquire again.
 """
 
 from __future__ import annotations

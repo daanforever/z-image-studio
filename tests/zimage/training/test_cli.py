@@ -239,10 +239,8 @@ def test_cli_cache_and_run_use_explicit_injections(tmp_path, command):
 
     assert result == EXIT_OK
     assert calls == [root]
-    if command == "cache":
-        assert guard.calls == []
-    else:
-        assert guard.calls == ["acquire", "release"]
+    assert guard.calls == ["acquire", "release"]
+    if command == "run":
         state = json.loads((root / "state.json").read_text(encoding="utf-8"))
         assert state["status"] == JobStatus.COMPLETED.value
 

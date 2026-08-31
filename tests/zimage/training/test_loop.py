@@ -513,8 +513,12 @@ def test_default_warm_start_applies_latest_lora_before_fresh_optimizer(tmp_path)
         lora_state=lora_state,
         metadata=NativeAdapterMetadata(
             adapter_name="default",
-            base_model_name_or_path=str(load_job_config(root)["main_transformer"]["path"]),
-            base_model_revision=load_job_config(root)["main_transformer"].get("revision"),
+            base_model_name_or_path=str(
+                load_job_config(root)["model"]["main_transformer"]["path"]
+            ),
+            base_model_revision=load_job_config(root)["model"]["main_transformer"].get(
+                "revision"
+            ),
             peft_config={
                 "r": 4,
                 "lora_alpha": 4,
@@ -837,8 +841,8 @@ def test_default_warm_start_without_set_lora_state_loads_native_weights(
         },
         metadata=NativeAdapterMetadata(
             adapter_name="default",
-            base_model_name_or_path=str(config["main_transformer"]["path"]),
-            base_model_revision=config["main_transformer"].get("revision"),
+            base_model_name_or_path=str(config["model"]["main_transformer"]["path"]),
+            base_model_revision=config["model"]["main_transformer"].get("revision"),
             peft_config={
                 "r": int(config["lora"]["rank"]),
                 "lora_alpha": float(config["lora"]["alpha"]),
@@ -935,19 +939,25 @@ def test_immutable_main_and_lora_topology_are_rejected(tmp_path):
     original = load_job_config(root)
     updated = load_job_config(root)
     updated["lora"]["rank"] = 8
-    updated["main_transformer"]["path"] = "org/other-main"
+    updated["model"]["main_transformer"]["path"] = "org/other-main"
     enqueue_update(root, updated)
 
     assert run_job(root, **injections()) == 0
 
     persisted = load_job_config(root)
     assert persisted["lora"]["rank"] == original["lora"]["rank"]
-    assert persisted["main_transformer"]["path"] == original["main_transformer"]["path"]
+    assert (
+        persisted["model"]["main_transformer"]["path"]
+        == original["model"]["main_transformer"]["path"]
+    )
     state = load_job_state(root)
     assert state.status is JobStatus.RUNNING
     assert state.step == 2
     assert state.last_error is not None
-    assert "lora.rank" in state.last_error or "main_transformer.path" in state.last_error
+    assert (
+        "lora.rank" in state.last_error
+        or "model.main_transformer.path" in state.last_error
+    )
     assert not list((root / "commands").glob("*.json"))
 
 
@@ -1796,8 +1806,8 @@ def test_resume_rewinds_step_to_latest_checkpoint(tmp_path):
         },
         metadata=NativeAdapterMetadata(
             adapter_name="default",
-            base_model_name_or_path=str(config["main_transformer"]["path"]),
-            base_model_revision=config["main_transformer"].get("revision"),
+            base_model_name_or_path=str(config["model"]["main_transformer"]["path"]),
+            base_model_revision=config["model"]["main_transformer"].get("revision"),
             peft_config={
                 "r": int(config["lora"]["rank"]),
                 "lora_alpha": float(config["lora"]["alpha"]),
@@ -2034,11 +2044,11 @@ def _adapter_metadata_for_job(config, *, step: int, **overrides) -> NativeAdapte
         adapter_name=overrides.get("adapter_name", "default"),
         base_model_name_or_path=overrides.get(
             "base_model_name_or_path",
-            str(config["main_transformer"]["path"]),
+            str(config["model"]["main_transformer"]["path"]),
         ),
         base_model_revision=overrides.get(
             "base_model_revision",
-            config["main_transformer"].get("revision"),
+            config["model"]["main_transformer"].get("revision"),
         ),
         peft_config=peft,
         optimizer_step=step,

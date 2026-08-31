@@ -286,8 +286,10 @@ def test_idle_save_rejects_immutable_lora_after_checkpoint(tmp_path):
         },
         metadata=NativeAdapterMetadata(
             adapter_name="default",
-            base_model_name_or_path=str(config["main_transformer"]["path"]),
-            base_model_revision=config["main_transformer"].get("revision"),
+            base_model_name_or_path=str(
+                config["model"]["main_transformer"]["path"]
+            ),
+            base_model_revision=config["model"]["main_transformer"].get("revision"),
             peft_config={
                 "r": int(config["lora"]["rank"]),
                 "lora_alpha": float(config["lora"]["alpha"]),

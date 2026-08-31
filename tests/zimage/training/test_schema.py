@@ -67,9 +67,9 @@ def test_foundation_dependency_import_smoke():
 def test_load_minimal_job_fixture():
     job = load_job_document(JOB_MINIMAL)
     assert job["job_name"] == "minimal"
-    assert job["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
-    assert job["main_transformer"]["revision"] is None
-    assert job["sampling_transformer"] == {
+    assert job["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+    assert job["model"]["main_transformer"]["revision"] is None
+    assert job["model"]["sampling_transformer"] == {
         "path": KNOWN_TURBO_SOURCE,
         "revision": None,
     }
@@ -91,9 +91,19 @@ def test_create_template_empty_datasets_and_placeholder_sample():
     assert doc["datasets"] == []
     assert doc["sampling"]["samples"] == [{"prompt": ""}]
     assert doc["job_name"] == "Мой стиль"
+    assert doc["model"]["main_transformer"] == {
+        "path": KNOWN_MAIN_SOURCE,
+        "revision": None,
+    }
+    assert doc["model"]["sampling_transformer"] == {
+        "path": KNOWN_TURBO_SOURCE,
+        "revision": None,
+    }
     parsed = validate_job_document(doc)
     assert parsed["datasets"] == []
     assert parsed["sampling"]["samples"] == [{"prompt": ""}]
+    assert parsed["model"]["main_transformer"]["revision"] is None
+    assert parsed["model"]["sampling_transformer"]["revision"] is None
 
 
 def test_max_steps_wins_over_epochs():
@@ -115,8 +125,8 @@ def test_max_steps_wins_over_epochs():
 def test_immutable_field_list():
     assert IMMUTABLE_JOB_FIELDS == frozenset(
         {
-            "main_transformer.path",
-            "main_transformer.revision",
+            "model.main_transformer.path",
+            "model.main_transformer.revision",
             "lora.rank",
             "lora.alpha",
             "lora.targets",
@@ -131,7 +141,7 @@ def test_immutable_field_list():
     assert IMMUTABLE_MVP_FIELDS == IMMUTABLE_JOB_FIELDS | IMMUTABLE_CACHE_FIELDS
     assert is_immutable_job_field("lora.rank")
     assert not is_immutable_job_field("optimizer.learning_rate")
-    assert is_immutable_mvp_field("main_transformer.revision")
+    assert is_immutable_mvp_field("model.main_transformer.revision")
     assert is_immutable_mvp_field("cache.tensor_schema")
     assert is_immutable_mvp_field("cache.schema_version")
     assert not is_immutable_mvp_field("optimizer.learning_rate")
@@ -310,20 +320,20 @@ def test_dataset_name_accepts_folder_and_absolute_path():
 
 def test_hf_and_local_model_roots_accept_optional_revisions():
     job = job_create_template()
-    job["main_transformer"] = {
+    job["model"]["main_transformer"] = {
         "path": "organization/model",
         "revision": "refs/pr/12",
     }
-    job["sampling_transformer"] = {
+    job["model"]["sampling_transformer"] = {
         "path": "../local model",
         "revision": None,
     }
     parsed = validate_job_document(job)
-    assert parsed["main_transformer"] == {
+    assert parsed["model"]["main_transformer"] == {
         "path": "organization/model",
         "revision": "refs/pr/12",
     }
-    assert parsed["sampling_transformer"] == {
+    assert parsed["model"]["sampling_transformer"] == {
         "path": "../local model",
         "revision": None,
     }
@@ -340,6 +350,11 @@ def test_unknown_job_keys_raise():
     with pytest.raises(TrainingConfigError, match="unknown"):
         validate_job_document(job)
 
+    job = job_create_template()
+    job["model"]["extra"] = True
+    with pytest.raises(TrainingConfigError, match="unknown"):
+        validate_job_document(job)
+
 
 def test_invalid_job_fields_raise():
     job = job_create_template()
@@ -348,7 +363,7 @@ def test_invalid_job_fields_raise():
         validate_job_document(job)
 
     job = job_create_template()
-    job["main_transformer"]["path"] = ""
+    job["model"]["main_transformer"]["path"] = ""
     with pytest.raises(TrainingConfigError):
         validate_job_document(job)
 
@@ -360,8 +375,8 @@ def test_invalid_job_fields_raise():
 
 def test_turbo_rejected_as_main_transformer():
     job = job_create_template()
-    job["main_transformer"]["path"] = KNOWN_TURBO_SOURCE
-    with pytest.raises(TrainingConfigError, match="main_transformer"):
+    job["model"]["main_transformer"]["path"] = KNOWN_TURBO_SOURCE
+    with pytest.raises(TrainingConfigError, match="model.main_transformer"):
         validate_job_document(job)
 
 
@@ -399,12 +414,59 @@ def test_job_update_classification():
     assert classification is UpdateClassification.REJECTED_IMMUTABLE
     assert changed == ("lora.rank",)
 
+    immutable_path = job_create_template()
+    immutable_path["model"]["main_transformer"]["path"] = "org/other-main"
+    classification, changed = classify_job_update(current, immutable_path)
+    assert classification is UpdateClassification.REJECTED_IMMUTABLE
+    assert changed == ("model.main_transformer.path",)
+
+    rebuild_sampling = job_create_template()
+    rebuild_sampling["model"]["sampling_transformer"]["path"] = "org/other-turbo"
+    classification, changed = classify_job_update(current, rebuild_sampling)
+    assert classification is UpdateClassification.REBUILD_REQUIRED
+    assert changed == ("model.sampling_transformer.path",)
+    assert "model.sampling_transformer" in REBUILD_REQUIRED_JOB_FIELDS
+
+    omit_sampling = job_create_template()
+    del omit_sampling["model"]["sampling_transformer"]
+    classification, changed = classify_job_update(current, omit_sampling)
+    assert classification is UpdateClassification.REBUILD_REQUIRED
+    assert changed == ("model.sampling_transformer",)
+
 
 def test_sampling_transformer_may_be_omitted():
     job = job_create_template()
-    del job["sampling_transformer"]
+    del job["model"]["sampling_transformer"]
     parsed = validate_job_document(job)
-    assert "sampling_transformer" not in parsed
+    assert "sampling_transformer" not in parsed["model"]
+
+
+def test_empty_model_requires_main_transformer():
+    job = job_create_template()
+    job["model"] = {}
+    with pytest.raises(TrainingConfigError, match="model.main_transformer"):
+        validate_job_document(job)
+
+
+def test_null_sampling_transformer_is_invalid():
+    job = job_create_template()
+    job["model"]["sampling_transformer"] = None
+    with pytest.raises(TrainingConfigError, match="must be a mapping"):
+        validate_job_document(job)
+
+
+def test_top_level_transformer_keys_must_be_nested_under_model():
+    job = job_create_template()
+    job["main_transformer"] = job["model"]["main_transformer"]
+    job["sampling_transformer"] = job["model"]["sampling_transformer"]
+    del job["model"]
+    with pytest.raises(TrainingConfigError, match="nested under model"):
+        validate_job_document(job)
+
+    job = job_create_template()
+    job["main_transformer"] = {"path": KNOWN_MAIN_SOURCE}
+    with pytest.raises(TrainingConfigError, match="nested under model"):
+        validate_job_document(job)
 
 
 def test_template_calls_return_independent_documents():

@@ -434,14 +434,17 @@ def test_real_blackwell_fp8_warm_start_turbo_preview_smoke(
     jobs_dir = (tmp_path / "jobs").resolve()
     job_dir = create_or_open_job("blackwell-hardware-smoke", jobs_dir)
     config = job_create_template()
+    config["model"]["main_transformer"] = {
+        "path": str(main_model),
+        "revision": None,
+    }
+    config["model"]["sampling_transformer"] = {
+        "path": str(sampling_model),
+        "revision": None,
+    }
     config.update(
         {
             "job_name": "blackwell-hardware-smoke",
-            "main_transformer": {"path": str(main_model), "revision": None},
-            "sampling_transformer": {
-                "path": str(sampling_model),
-                "revision": None,
-            },
             "datasets": [
                 {
                     "name": str(dataset_dir),

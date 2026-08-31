@@ -67,10 +67,12 @@ def make_loaders(calls):
 def test_component_loading_uses_main_and_separate_sampling_sources():
     calls = []
     job = {
-        "main_transformer": {"path": "org/main", "revision": "main-rev"},
-        "sampling_transformer": {
-            "path": "Tongyi-MAI/Z-Image-Turbo",
-            "revision": "sample-rev",
+        "model": {
+            "main_transformer": {"path": "org/main", "revision": "main-rev"},
+            "sampling_transformer": {
+                "path": "Tongyi-MAI/Z-Image-Turbo",
+                "revision": "sample-rev",
+            },
         },
     }
 
@@ -112,7 +114,7 @@ def test_component_loading_uses_main_and_separate_sampling_sources():
 def test_omitted_sampling_source_loads_distinct_instances_from_main():
     calls = []
     components = load_training_components(
-        {"main_transformer": {"path": "local/model", "revision": None}},
+        {"model": {"main_transformer": {"path": "local/model", "revision": None}}},
         loaders=make_loaders(calls),
     )
 
@@ -150,8 +152,10 @@ def test_turbo_is_rejected_as_normalized_main_identity(source):
 def test_turbo_remains_allowed_as_sampling_source():
     sources = resolve_model_sources(
         {
-            "main_transformer": {"path": "Tongyi-MAI/Z-Image"},
-            "sampling_transformer": {"path": "Tongyi-MAI/Z-Image-Turbo"},
+            "model": {
+                "main_transformer": {"path": "Tongyi-MAI/Z-Image"},
+                "sampling_transformer": {"path": "Tongyi-MAI/Z-Image-Turbo"},
+            },
         }
     )
     assert sources.sampling.path.endswith("Z-Image-Turbo")
@@ -476,6 +480,7 @@ class TinyPeftTransformer(PeftAdapterMixin, torch.nn.Module):
         )
         self.events = events
         self.adapter_dtypes_at_add: dict[str, torch.dtype] = {}
+        self.adapter_devices_at_add: dict[str, torch.device] = {}
 
     def requires_grad_(self, value=True):
         self.events.append(("freeze", value))
@@ -503,6 +508,11 @@ class TinyPeftTransformer(PeftAdapterMixin, torch.nn.Module):
             for name, parameter in self.named_parameters()
             if parameter.requires_grad and _peft_name_belongs(name, adapter_name)
         }
+        self.adapter_devices_at_add = {
+            name: parameter.device
+            for name, parameter in self.named_parameters()
+            if parameter.requires_grad and _peft_name_belongs(name, adapter_name)
+        }
         self.events.append(("adapter", adapter_name))
         return result
 
@@ -523,6 +533,7 @@ def test_main_transformer_casts_new_adapter_to_bf16_leaving_fp8_and_others():
     events: list = []
     transformer = TinyPeftTransformer(events)
     fp8_clone = {"payload": None}
+    requested_device = torch.device("cpu")
 
     def convert(model, **kwargs):
         events.append(("convert", kwargs))
@@ -538,7 +549,7 @@ def test_main_transformer_casts_new_adapter_to_bf16_leaving_fp8_and_others():
         fp8_capable=True,
         lora=_lora_kwargs(),
         gradient_checkpointing=True,
-        device="cpu",
+        device=requested_device,
         adapter_name="training_adapter",
         convert_to_float8_training=convert,
         float8_config_factory=lambda **kwargs: SimpleNamespace(**kwargs),
@@ -553,6 +564,10 @@ def test_main_transformer_casts_new_adapter_to_bf16_leaving_fp8_and_others():
     ]
     assert transformer.adapter_dtypes_at_add
     assert set(transformer.adapter_dtypes_at_add.values()) == {torch.float32}
+    assert transformer.adapter_devices_at_add
+    assert {device.type for device in transformer.adapter_devices_at_add.values()} == {
+        "cpu"
+    }
 
     trainable_new = {
         name: parameter
@@ -562,13 +577,15 @@ def test_main_transformer_casts_new_adapter_to_bf16_leaving_fp8_and_others():
     assert trainable_new
     for name, parameter in trainable_new.items():
         assert parameter.dtype is torch.bfloat16, name
-        assert parameter.device.type == "cpu", name
+        assert parameter.device.type == requested_device.type, name
         assert parameter.requires_grad is True, name
 
     other = transformer.other.lora_A["other_adapter"].weight
     assert other.dtype is torch.float32
+    assert other.device.type == "cpu"
     assert other.requires_grad is True
     assert transformer.unrelated.dtype is torch.float32
+    assert transformer.unrelated.device.type == "cpu"
     assert transformer.unrelated.requires_grad is True
 
     base = transformer.to_q.get_base_layer().weight
@@ -588,6 +605,7 @@ def test_main_transformer_casts_new_adapter_to_bf16_leaving_fp8_and_others():
 def test_bf16_fallback_still_casts_trainable_adapter_to_bf16():
     events: list = []
     transformer = TinyPeftTransformer(events)
+    requested_device = torch.device("cpu")
 
     result = setup_main_transformer(
         transformer,
@@ -595,7 +613,7 @@ def test_bf16_fallback_still_casts_trainable_adapter_to_bf16():
         fp8_capable=False,
         lora=_lora_kwargs(),
         gradient_checkpointing=False,
-        device="cpu",
+        device=requested_device,
         adapter_name="training_adapter",
         convert_to_float8_training=lambda *_args, **_kwargs: pytest.fail(
             "FP8 converter must not run"
@@ -612,10 +630,12 @@ def test_bf16_fallback_still_casts_trainable_adapter_to_bf16():
     for name, parameter in transformer.named_parameters():
         if parameter.requires_grad and _peft_name_belongs(name, "training_adapter"):
             assert parameter.dtype is torch.bfloat16
-            assert parameter.device.type == "cpu"
+            assert parameter.device.type == requested_device.type
             assert parameter.requires_grad is True
     assert transformer.unrelated.dtype is torch.float32
+    assert transformer.unrelated.device.type == "cpu"
     assert transformer.other.lora_A["other_adapter"].weight.dtype is torch.float32
+    assert transformer.other.lora_A["other_adapter"].weight.device.type == "cpu"
 
 
 def test_adapter_contract_reports_name_dtype_and_device_violations():

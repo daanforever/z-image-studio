@@ -1,10 +1,11 @@
 job_name: "minimal"
-main_transformer:
-  path: Tongyi-MAI/Z-Image
-  revision: null
-sampling_transformer:
-  path: Tongyi-MAI/Z-Image-Turbo
-  revision: null
+model:
+  main_transformer:
+    path: Tongyi-MAI/Z-Image
+    revision: null
+  sampling_transformer:
+    path: Tongyi-MAI/Z-Image-Turbo
+    revision: null
 datasets: []
 lora:
   rank: 4

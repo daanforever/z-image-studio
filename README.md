@@ -148,18 +148,19 @@ The first training call (CLI or Training tab) writes that section atomically if 
 
 Create/Open writes a full default job. `job_id` is a lowercase ASCII slug of the name you type; the original string is stored as `job_name`. Opening an existing slug does not overwrite `config.yaml` or `state.json`.
 
-`main_transformer` must be Base (`Tongyi-MAI/Z-Image`). Turbo is rejected as `main_transformer` and is only valid as optional `sampling_transformer`. `datasets[].name` is a folder under `datasets_dir` or an absolute path. `precision` is `fp8` or `bf16`. When both `epochs` and `max_steps` are set, **`max_steps` wins**. `sampling.common_parameters` uses Diffusers keys (`guidance_scale`, `num_inference_steps`, `time_shift`, `width`, `height`, `seed`, `prompt`, `negative_prompt`); per-sample maps overlay those keys.
+`model.main_transformer` must be Base (`Tongyi-MAI/Z-Image`). Turbo is rejected as `model.main_transformer` and is only valid as optional `model.sampling_transformer`. Top-level `main_transformer` and `sampling_transformer` keys are no longer valid; they must be nested under `model`. `datasets[].name` is a folder under `datasets_dir` or an absolute path. `precision` is `fp8` or `bf16`. When both `epochs` and `max_steps` are set, **`max_steps` wins**. `sampling.common_parameters` uses Diffusers keys (`guidance_scale`, `num_inference_steps`, `time_shift`, `width`, `height`, `seed`, `prompt`, `negative_prompt`); per-sample maps overlay those keys.
 
 There is no `init_adapter` field.
 
 ```yaml
 job_name: "my style"
-main_transformer:
-  path: Tongyi-MAI/Z-Image
-  revision: null
-sampling_transformer:
-  path: Tongyi-MAI/Z-Image-Turbo
-  revision: null
+model:
+  main_transformer:
+    path: Tongyi-MAI/Z-Image
+    revision: null
+  sampling_transformer:
+    path: Tongyi-MAI/Z-Image-Turbo
+    revision: null
 datasets:
   - name: my-dataset
     default_caption: ""
@@ -245,7 +246,7 @@ python train.py status <job_id>
 
 ### Policy
 
-- **Base trains, Turbo samples.** `Tongyi-MAI/Z-Image-Turbo` cannot be `main_transformer`. Omit `sampling_transformer` to sample from the same Base weights; set it to Turbo for distilled previews.
+- **Base trains, Turbo samples.** `Tongyi-MAI/Z-Image-Turbo` cannot be `model.main_transformer`. Omit `model.sampling_transformer` to sample from the same Base weights; set it to Turbo for distilled previews.
 - **FP8 training** uses TorchAO `convert_to_float8_training` on the main transformer (not inference `apply_quantization`). If the GPU is not FP8-capable (needs Ada 8.9+ / Blackwell), the run falls back to **BF16**.
 - **Warm start** loads the latest complete LoRA checkpoint and builds a **new** optimizer. Checkpoints do not store optimizer state. There is no `init_adapter` field.
 - **Immediate Stop** does not write a checkpoint.

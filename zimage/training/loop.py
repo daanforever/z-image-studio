@@ -56,6 +56,7 @@ from zimage.training.modeling import (
     ComponentLoaders,
     TrainingModelComponents,
     TrainingModelLifecycle,
+    _place_trainable_adapter,
     load_training_components,
     setup_main_transformer,
 )
@@ -319,7 +320,8 @@ def cache_config_from_components(
     job: Mapping[str, Any],
     components: TrainingModelComponents,
 ) -> CacheConfig:
-    revision = job.get("main_transformer", {}).get("revision")
+    main = (job.get("model") or {}).get("main_transformer") or {}
+    revision = main.get("revision")
     if not isinstance(revision, str) or not revision.strip():
         revision = _first_text(
             getattr(components.main_transformer, "revision", None),
@@ -327,7 +329,7 @@ def cache_config_from_components(
             _as_mapping(getattr(components.main_transformer, "config", None)).get(
                 "_commit_hash"
             ),
-            job.get("main_transformer", {}).get("path"),
+            main.get("path"),
             "local",
         )
     return CacheConfig(
@@ -393,6 +395,7 @@ def _build_runtime(
             injected,
             job=job,
         )
+    _place_trainable_adapter(transformer, setup.adapter_name, training_device)
     optimizer = _make_optimizer(transformer, job, injected)
     if accelerator is None:
         accelerator = injected.get("accelerator")
@@ -623,9 +626,11 @@ def _write_checkpoint_then_sample(
     metadata = NativeAdapterMetadata(
         adapter_name=adapter_name,
         base_model_name_or_path=str(
-            runtime["config"]["main_transformer"]["path"]
+            runtime["config"]["model"]["main_transformer"]["path"]
         ),
-        base_model_revision=runtime["config"]["main_transformer"].get("revision"),
+        base_model_revision=runtime["config"]["model"]["main_transformer"].get(
+            "revision"
+        ),
         peft_config={
             "r": runtime["config"]["lora"]["rank"],
             "lora_alpha": runtime["config"]["lora"]["alpha"],
@@ -1295,7 +1300,7 @@ def _validate_warm_start_metadata(
     parsed = _coerce_warm_start_metadata(metadata)
     peft = parsed.peft_config
     lora = job.get("lora") or {}
-    main = job.get("main_transformer") or {}
+    main = (job.get("model") or {}).get("main_transformer") or {}
     job_path = str(main.get("path") or "")
     job_revision = main.get("revision")
     mismatches: list[str] = []

@@ -109,13 +109,16 @@ class MainTransformerSetup:
 def resolve_model_sources(job: Mapping[str, Any]) -> ModelSources:
     """Resolve source blocks, making an omitted sampler fall back to main."""
 
-    main = _parse_source(job.get("main_transformer"), "main_transformer")
+    model = job.get("model")
+    if not isinstance(model, Mapping):
+        model = {}
+    main = _parse_source(model.get("main_transformer"), "model.main_transformer")
     reject_turbo_main_source(main)
-    sampling_raw = job.get("sampling_transformer")
+    sampling_raw = model.get("sampling_transformer")
     sampling = (
         main
         if sampling_raw is None
-        else _parse_source(sampling_raw, "sampling_transformer")
+        else _parse_source(sampling_raw, "model.sampling_transformer")
     )
     return ModelSources(main=main, sampling=sampling)
 
@@ -232,11 +235,11 @@ def setup_main_transformer(
     float8_config_factory: Callable[..., Any] | None = None,
     lora_config_factory: Callable[..., Any] | None = None,
 ) -> MainTransformerSetup:
-    """Freeze, place, optionally FP8-convert, add the PEFT adapter, then BF16-cast it.
+    """Freeze, place, optionally FP8-convert, add the PEFT adapter, then place it.
 
     Official order: freeze → device → FP8 conversion/filter → gradient
-    checkpointing → add adapter → BF16 adapter cast. Accelerate preparation
-    stays in the optimizer-loop layer.
+    checkpointing → add adapter → place LoRA (device + BF16) → validate.
+    Accelerate preparation stays in the optimizer-loop layer.
     """
 
     requested = str(precision).strip().lower()
@@ -291,7 +294,7 @@ def setup_main_transformer(
         target_modules=list(lora["targets"]),
     )
     transformer.add_adapter(lora_config, adapter_name=adapter_name)
-    _cast_trainable_adapter_to_bfloat16(transformer, adapter_name)
+    _place_trainable_adapter(transformer, adapter_name, device)
     _validate_trainable_adapter_contract(transformer, adapter_name, device)
 
     return MainTransformerSetup(
@@ -674,13 +677,24 @@ class TrainingModelLifecycle:
         return self.components.tokenizer, self.components.text_encoder
 
 
-def _cast_trainable_adapter_to_bfloat16(transformer: Any, adapter_name: str) -> None:
-    """Cast trainable PEFT LoRA params of ``adapter_name`` to BF16 in place."""
+def _place_trainable_adapter(
+    transformer: Any,
+    adapter_name: str,
+    device: str | torch.device,
+) -> None:
+    """Move trainable PEFT LoRA params of ``adapter_name`` to ``device`` as BF16.
 
+    Empty iterators are a no-op. Meta tensors are left untouched so the
+    contract check can fail closed without materializing them.
+    """
+
+    target = torch.device(device)
     for _name, parameter in _iter_trainable_adapter_parameters(
         transformer, adapter_name
     ):
-        parameter.data = parameter.data.to(dtype=torch.bfloat16)
+        if parameter.device.type == "meta":
+            continue
+        parameter.data = parameter.data.to(device=target, dtype=torch.bfloat16)
 
 
 def _validate_trainable_adapter_contract(

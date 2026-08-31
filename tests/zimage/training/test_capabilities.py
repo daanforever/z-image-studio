@@ -367,6 +367,55 @@ def test_main_training_transformer_uses_official_fp8_setup_order(monkeypatch):
             torch.cuda.empty_cache()
 
 
+def test_setup_places_cpu_lora_onto_requested_cuda_device():
+    """PEFT often allocates new LoRA tensors on CPU; setup must move only those."""
+
+    if not torch.cuda.is_available():
+        pytest.skip("tiny-CUDA LoRA placement requires CUDA")
+
+    transformer = None
+    try:
+        transformer = TinyTransformer().to(dtype=torch.bfloat16)
+        original_add = transformer.add_adapter
+
+        def add_adapter_then_park_cpu(config, adapter_name="default"):
+            result = original_add(config, adapter_name=adapter_name)
+            for _name, parameter in transformer.named_parameters():
+                if parameter.requires_grad:
+                    parameter.data = parameter.data.to(device="cpu")
+            return result
+
+        transformer.add_adapter = add_adapter_then_park_cpu
+        setup = setup_main_transformer(
+            transformer,
+            precision="bf16",
+            fp8_capable=False,
+            lora={
+                "rank": 2,
+                "alpha": 2,
+                "dropout": 0.0,
+                "targets": ["to_q"],
+            },
+            gradient_checkpointing=False,
+            device="cuda",
+            adapter_name="training_adapter",
+        )
+        transformer = setup.transformer
+        _assert_trainable_lora_bf16_cuda(transformer)
+        assert _adapter_names(transformer) == {"training_adapter"}
+        assert transformer.to_q.get_base_layer().weight.device.type == "cuda"
+        assert transformer.proj_out.weight.device.type == "cuda"
+        assert transformer.proj_out.weight.requires_grad is False
+        assert transformer.incompatible.weight.device.type == "cuda"
+        assert transformer.incompatible.weight.requires_grad is False
+    finally:
+        del transformer
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+
 def test_bf16_sampling_transformer_replaces_unfused_adapter_without_stale_state():
     """CPU adapter-replacement contract; does not execute CUDA."""
 

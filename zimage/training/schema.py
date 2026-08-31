@@ -32,8 +32,8 @@ SCHEDULER_NAME_CHOICES = frozenset({"constant"})
 # Dotted paths that must not change after a job's first cache / adapter write.
 IMMUTABLE_JOB_FIELDS: frozenset[str] = frozenset(
     {
-        "main_transformer.path",
-        "main_transformer.revision",
+        "model.main_transformer.path",
+        "model.main_transformer.revision",
         "lora.rank",
         "lora.alpha",
         "lora.targets",
@@ -66,7 +66,7 @@ IMMUTABLE_MVP_FIELDS: frozenset[str] = (
 REBUILD_REQUIRED_JOB_FIELDS: frozenset[str] = frozenset(
     {
         "datasets",
-        "sampling_transformer",
+        "model.sampling_transformer",
         "precision",
         "gradient_checkpointing",
         "lora.dropout",
@@ -77,8 +77,7 @@ REBUILD_REQUIRED_JOB_FIELDS: frozenset[str] = frozenset(
 JOB_TOP_LEVEL_KEYS = frozenset(
     {
         "job_name",
-        "main_transformer",
-        "sampling_transformer",
+        "model",
         "datasets",
         "lora",
         "precision",
@@ -98,6 +97,7 @@ JOB_TOP_LEVEL_KEYS = frozenset(
     }
 )
 
+MODEL_KEYS = frozenset({"main_transformer", "sampling_transformer"})
 TRANSFORMER_KEYS = frozenset({"path", "revision"})
 DATASET_ITEM_KEYS = frozenset({"name", "default_caption"})
 LORA_KEYS = frozenset({"rank", "alpha", "dropout", "targets"})
@@ -263,13 +263,15 @@ def job_create_template() -> dict[str, Any]:
     """Full default job document used by Create (empty datasets, one sample)."""
     return {
         "job_name": "Мой стиль",
-        "main_transformer": {
-            "path": KNOWN_MAIN_SOURCE,
-            "revision": None,
-        },
-        "sampling_transformer": {
-            "path": KNOWN_TURBO_SOURCE,
-            "revision": None,
+        "model": {
+            "main_transformer": {
+                "path": KNOWN_MAIN_SOURCE,
+                "revision": None,
+            },
+            "sampling_transformer": {
+                "path": KNOWN_TURBO_SOURCE,
+                "revision": None,
+            },
         },
         "datasets": [],
         "lora": {
@@ -333,24 +335,40 @@ def load_job_document(path: str | Path) -> dict[str, Any]:
 def validate_job_document(raw: Any) -> dict[str, Any]:
     """Validate job YAML structure and types. Empty ``datasets`` is allowed."""
     data = _require_mapping(raw, "job")
+    legacy = [
+        key for key in ("main_transformer", "sampling_transformer") if key in data
+    ]
+    if legacy:
+        raise TrainingConfigError(
+            f"{' and '.join(legacy)} must be nested under model"
+        )
     _reject_unknown(data, JOB_TOP_LEVEL_KEYS, "job")
     defaults = job_create_template()
 
     if "job_name" not in data:
         raise TrainingConfigError("job.job_name is required")
-    if "main_transformer" not in data:
-        raise TrainingConfigError("job.main_transformer is required")
+    if "model" not in data:
+        raise TrainingConfigError("job.model is required")
+
+    model = _require_mapping(data["model"], "model")
+    _reject_unknown(model, MODEL_KEYS, "model")
+    if "main_transformer" not in model:
+        raise TrainingConfigError("model.main_transformer is required")
+
+    model_out: dict[str, Any] = {
+        "main_transformer": _validate_transformer(
+            model["main_transformer"], "model.main_transformer"
+        ),
+    }
+    if "sampling_transformer" in model:
+        model_out["sampling_transformer"] = _validate_transformer(
+            model["sampling_transformer"], "model.sampling_transformer"
+        )
 
     out: dict[str, Any] = {
         "job_name": _require_nonempty_str(data.get("job_name"), "job_name"),
-        "main_transformer": _validate_transformer(
-            data["main_transformer"], "main_transformer"
-        ),
+        "model": model_out,
     }
-    if "sampling_transformer" in data:
-        out["sampling_transformer"] = _validate_transformer(
-            data["sampling_transformer"], "sampling_transformer"
-        )
 
     out["datasets"] = _validate_datasets(_present(data, "datasets", defaults["datasets"]))
     out["lora"] = _validate_lora(_present(data, "lora", defaults["lora"]))
@@ -484,9 +502,9 @@ def _validate_transformer(raw: Any, label: str) -> dict[str, Any]:
     if "path" not in data:
         raise TrainingConfigError(f"{label}.path is required")
     path = _require_nonempty_str(data.get("path"), f"{label}.path")
-    if label == "main_transformer" and _is_turbo_source(path):
+    if label == "model.main_transformer" and _is_turbo_source(path):
         raise TrainingConfigError(
-            f"{KNOWN_TURBO_SOURCE} cannot be used as main_transformer"
+            f"{KNOWN_TURBO_SOURCE} cannot be used as {label}"
         )
     revision: str | None
     if "revision" not in data or data.get("revision") is None:

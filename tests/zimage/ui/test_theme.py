@@ -81,3 +81,50 @@ def test_training_log_delta_helper_in_custom_js():
     assert "scrollTop" in CUSTOM_JS
     assert "scrollHeight" in CUSTOM_JS
     assert "MutationObserver" not in CUSTOM_JS
+
+
+def test_training_toolbar_flex_and_button_hints():
+    toolbar_at = CUSTOM_CSS.index("#studio-training-toolbar {")
+    job_at = CUSTOM_CSS.index("#studio-training-job {")
+    run_at = CUSTOM_CSS.index("#studio-training-run {")
+    save_at = CUSTOM_CSS.index("#studio-training-save {")
+    toolbar = CUSTOM_CSS[toolbar_at : CUSTOM_CSS.index("}", toolbar_at) + 1]
+    job = CUSTOM_CSS[job_at : CUSTOM_CSS.index("}", job_at) + 1]
+    run = CUSTOM_CSS[run_at : CUSTOM_CSS.index("}", run_at) + 1]
+    save = CUSTOM_CSS[save_at : CUSTOM_CSS.index("}", save_at) + 1]
+    assert "display: flex" in toolbar
+    assert "flex-wrap: nowrap" in toolbar
+    assert "justify-content: space-between" in toolbar
+    assert "align-items: flex-start" in toolbar
+    assert "width: 100%" in toolbar
+    assert "flex: 1 1 auto" in job
+    assert "min-width: 0" in job
+    assert "flex: 0 0 auto" in run
+    assert "justify-content: flex-end" in run
+    assert "width: auto !important" in save
+    section = CUSTOM_CSS[toolbar_at:]
+    assert ":focus-within::after" in section
+    assert "pointer-events: none" in section
+    assert section.count('content: "') == 4
+    for elem_id in (
+        "studio-training-create-open",
+        "studio-training-save",
+        "studio-training-start",
+        "studio-training-stop",
+    ):
+        assert f"#{elem_id}:hover::after" in section
+        assert f"#{elem_id}:focus-within::after" in section
+        content_hits = 0
+        pos = 0
+        while True:
+            idx = section.find("content:", pos)
+            if idx == -1:
+                break
+            brace = section.rfind("{", 0, idx)
+            selector_start = section.rfind("}", 0, brace) + 1
+            selector = section[selector_start:brace]
+            if f"#{elem_id}" in selector:
+                content_hits += 1
+            pos = idx + 1
+        assert content_hits == 1, elem_id
+    assert "MutationObserver" not in CUSTOM_JS

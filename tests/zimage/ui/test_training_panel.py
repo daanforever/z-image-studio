@@ -218,7 +218,9 @@ def test_panel_has_required_controls():
     assert "studio-training-job-selector" in ids
     assert "studio-training-yaml-accordion" in ids
     assert "studio-training-yaml" in ids
-    assert "studio-training-validate" in ids
+    assert "studio-training-validate" not in ids
+    assert "studio-training-toolbar" in ids
+    assert "studio-training-run" in ids
     assert "studio-training-save" in ids
     assert "studio-training-start" in ids
     assert "studio-training-stop" in ids
@@ -238,10 +240,12 @@ def test_panel_has_required_controls():
     assert panel.yaml_accordion.open is False
     assert panel.yaml_accordion.elem_id == "studio-training-yaml-accordion"
     assert panel.yaml_editor.show_label is False
-    assert panel.validate_btn.value == "Validate"
+    assert not hasattr(panel, "validate_btn")
     assert panel.save_btn.value == "Save"
     assert panel.start_btn.value == "Start"
+    assert panel.start_btn.visible is True
     assert panel.stop_btn.value == "Stop"
+    assert panel.stop_btn.visible is False
     assert isinstance(panel.yaml_editor, gr.Textbox)
     assert panel.yaml_editor.elem_id == "studio-training-yaml"
     assert isinstance(panel.preview_gallery, gr.Gallery)
@@ -267,7 +271,6 @@ def test_yaml_editor_inside_collapsed_config_accordion():
     demo, panel = _construct()
     assert panel.yaml_accordion in _ancestor_chain(panel.yaml_editor)
     for btn in (
-        panel.validate_btn,
         panel.save_btn,
         panel.start_btn,
         panel.stop_btn,
@@ -275,6 +278,9 @@ def test_yaml_editor_inside_collapsed_config_accordion():
         panel.job_selector,
     ):
         assert panel.yaml_accordion not in _ancestor_chain(btn)
+    toolbar = _block_by_elem_id(demo, "studio-training-toolbar")
+    assert toolbar in _ancestor_chain(panel.start_btn)
+    assert toolbar in _ancestor_chain(panel.stop_btn)
 
 
 def test_yaml_editor_is_raw_textbox_not_sampling_form():
@@ -408,24 +414,84 @@ def test_start_stop_validate_call_injected_callbacks_only():
     assert "rewrite_job" not in recorder.kinds()
 
 
-def test_start_stop_validate_events_are_wired():
+def test_start_stop_events_are_wired():
     recorder = RecordingCallbacks()
     demo, panel = _construct(recorder)
-    validate_fn = _fns_named(demo, "on_validate")[0]
     start_fn = _fns_named(demo, "on_start")[0]
     stop_fn = _fns_named(demo, "on_stop")[0]
+    assert _fns_named(demo, "on_validate") == []
 
-    assert validate_fn.inputs[0] is panel.job_id
-    assert validate_fn.inputs[1] is panel.yaml_editor
     assert start_fn.inputs[0] is panel.job_id
     assert stop_fn.inputs[0] is panel.job_id
     assert isinstance(panel.job_id, gr.State)
+    assert list(start_fn.outputs) == [
+        panel.operational_state,
+        panel.preview_gallery,
+        panel.status_state,
+        panel.message,
+        panel.start_btn,
+        panel.stop_btn,
+    ]
+    assert list(stop_fn.outputs) == list(start_fn.outputs)
 
     recorder.calls.clear()
-    validate_fn.fn("demo-job", CANONICAL_YAML)
     start_fn.fn("demo-job")
     stop_fn.fn("demo-job")
-    assert recorder.kinds() == ["validate_yaml", "start_job", "stop_job"]
+    assert recorder.kinds() == ["start_job", "stop_job"]
+
+
+def test_start_stop_visibility_follows_running():
+    recorder = RecordingCallbacks(status="stopped")
+    demo, panel = _construct(recorder)
+    create_fn = _fns_named(demo, "on_create_or_open")[0]
+    select_fn = _fns_named(demo, "on_select_job")[0]
+    start_fn = _fns_named(demo, "on_start")[0]
+    stop_fn = _fns_named(demo, "on_stop")[0]
+    poll_fn = _fns_named(demo, "on_poll")[0]
+    idle_statuses = ("", "stopped", "completed", "failed")
+
+    def assert_idle(start_update, stop_update):
+        assert _as_update_dict(start_update).get("visible") is True
+        assert _as_update_dict(stop_update).get("visible") is False
+
+    def assert_running(start_update, stop_update):
+        assert _as_update_dict(start_update).get("visible") is False
+        assert _as_update_dict(stop_update).get("visible") is True
+
+    empty_load = select_fn.fn("", 0)
+    assert len(empty_load) == 13
+    assert_idle(empty_load[11], empty_load[12])
+
+    for status in idle_statuses:
+        recorder.status = status
+        loaded = create_fn.fn("demo")
+        assert_idle(loaded[11], loaded[12])
+
+    recorder.status = "running"
+    loaded_running = create_fn.fn("demo")
+    assert_running(loaded_running[11], loaded_running[12])
+
+    recorder.status = "stopped"
+    started = start_fn.fn("demo-job")
+    assert len(started) == 6
+    assert_running(started[4], started[5])
+
+    stopped = stop_fn.fn("demo-job")
+    assert len(stopped) == 6
+    assert_idle(stopped[4], stopped[5])
+
+    assert len(poll_fn.outputs) == 9
+    assert poll_fn.outputs[7] is panel.start_btn
+    assert poll_fn.outputs[8] is panel.stop_btn
+    for status in idle_statuses:
+        recorder.status = status
+        polled = poll_fn.fn("demo-job", 0)
+        assert len(polled) == 9
+        assert_idle(polled[7], polled[8])
+
+    recorder.status = "running"
+    polled_running = poll_fn.fn("demo-job", 0)
+    assert_running(polled_running[7], polled_running[8])
 
 
 def test_operational_state_has_no_metrics_history():
@@ -481,7 +547,7 @@ def test_selector_custom_name_skips_load_and_create():
     select_fn = _fns_named(demo, "on_select_job")[0]
     recorder.calls.clear()
     outputs = select_fn.fn("Brand new style")
-    assert len(outputs) == 11
+    assert len(outputs) == 13
     for item in outputs:
         assert _is_skip(item)
     assert "load_job" not in recorder.kinds()
@@ -737,9 +803,12 @@ def test_create_and_load_reset_offset_and_bump_generation():
     demo, panel = _construct(recorder)
     create_fn = _fns_named(demo, "on_create_or_open")[0]
     select_fn = _fns_named(demo, "on_select_job")[0]
+    assert len(create_fn.outputs) == 13
     assert create_fn.outputs[8] is panel.log_offset
     assert create_fn.outputs[9] is panel.log_generation
     assert create_fn.outputs[10] is panel.log_delta
+    assert create_fn.outputs[11] is panel.start_btn
+    assert create_fn.outputs[12] is panel.stop_btn
     assert panel.job_log not in create_fn.outputs
 
     first = create_fn.fn("job-a", 0)
@@ -797,6 +866,9 @@ def test_on_poll_returns_delta_not_full_log_and_calls_poll_log():
     cas_fn = _fns_named(demo, "commit_training_log")[0]
     assert poll_fn.inputs[0] is panel.job_id
     assert poll_fn.inputs[1] is panel.log_offset
+    assert len(poll_fn.outputs) == 9
+    assert poll_fn.outputs[7] is panel.start_btn
+    assert poll_fn.outputs[8] is panel.stop_btn
     assert panel.job_log not in poll_fn.outputs
     assert panel.log_delta not in poll_fn.outputs
     assert cas_fn.outputs[0] is panel.log_offset
@@ -807,14 +879,23 @@ def test_on_poll_returns_delta_not_full_log_and_calls_poll_log():
     outputs = poll_fn.fn("demo-job", 4)
     assert recorder.kinds() == ["poll_state", "poll_log"]
     assert ("poll_log", "demo-job", 4) in recorder.calls
+    assert len(outputs) == 9
     assert outputs[1] == ["jobs/demo-job/previews/step-1.png"]
     assert outputs[3] == "demo-job"
     assert outputs[4] == "new line\n"
     assert outputs[5] == 4 + len("new line\n")
     assert outputs[6] is False
+    for item in outputs[:7]:
+        assert "visible" not in _as_update_dict(item)
+    assert _as_update_dict(outputs[7]).get("visible") is True
+    assert _as_update_dict(outputs[8]).get("visible") is False
     joined = " ".join(str(item) for item in outputs)
     assert "new line\nnew line\n" not in joined
     assert panel.job_log.value == JOB_LOG_HTML
+
+    empty = poll_fn.fn("", 4)
+    assert len(empty) == 9
+    assert all(_is_skip(item) for item in empty)
 
     js_fns = [
         fn
@@ -894,7 +975,7 @@ def _as_update_dict(value) -> dict:
         return dict(value)
     return {
         key: getattr(value, key)
-        for key in ("choices", "value", "allow_custom_value", "__type__")
+        for key in ("choices", "value", "allow_custom_value", "visible", "__type__")
         if hasattr(value, key)
     }
 

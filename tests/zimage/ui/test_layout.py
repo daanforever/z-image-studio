@@ -368,6 +368,10 @@ def test_generate_and_training_tabs(monkeypatch):
     assert "studio-tab-training" in ids
     assert "generate-btn" in ids
     assert "studio-training-panel" in ids
+    assert "studio-training-validate" not in ids
+    assert "studio-training-toolbar" in ids
+    assert "studio-training-run" in ids
+    assert "studio-training-save" in ids
     assert "studio-training-start" in ids
     assert "studio-training-stop" in ids
     labels = []

@@ -203,6 +203,87 @@ pre.studio-training-job-log-pre {
     max-height: 30rem;
     line-height: 1.45;
 }
+#studio-training-toolbar {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: flex-start !important;
+    justify-content: space-between !important;
+    width: 100%;
+    overflow: visible;
+}
+#studio-training-job {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    overflow: visible;
+}
+#studio-training-run {
+    display: flex !important;
+    flex: 0 0 auto !important;
+    justify-content: flex-end !important;
+    width: auto !important;
+    overflow: visible;
+}
+#studio-training-save {
+    flex: 0 0 auto !important;
+    width: auto !important;
+}
+#studio-training-create-open,
+#studio-training-save,
+#studio-training-start,
+#studio-training-stop {
+    position: relative;
+    overflow: visible;
+}
+#studio-training-create-open:hover::after,
+#studio-training-create-open:focus-within::after,
+#studio-training-save:hover::after,
+#studio-training-save:focus-within::after,
+#studio-training-start:hover::after,
+#studio-training-start:focus-within::after,
+#studio-training-stop:hover::after,
+#studio-training-stop:focus-within::after {
+    pointer-events: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 30;
+    box-sizing: border-box;
+    margin-top: 0.35rem;
+    max-width: 20rem;
+    padding: 0.45rem 0.65rem;
+    border: 1px solid var(--border-color-primary);
+    border-radius: 0.375rem;
+    background: var(--block-background-fill);
+    color: var(--body-text-color);
+    font-size: 0.75rem;
+    font-weight: 400;
+    line-height: 1.35;
+    text-align: left;
+    white-space: normal;
+}
+#studio-training-create-open:hover::after,
+#studio-training-create-open:focus-within::after {
+    content: "Create a new job from the Job name, or open that slug if it already exists.";
+}
+#studio-training-save:hover::after,
+#studio-training-save:focus-within::after {
+    content: "Save config.yaml. If the job is running, queue the update.";
+}
+#studio-training-start:hover::after,
+#studio-training-start:focus-within::after {
+    content: "Start training for the selected job. Stops Generate first if it is running.";
+}
+#studio-training-stop:hover::after,
+#studio-training-stop:focus-within::after {
+    content: "Stop the running training job.";
+}
+#studio-training-start:hover::after,
+#studio-training-start:focus-within::after,
+#studio-training-stop:hover::after,
+#studio-training-stop:focus-within::after {
+    left: auto;
+    right: 0;
+}
 """
 
 # Gradio Gallery preview click cycles prev/next; map it onto the existing fullscreen control.

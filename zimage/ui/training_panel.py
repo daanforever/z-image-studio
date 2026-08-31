@@ -88,7 +88,6 @@ class TrainingPanel:
     job_selector: gr.Dropdown
     yaml_accordion: gr.Accordion
     yaml_editor: gr.Textbox
-    validate_btn: gr.Button
     save_btn: gr.Button
     start_btn: gr.Button
     stop_btn: gr.Button
@@ -429,25 +428,41 @@ def build_training_panel(
         pending_chunk = gr.State("")
         pending_next_offset = gr.State(0)
         pending_reset = gr.State(False)
+        with gr.Row(elem_id="studio-training-toolbar"):
+            with gr.Row(elem_id="studio-training-job"):
+                job_selector = gr.Dropdown(
+                    choices=job_choices,
+                    value=None,
+                    label="Job",
+                    info=(
+                        "Select an existing job, or type a new name and click "
+                        "Create. Existing jobs open without rewriting files."
+                    ),
+                    allow_custom_value=True,
+                    elem_id="studio-training-job-selector",
+                )
+                create_open_btn = gr.Button(
+                    "Create",
+                    variant="primary",
+                    elem_id="studio-training-create-open",
+                )
+            with gr.Row(elem_id="studio-training-run"):
+                start_btn = gr.Button(
+                    "Start",
+                    variant="primary",
+                    elem_id="studio-training-start",
+                    size="sm",
+                    visible=True,
+                )
+                stop_btn = gr.Button(
+                    "Stop",
+                    variant="stop",
+                    elem_id="studio-training-stop",
+                    size="sm",
+                    visible=False,
+                )
         with gr.Row():
             with gr.Column(scale=5):
-                with gr.Row():
-                    job_selector = gr.Dropdown(
-                        choices=job_choices,
-                        value=None,
-                        label="Job",
-                        info=(
-                            "Select an existing job, or type a new name and click "
-                            "Create. Existing jobs open without rewriting files."
-                        ),
-                        allow_custom_value=True,
-                        elem_id="studio-training-job-selector",
-                    )
-                    create_open_btn = gr.Button(
-                        "Create",
-                        variant="primary",
-                        elem_id="studio-training-create-open",
-                    )
                 with gr.Accordion(
                     "config.yaml",
                     open=False,
@@ -467,29 +482,11 @@ def build_training_panel(
                         elem_id="studio-training-yaml",
                         elem_classes=["studio-training-yaml"],
                     )
-                with gr.Row():
-                    validate_btn = gr.Button(
-                        "Validate",
-                        elem_id="studio-training-validate",
-                        size="sm",
-                    )
-                    save_btn = gr.Button(
-                        "Save",
-                        elem_id="studio-training-save",
-                        size="sm",
-                    )
-                    start_btn = gr.Button(
-                        "Start",
-                        variant="primary",
-                        elem_id="studio-training-start",
-                        size="sm",
-                    )
-                    stop_btn = gr.Button(
-                        "Stop",
-                        variant="stop",
-                        elem_id="studio-training-stop",
-                        size="sm",
-                    )
+                save_btn = gr.Button(
+                    "Save",
+                    elem_id="studio-training-save",
+                    size="sm",
+                )
             with gr.Column(scale=6):
                 operational_state = gr.Markdown(
                     format_operational_state({}),
@@ -536,6 +533,8 @@ def build_training_panel(
         log_offset,
         log_generation,
         log_delta,
+        start_btn,
+        stop_btn,
     ]
 
     def on_create_or_open(name, generation=0):
@@ -561,10 +560,6 @@ def build_training_panel(
             log_generation=_next_log_generation(generation),
         )
 
-    def on_validate(current_id, text):
-        data = handle_validate(current_id, text, callbacks=resolved)
-        return data.message
-
     def on_save(current_id, text, status):
         data = handle_save(current_id, text, status, callbacks=resolved)
         return _save_outputs(data)
@@ -581,7 +576,8 @@ def build_training_panel(
         data = handle_poll(current_id, callbacks=resolved)
         log = handle_poll_log(current_id, offset, callbacks=resolved)
         if not data.job_id:
-            return (gr.skip(),) * 7
+            return (gr.skip(),) * 9
+        start_vis, stop_vis = _run_button_visibility(data.state)
         return (
             format_operational_state(data.state),
             list(data.previews or ()),
@@ -592,6 +588,8 @@ def build_training_panel(
             log["chunk"],
             log["next_offset"],
             log["reset"],
+            start_vis,
+            stop_vis,
         )
 
     create_event = create_open_btn.click(
@@ -608,12 +606,6 @@ def build_training_panel(
         show_progress="minimal",
     )
     select_event.then(None, inputs=[log_delta], js=APPLY_TRAINING_LOG_JS)
-    validate_btn.click(
-        on_validate,
-        inputs=[job_id, yaml_editor],
-        outputs=[message],
-        show_progress="minimal",
-    )
     save_btn.click(
         on_save,
         inputs=[job_id, yaml_editor, status_state],
@@ -629,13 +621,27 @@ def build_training_panel(
     start_btn.click(
         on_start,
         inputs=[job_id],
-        outputs=[operational_state, preview_gallery, status_state, message],
+        outputs=[
+            operational_state,
+            preview_gallery,
+            status_state,
+            message,
+            start_btn,
+            stop_btn,
+        ],
         show_progress="minimal",
     )
     stop_btn.click(
         on_stop,
         inputs=[job_id],
-        outputs=[operational_state, preview_gallery, status_state, message],
+        outputs=[
+            operational_state,
+            preview_gallery,
+            status_state,
+            message,
+            start_btn,
+            stop_btn,
+        ],
         show_progress="minimal",
     )
     poll_event = poll_timer.tick(
@@ -649,6 +655,8 @@ def build_training_panel(
             pending_chunk,
             pending_next_offset,
             pending_reset,
+            start_btn,
+            stop_btn,
         ],
     )
     poll_event.then(
@@ -675,7 +683,6 @@ def build_training_panel(
         job_selector=job_selector,
         yaml_accordion=yaml_accordion,
         yaml_editor=yaml_editor,
-        validate_btn=validate_btn,
         save_btn=save_btn,
         start_btn=start_btn,
         stop_btn=stop_btn,
@@ -723,24 +730,13 @@ def _load_outputs(
         -1,
         generation,
         _log_delta_payload("", True, generation),
+        *_run_button_visibility(data.state),
     )
 
 
 def _skip_load_outputs():
     """Leave panel outputs unchanged (e.g. typed custom name not yet Create'd)."""
-    return (
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-    )
+    return (gr.skip(),) * 13
 
 
 def _save_outputs(data: JobPanelData):
@@ -754,12 +750,20 @@ def _save_outputs(data: JobPanelData):
 
 def _action_outputs(data: JobPanelData):
     previews = list(data.previews) if data.previews is not None else gr.skip()
+    start_vis, stop_vis = _run_button_visibility(data.state)
     return (
         format_operational_state(data.state),
         previews,
         _status_of(data.state),
         data.message,
+        start_vis,
+        stop_vis,
     )
+
+
+def _run_button_visibility(state: Mapping[str, Any] | None):
+    running = is_active_status(_status_of(state))
+    return gr.update(visible=not running), gr.update(visible=running)
 
 
 def _job_payload(payload: Any, *, fallback_id: str) -> JobPanelData:

@@ -210,7 +210,7 @@ datasets/{name}/
     photo.png.safetensors
 ```
 
-Caption is the sidecar `.txt` when it is non-empty, otherwise `default_caption`. A sample with neither is rejected. Images must already be a multiple of 16 on each side and at most **1024×1024** (area). There is no resize, crop, or pad. `.cache/` holds versioned safetensors (latent + prompt embedding); files under `.cache/` are not treated as dataset images.
+Caption is the sidecar `.txt` when it is non-empty, otherwise `default_caption`. A sample with neither is rejected. Images are center-cropped so each side is a multiple of 16; there is no resize or pad and no 1024×1024 area limit. VRAM is the practical size limit. `.cache/` holds versioned safetensors (latent + prompt embedding); files under `.cache/` are not treated as dataset images.
 
 ### Job layout
 

@@ -2,7 +2,8 @@
 
 This module deliberately owns no model objects.  It turns configured dataset
 directories into a flat, deterministic list of samples and prepares images for
-an injected cache encoder without resizing them.
+an injected cache encoder.  Geometry is center-crop-to-multiple only: no pad,
+downscale, or resize.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ from typing import Any, Iterable, Mapping
 from PIL import Image, ImageOps
 
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
-MAX_IMAGE_PIXELS = 1024 * 1024
 IMAGE_SIZE_MULTIPLE = 16
 
 
@@ -121,16 +121,39 @@ def discover_dataset_samples(
     )
 
 
+def center_crop_box(
+    width: int,
+    height: int,
+    *,
+    size_multiple: int = IMAGE_SIZE_MULTIPLE,
+) -> tuple[int, int, int, int]:
+    """Return a PIL box that center-crops each side to a ``size_multiple``.
+
+    Extra remainder pixels fall on the right and bottom.  Raises
+    :class:`DatasetError` if either cropped side would be smaller than
+    ``size_multiple``.
+    """
+
+    new_width = width - (width % size_multiple)
+    new_height = height - (height % size_multiple)
+    if new_width < size_multiple or new_height < size_multiple:
+        raise DatasetError(
+            f"image sides must be at least {size_multiple}px ({width}x{height})"
+        )
+    left = (width - new_width) // 2
+    top = (height - new_height) // 2
+    return (left, top, left + new_width, top + new_height)
+
+
 def load_training_image(
     image_path: str | Path,
     *,
-    max_pixels: int = MAX_IMAGE_PIXELS,
     size_multiple: int = IMAGE_SIZE_MULTIPLE,
 ) -> Image.Image:
-    """Load, orient, validate, white-composite, and return an RGB image.
+    """Load, orient, white-composite, center-crop, and return an RGB image.
 
-    Validation happens before any encoder can be called.  No geometric
-    transformation (resize, crop, or pad) is performed.
+    Geometry is center-crop-to-multiple only: no pad, downscale, or resize.
+    Validation runs on the cropped size only, before any encoder can be called.
     """
 
     path = Path(image_path)
@@ -138,15 +161,28 @@ def load_training_image(
         with Image.open(path) as source:
             oriented = ImageOps.exif_transpose(source)
             oriented.load()
-            width, height = oriented.size
+            rgb = _composite_on_white(oriented)
+            width, height = rgb.size
+            try:
+                box = center_crop_box(
+                    width,
+                    height,
+                    size_multiple=size_multiple,
+                )
+            except DatasetError:
+                raise DatasetError(
+                    f"image sides must be at least {size_multiple}px "
+                    f"({width}x{height}): {path}"
+                ) from None
+            cropped = rgb.crop(box)
+            cropped.load()
             validate_image_dimensions(
                 path,
-                width,
-                height,
-                max_pixels=max_pixels,
+                cropped.size[0],
+                cropped.size[1],
                 size_multiple=size_multiple,
             )
-            return _composite_on_white(oriented)
+            return cropped
     except DatasetError:
         raise
     except (OSError, ValueError) as exc:
@@ -158,15 +194,14 @@ def validate_image_dimensions(
     width: int,
     height: int,
     *,
-    max_pixels: int = MAX_IMAGE_PIXELS,
     size_multiple: int = IMAGE_SIZE_MULTIPLE,
 ) -> None:
-    """Enforce the strict no-resize image limits used by the cache encoder."""
+    """Enforce cropped-image limits used by the cache encoder."""
 
     path = Path(image_path)
-    if width * height > max_pixels:
+    if width < size_multiple or height < size_multiple:
         raise DatasetError(
-            f"image exceeds {max_pixels} pixels ({width}x{height}): {path}"
+            f"image sides must be at least {size_multiple}px ({width}x{height}): {path}"
         )
     if width % size_multiple or height % size_multiple:
         raise DatasetError(

@@ -140,7 +140,7 @@ def test_exact_tensors_and_complete_metadata_round_trip(tmp_path):
     assert cached.metadata["preprocessing"] == {
         "alpha_composite": "white",
         "color_mode": "RGB",
-        "crop": None,
+        "crop": "center_to_multiple",
         "exif_orientation": "applied",
         "height": 16,
         "pad": None,
@@ -379,10 +379,10 @@ def test_interrupted_atomic_replacement_keeps_valid_final_file(
     assert load_cache(original.path).metadata == original.metadata
 
 
-def test_invalid_dimensions_fail_before_injected_encoder(tmp_path):
+def test_17x16_encodes_with_cropped_latent_and_crop_token(tmp_path):
     dataset = tmp_path / "dataset"
     dataset.mkdir()
-    image_path = dataset / "invalid.png"
+    image_path = dataset / "odd.png"
     Image.new("RGB", (17, 16)).save(image_path)
     sample = DatasetSample(
         image_path=image_path,
@@ -391,7 +391,33 @@ def test_invalid_dimensions_fail_before_injected_encoder(tmp_path):
     )
     encoder = FakeEncoder()
 
-    with pytest.raises(DatasetError, match="divisible by 16"):
+    cached = prepare_cache_at_job_start(
+        [sample],
+        encoder,
+        _config(),
+        cache_dir=tmp_path / "cache",
+    )[0]
+
+    assert encoder.image_calls == 1
+    assert cached.latent.shape == (16, 2, 2)
+    assert cached.metadata["preprocessing"]["crop"] == "center_to_multiple"
+    assert cached.metadata["preprocessing"]["width"] == 16
+    assert cached.metadata["preprocessing"]["height"] == 16
+
+
+def test_undersized_image_fails_before_injected_encoder(tmp_path):
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    image_path = dataset / "tiny.png"
+    Image.new("RGB", (15, 16)).save(image_path)
+    sample = DatasetSample(
+        image_path=image_path,
+        caption="caption",
+        dataset_path=dataset,
+    )
+    encoder = FakeEncoder()
+
+    with pytest.raises(DatasetError, match="at least"):
         prepare_cache_at_job_start(
             [sample],
             encoder,
@@ -401,6 +427,32 @@ def test_invalid_dimensions_fail_before_injected_encoder(tmp_path):
 
     assert encoder.image_calls == 0
     assert encoder.prompt_calls == 0
+
+
+def test_inspect_cache_treats_crop_none_payload_as_stale(tmp_path):
+    sample = _sample(tmp_path)
+    encoder = FakeEncoder()
+    cached = prepare_cache_at_job_start(
+        [sample],
+        encoder,
+        _config(),
+        cache_dir=tmp_path / "cache",
+    )[0]
+    stale_metadata = dict(cached.metadata)
+    stale_preprocessing = dict(stale_metadata["preprocessing"])
+    stale_preprocessing["crop"] = None
+    stale_metadata["preprocessing"] = stale_preprocessing
+    write_cache_atomic(
+        cached.path,
+        cached.latent,
+        cached.prompt_embedding,
+        stale_metadata,
+    )
+    image = cache_module.load_training_image(sample.image_path)
+    expected = expected_metadata(sample, _config(), image_size=image.size)
+
+    assert expected["preprocessing"]["crop"] == "center_to_multiple"
+    assert inspect_cache(cached.path, expected).state is CacheState.STALE
 
 
 def test_on_before_encode_runs_once_on_stale_and_never_on_valid(tmp_path):

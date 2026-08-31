@@ -40,7 +40,7 @@ DEFAULT_PREPROCESSING: dict[str, Any] = {
     "alpha_composite": "white",
     "color_mode": "RGB",
     "resize": None,
-    "crop": None,
+    "crop": "center_to_multiple",
     "pad": None,
 }
 

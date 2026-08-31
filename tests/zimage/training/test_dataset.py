@@ -7,6 +7,7 @@ from PIL import Image, ImageOps
 
 from zimage.training.dataset import (
     DatasetError,
+    center_crop_box,
     discover_samples,
     load_training_image,
     resolve_dataset_path,
@@ -134,22 +135,59 @@ def test_alpha_is_composited_on_white_and_output_is_rgb(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("size", "message"),
+    ("width", "height", "box"),
     [
-        ((17, 16), "divisible by 16"),
-        ((16, 17), "divisible by 16"),
-        ((1040, 1024), "exceeds"),
+        (17, 16, (0, 0, 16, 16)),
+        (19, 32, (1, 0, 17, 32)),
+        (1280, 853, (0, 2, 1280, 850)),
+        (32, 16, (0, 0, 32, 16)),
     ],
 )
-def test_strict_dimensions_are_rejected_without_transforming(
-    tmp_path,
-    size,
-    message,
-):
-    image_path = _save_image(tmp_path / "invalid.png", size=size)
+def test_center_crop_box_geometry(width, height, box):
+    assert center_crop_box(width, height) == box
 
-    with pytest.raises(DatasetError, match=message):
+
+@pytest.mark.parametrize("size", [(15, 16), (8, 8)])
+def test_center_crop_box_rejects_undersized_sides(size):
+    with pytest.raises(DatasetError, match="at least"):
+        center_crop_box(*size)
+
+
+def test_load_training_image_center_crops_19x32_edge_colors(tmp_path):
+    image_path = tmp_path / "edges.png"
+    source = Image.new("RGB", (19, 32), (10, 20, 30))
+    for y in range(32):
+        source.putpixel((0, y), (255, 0, 0))
+        source.putpixel((1, y), (0, 255, 0))
+        source.putpixel((16, y), (0, 0, 255))
+        source.putpixel((18, y), (255, 255, 0))
+    source.save(image_path)
+
+    loaded = load_training_image(image_path)
+
+    assert loaded.size == (16, 32)
+    assert loaded.getpixel((0, 0)) == (0, 255, 0)
+    assert loaded.getpixel((15, 0)) == (0, 0, 255)
+    assert loaded.tobytes() == source.crop(center_crop_box(19, 32)).tobytes()
+
+
+def test_undersized_image_names_source_size_and_path(tmp_path):
+    image_path = _save_image(tmp_path / "tiny.png", size=(15, 16))
+
+    with pytest.raises(DatasetError, match="at least") as caught:
         load_training_image(image_path)
+
+    message = str(caught.value)
+    assert "15x16" in message
+    assert "tiny.png" in message
+
+
+def test_17x16_is_center_cropped_not_rejected_as_not_divisible(tmp_path):
+    image_path = _save_image(tmp_path / "odd.png", size=(17, 16))
+
+    loaded = load_training_image(image_path)
+
+    assert loaded.size == (16, 16)
 
 
 def test_mvp_rejects_batching_and_accumulation(tmp_path):

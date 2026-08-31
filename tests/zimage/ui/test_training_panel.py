@@ -11,7 +11,9 @@ from types import SimpleNamespace
 
 import gradio as gr
 import pytest
+import yaml
 
+from zimage.config import DEFAULT_IMAGE_FORMAT, IMAGE_FORMAT_CHOICES
 from zimage.ui.theme import CUSTOM_JS
 from zimage.ui.training_panel import (
     APPLY_TRAINING_LOG_JS,
@@ -40,6 +42,18 @@ CANONICAL_YAML = (
     "sampling:\n"
     "  guidance_scale: 0.0\n"
     "  num_inference_steps: 9\n"
+)
+PNG_YAML = (
+    "job_name: demo\n"
+    "sampling:\n"
+    "  guidance_scale: 0.0\n"
+    "  num_inference_steps: 9\n"
+    "  image_format: png\n"
+)
+JPEG_YAML = (
+    "job_name: demo\n"
+    "sampling:\n"
+    "  image_format: jpeg\n"
 )
 
 PANEL_SOURCE = Path(__file__).resolve().parents[3] / "zimage" / "ui" / "training_panel.py"
@@ -252,6 +266,7 @@ def test_panel_has_required_controls():
     assert "studio-training-run" not in ids
     assert "studio-training-job" in ids
     assert "studio-training-save" in ids
+    assert "studio-training-image-format" in ids
     assert "studio-training-start" in ids
     assert "studio-training-stop" in ids
     assert "studio-training-clear" in ids
@@ -273,6 +288,16 @@ def test_panel_has_required_controls():
     assert panel.yaml_editor.show_label is False
     assert not hasattr(panel, "validate_btn")
     assert panel.save_btn.value == "Save"
+    assert isinstance(panel.image_format, gr.Radio)
+    assert panel.image_format.elem_id == "studio-training-image-format"
+    assert panel.image_format.label == "Format"
+    assert panel.image_format.info == "JPEG is smaller; PNG is lossless."
+    assert panel.image_format.value == DEFAULT_IMAGE_FORMAT
+    choice_values = [
+        c[0] if isinstance(c, (list, tuple)) else c
+        for c in (panel.image_format.choices or [])
+    ]
+    assert choice_values == list(IMAGE_FORMAT_CHOICES)
     assert panel.start_btn.value == "Start"
     assert panel.start_btn.visible is True
     assert panel.stop_btn.value == "Stop"
@@ -306,6 +331,7 @@ def test_yaml_editor_inside_collapsed_config_accordion():
     assert panel.yaml_accordion in _ancestor_chain(panel.yaml_editor)
     for btn in (
         panel.save_btn,
+        panel.image_format,
         panel.start_btn,
         panel.stop_btn,
         panel.clear_btn,
@@ -329,6 +355,7 @@ def test_training_two_column_job_and_preview_layout():
     assert getattr(left_col, "scale", None) == 5
     assert left_col in _ancestor_chain(panel.yaml_accordion)
     assert left_col in _ancestor_chain(panel.save_btn)
+    assert left_col in _ancestor_chain(panel.image_format)
     assert left_col not in _ancestor_chain(panel.preview_gallery)
     assert left_col not in _ancestor_chain(panel.operational_state)
 
@@ -452,6 +479,8 @@ def test_save_event_always_routes_to_save_yaml():
     save_fn = _fns_named(demo, "on_save")[0]
     assert save_fn.inputs[0] is panel.job_id
     assert save_fn.inputs[1] is panel.yaml_editor
+    assert panel.image_format not in save_fn.inputs
+    assert list(save_fn.outputs)[-1] is panel.image_format
 
     recorder.calls.clear()
     save_fn.fn("demo-job", CANONICAL_YAML, "stopped")
@@ -460,6 +489,72 @@ def test_save_event_always_routes_to_save_yaml():
     recorder.calls.clear()
     save_fn.fn("demo-job", CANONICAL_YAML, "running")
     assert recorder.kinds() == ["save_yaml"]
+
+
+def test_image_format_radio_loads_from_sampling_yaml():
+    recorder = RecordingCallbacks(
+        config_text=JPEG_YAML,
+        job_id="demo-job",
+        jobs=["demo-job"],
+    )
+    demo, panel = _construct(recorder)
+    create_fn = _fns_named(demo, "on_create_or_open")[0]
+    select_fn = _fns_named(demo, "on_select_job")[0]
+    assert create_fn.outputs[13] is panel.image_format
+
+    created = create_fn.fn("demo")
+    assert created[13] == "jpeg"
+    assert "image_format: jpeg" in created[1]
+
+    recorder.config_text = CANONICAL_YAML
+    missing = create_fn.fn("demo")
+    assert missing[13] == DEFAULT_IMAGE_FORMAT
+
+    recorder.config_text = PNG_YAML
+    recorder.calls.clear()
+    selected = select_fn.fn("demo-job")
+    assert selected[13] == "png"
+    assert "image_format: png" in selected[1]
+    assert "save_yaml" not in recorder.kinds()
+
+    recorder.config_text = (
+        "job_name: demo\n"
+        "sampling:\n"
+        "  image_format: gif\n"
+    )
+    unknown = create_fn.fn("demo")
+    assert unknown[13] == DEFAULT_IMAGE_FORMAT
+
+
+def test_image_format_radio_change_updates_editor_not_save():
+    recorder = RecordingCallbacks()
+    demo, panel = _construct(recorder)
+    change_fn = _fns_named(demo, "on_image_format_change")[0]
+    assert list(change_fn.inputs) == [panel.image_format, panel.yaml_editor]
+    assert list(change_fn.outputs) == [panel.yaml_editor]
+
+    recorder.calls.clear()
+    dumped = change_fn.fn("png", CANONICAL_YAML)
+    parsed = yaml.safe_load(dumped)
+    assert parsed["sampling"]["image_format"] == "png"
+    assert parsed["sampling"]["guidance_scale"] == 0.0
+    assert "image_format: png" in dumped
+    assert recorder.kinds() == []
+
+    assert _is_skip(change_fn.fn("png", "{"))
+    assert _is_skip(change_fn.fn("png", "- just a list\n"))
+    assert _is_skip(change_fn.fn("png", None))
+
+
+def test_save_refreshes_image_format_radio_from_yaml_text():
+    recorder = RecordingCallbacks()
+    demo, panel = _construct(recorder)
+    save_fn = _fns_named(demo, "on_save")[0]
+    outputs = save_fn.fn("demo-job", PNG_YAML, "stopped")
+    assert ("save_yaml", "demo-job", PNG_YAML) in recorder.calls
+    assert outputs[0] == PNG_YAML
+    assert outputs[5] == "png"
+    assert save_fn.outputs[5] is panel.image_format
 
 
 def test_start_stop_validate_call_injected_callbacks_only():
@@ -578,8 +673,9 @@ def test_start_stop_visibility_follows_running():
         assert _as_update_dict(stop_update).get("visible") is True
 
     empty_load = select_fn.fn("", 0)
-    assert len(empty_load) == 13
+    assert len(empty_load) == 14
     assert_idle(empty_load[11], empty_load[12])
+    assert empty_load[13] == DEFAULT_IMAGE_FORMAT
 
     for status in idle_statuses:
         recorder.status = status
@@ -602,6 +698,7 @@ def test_start_stop_visibility_follows_running():
     assert len(poll_fn.outputs) == 10
     assert poll_fn.outputs[8] is panel.start_btn
     assert poll_fn.outputs[9] is panel.stop_btn
+    assert panel.image_format not in poll_fn.outputs
     for status in idle_statuses:
         recorder.status = status
         polled = poll_fn.fn("demo-job", 0)
@@ -666,7 +763,7 @@ def test_selector_custom_name_skips_load_and_create():
     select_fn = _fns_named(demo, "on_select_job")[0]
     recorder.calls.clear()
     outputs = select_fn.fn("Brand new style")
-    assert len(outputs) == 13
+    assert len(outputs) == 14
     for item in outputs:
         assert _is_skip(item)
     assert "load_job" not in recorder.kinds()
@@ -927,12 +1024,13 @@ def test_create_and_load_reset_offset_and_bump_generation():
     demo, panel = _construct(recorder)
     create_fn = _fns_named(demo, "on_create_or_open")[0]
     select_fn = _fns_named(demo, "on_select_job")[0]
-    assert len(create_fn.outputs) == 13
+    assert len(create_fn.outputs) == 14
     assert create_fn.outputs[8] is panel.log_offset
     assert create_fn.outputs[9] is panel.log_generation
     assert create_fn.outputs[10] is panel.log_delta
     assert create_fn.outputs[11] is panel.start_btn
     assert create_fn.outputs[12] is panel.stop_btn
+    assert create_fn.outputs[13] is panel.image_format
     assert panel.job_log not in create_fn.outputs
 
     first = create_fn.fn("job-a", 0)
@@ -1011,6 +1109,7 @@ def test_on_poll_returns_delta_not_full_log_and_calls_poll_log():
     assert len(poll_fn.outputs) == 10
     assert poll_fn.outputs[8] is panel.start_btn
     assert poll_fn.outputs[9] is panel.stop_btn
+    assert panel.image_format not in poll_fn.outputs
     assert panel.job_log not in poll_fn.outputs
     assert panel.log_delta not in poll_fn.outputs
     assert cas_fn.inputs[5] is panel.log_generation

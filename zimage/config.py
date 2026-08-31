@@ -107,6 +107,7 @@ _IMAGE_FORMAT_ALIASES = {
     "jpg": "jpeg",
     "jpe": "jpeg",
 }
+IMAGE_FORMAT_ALIASES = _IMAGE_FORMAT_ALIASES
 
 
 def canonical_image_format(name: str | None) -> str:

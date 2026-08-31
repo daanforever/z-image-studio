@@ -403,6 +403,7 @@ def test_generate_and_training_tabs(monkeypatch):
     assert "studio-training-run" not in ids
     assert "studio-training-job" in ids
     assert "studio-training-save" in ids
+    assert "studio-training-image-format" in ids
     assert "studio-training-start" in ids
     assert "studio-training-stop" in ids
     assert "studio-training-clear" in ids

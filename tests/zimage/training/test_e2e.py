@@ -172,7 +172,7 @@ def test_mocked_e2e_cache_step_checkpoint_preview(tmp_path: Path):
     assert events.count("sample") == 1
     assert events.index("write") < events.index("sample")
     assert writer.saved[0].path.is_dir()
-    assert (root / "previews" / "00001-00-sample.png").is_file()
+    assert (root / "previews" / "00001-00-sample.jpg").is_file()
     assert _job_names(root) <= ALLOWED_JOB_ENTRIES
     assert "metrics" not in _job_names(root)
     assert "debug" not in _job_names(root)
@@ -528,7 +528,7 @@ def test_real_blackwell_fp8_warm_start_turbo_preview_smoke(
         assert first_loaded.metadata.optimizer_step == 1
         assert first_loaded.state_dict
         assert load_latest_lora_state(job_dir).path == first_checkpoint
-        assert (job_dir / "previews" / "00001-00-sample.png").is_file()
+        assert (job_dir / "previews" / "00001-00-sample.jpg").is_file()
         assert not any(
             path.name.casefold().startswith("optimizer")
             for path in (job_dir / "checkpoints").rglob("*")
@@ -562,7 +562,7 @@ def test_real_blackwell_fp8_warm_start_turbo_preview_smoke(
         assert latest is not None
         assert latest.path == second_checkpoint
         assert latest.metadata.optimizer_step == 2
-        assert (job_dir / "previews" / "00002-00-sample.png").is_file()
+        assert (job_dir / "previews" / "00002-00-sample.jpg").is_file()
         assert not any(
             path.name.casefold().startswith("optimizer")
             for path in (job_dir / "checkpoints").rglob("*")

@@ -1002,10 +1002,48 @@ def test_checkpoint_writer_then_preview_sampler_order(tmp_path):
     assert sampler.calls[1][1]["seed"] == 7
     assert sampler.calls[0][0] is writer.saved[0]
     assert [call[2] for call in sampler.calls] == [
-        root / "previews" / "00001-00-sample.png",
-        root / "previews" / "00001-01-sample.png",
+        root / "previews" / "00001-00-sample.jpg",
+        root / "previews" / "00001-01-sample.jpg",
     ]
     assert not any(child.is_dir() for child in (root / "previews").iterdir())
+
+
+def test_preview_paths_follow_sampling_image_format_png(tmp_path):
+    events: list = []
+    writer = RecordingWriter(events)
+    sampler = RecordingSampler(events)
+    root = make_job(
+        tmp_path,
+        max_steps=1,
+        checkpoint_every=1,
+        sampling={
+            "num_inference_steps": 9,
+            "guidance_scale": 0.0,
+            "time_shift": 3.0,
+            "width": 1024,
+            "height": 1024,
+            "seed": 42,
+            "prompt": "shared",
+            "negative_prompt": "",
+            "image_format": "png",
+            "samples": [{"prompt": "one"}],
+        },
+    )
+
+    assert (
+        run_job(
+            root,
+            **injections(
+                events,
+                checkpoint_writer=writer,
+                preview_sampler=sampler,
+            ),
+        )
+        == 0
+    )
+    assert [call[2] for call in sampler.calls] == [
+        root / "previews" / "00001-00-sample.png",
+    ]
 
 
 def test_cuda_checkpoint_preview_handoff_exact_order(tmp_path):

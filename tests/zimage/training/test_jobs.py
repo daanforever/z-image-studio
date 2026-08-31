@@ -389,13 +389,22 @@ def test_idle_save_rejects_immutable_lora_after_checkpoint(tmp_path):
 def test_preview_sample_path_is_flat_filename(tmp_path):
     job_dir = tmp_path / "job"
     assert preview_sample_path(job_dir, 1, 0) == (
-        job_dir / "previews" / "00001-00-sample.png"
+        job_dir / "previews" / "00001-00-sample.jpg"
     )
     assert preview_sample_path(job_dir, 1, 1) == (
-        job_dir / "previews" / "00001-01-sample.png"
+        job_dir / "previews" / "00001-01-sample.jpg"
     )
     assert preview_sample_path(job_dir, 12, 3) == (
-        job_dir / "previews" / "00012-03-sample.png"
+        job_dir / "previews" / "00012-03-sample.jpg"
+    )
+    assert preview_sample_path(job_dir, 1, 0, "png") == (
+        job_dir / "previews" / "00001-00-sample.png"
+    )
+    assert preview_sample_path(job_dir, 1, 0, image_format="jpeg") == (
+        job_dir / "previews" / "00001-00-sample.jpg"
+    )
+    assert preview_sample_path(job_dir, 1, 0, image_format="jpg") == (
+        job_dir / "previews" / "00001-00-sample.jpg"
     )
 
 

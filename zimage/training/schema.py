@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from zimage.config import IMAGE_FORMAT_ALIASES, IMAGE_FORMAT_CHOICES
 from zimage.training.contracts import UpdateClassification
 
 TRAINING_SECTION = "training"
@@ -115,7 +116,7 @@ SAMPLING_PARAMETER_KEYS = frozenset(
         "negative_prompt",
     }
 )
-SAMPLING_BLOCK_KEYS = SAMPLING_PARAMETER_KEYS | {"samples"}
+SAMPLING_BLOCK_KEYS = SAMPLING_PARAMETER_KEYS | {"samples", "image_format"}
 
 
 class TrainingConfigError(ValueError):
@@ -309,6 +310,7 @@ def job_create_template() -> dict[str, Any]:
             "seed": 42,
             "prompt": "",
             "negative_prompt": "",
+            "image_format": "jpeg",
             "samples": [
                 {"prompt": "a photo of a dog"},
             ],
@@ -670,7 +672,13 @@ def _validate_sampling(raw: Any) -> dict[str, Any]:
     if not isinstance(samples_raw, list):
         raise TrainingConfigError("sampling.samples must be a list")
     samples = [_validate_sample(item, index) for index, item in enumerate(samples_raw)]
-    return {**params, "samples": samples}
+    raw_fmt = _present(data, "image_format", defaults["image_format"])
+    if isinstance(raw_fmt, str):
+        raw_fmt = IMAGE_FORMAT_ALIASES.get(raw_fmt, raw_fmt)
+    fmt = _require_choice(
+        raw_fmt, frozenset(IMAGE_FORMAT_CHOICES), "sampling.image_format"
+    )
+    return {**params, "image_format": fmt, "samples": samples}
 
 
 def _validate_sample(raw: Any, index: int) -> dict[str, Any]:

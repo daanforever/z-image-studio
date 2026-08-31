@@ -9,6 +9,7 @@ from zimage.prefs import load_ui_prefs
 from zimage.prefs import store as prefs_store
 from zimage.prefs.store import dump_document, load_document
 from zimage.training.schema import (
+    SAMPLING_BLOCK_KEYS,
     _sampling_defaults,
     load_job_document_for_classify,
     sampling_base_parameters,
@@ -89,12 +90,14 @@ def test_load_minimal_job_fixture():
     assert job["epochs"] == 1
     assert job["max_steps"] == 500
     assert job["optimizer"]["learning_rate"] == pytest.approx(1.0e-4)
+    assert job["sampling"]["image_format"] == "jpeg"
     assert job["sampling"]["samples"] == [{"prompt": "a photo of a dog"}]
 
 
 def test_create_template_empty_datasets_and_placeholder_sample():
     doc = job_create_template()
     assert doc["datasets"] == []
+    assert doc["sampling"]["image_format"] == "jpeg"
     assert doc["sampling"]["samples"] == [{"prompt": "a photo of a dog"}]
     assert doc["job_name"] == "Мой стиль"
     assert doc["model"]["main_transformer"] == {
@@ -107,6 +110,7 @@ def test_create_template_empty_datasets_and_placeholder_sample():
     }
     parsed = validate_job_document(doc)
     assert parsed["datasets"] == []
+    assert parsed["sampling"]["image_format"] == "jpeg"
     assert parsed["sampling"]["samples"] == [{"prompt": "a photo of a dog"}]
     assert parsed["model"]["main_transformer"]["revision"] is None
     assert parsed["model"]["sampling_transformer"]["revision"] is None
@@ -285,9 +289,17 @@ def test_sampling_uses_exact_diffusers_parameter_names():
         }
     )
     template = job_create_template()
-    assert set(template["sampling"]) - {"samples"} == SAMPLING_PARAMETER_KEYS
+    assert (
+        set(template["sampling"]) - {"samples", "image_format"}
+        == SAMPLING_PARAMETER_KEYS
+    )
+    assert SAMPLING_BLOCK_KEYS == SAMPLING_PARAMETER_KEYS | {
+        "samples",
+        "image_format",
+    }
     assert set(_sampling_defaults()) == SAMPLING_PARAMETER_KEYS
     assert "samples" not in _sampling_defaults()
+    assert "image_format" not in _sampling_defaults()
 
     for alias in ("guidance", "steps", "common_parameters"):
         job = job_create_template()
@@ -299,6 +311,50 @@ def test_sampling_uses_exact_diffusers_parameter_names():
     nested["sampling"]["common_parameters"] = {"prompt": "legacy"}
     with pytest.raises(TrainingConfigError, match="unknown"):
         validate_job_document(nested)
+
+
+def test_sampling_image_format_omitted_defaults_to_jpeg():
+    job = job_create_template()
+    del job["sampling"]["image_format"]
+    parsed = validate_job_document(job)
+    assert parsed["sampling"]["image_format"] == "jpeg"
+
+
+def test_sampling_image_format_rejects_gif():
+    job = job_create_template()
+    job["sampling"]["image_format"] = "gif"
+    with pytest.raises(TrainingConfigError, match="image_format"):
+        validate_job_document(job)
+
+
+def test_sampling_image_format_jpg_alias_canonicalizes_to_jpeg():
+    job = job_create_template()
+    job["sampling"]["image_format"] = "jpg"
+    parsed = validate_job_document(job)
+    assert parsed["sampling"]["image_format"] == "jpeg"
+
+
+def test_per_sample_image_format_is_unknown_key():
+    job = job_create_template()
+    job["sampling"]["samples"] = [{"prompt": "a photo of a dog", "image_format": "png"}]
+    with pytest.raises(TrainingConfigError, match="unknown"):
+        validate_job_document(job)
+
+
+def test_sampling_image_format_change_is_apply_at_step():
+    current = job_create_template()
+    candidate = job_create_template()
+    candidate["sampling"]["image_format"] = "png"
+    classification, changed = classify_job_update(current, candidate)
+    assert classification is UpdateClassification.APPLY_AT_STEP
+    assert changed == ("sampling.image_format",)
+
+
+def test_sampling_base_parameters_excludes_image_format():
+    params = sampling_base_parameters(job_create_template()["sampling"])
+    assert "image_format" not in params
+    assert "samples" not in params
+    assert set(params) == SAMPLING_PARAMETER_KEYS
 
 
 def test_every_sampling_parameter_may_be_overridden_per_sample():

@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 import gradio as gr
+import yaml
+
+from zimage.config import DEFAULT_IMAGE_FORMAT, IMAGE_FORMAT_CHOICES
 
 JOB_LOG_HTML = '<pre class="studio-training-job-log-pre"></pre>'
 APPLY_TRAINING_LOG_JS = (
@@ -93,6 +96,7 @@ class TrainingPanel:
     yaml_accordion: gr.Accordion
     yaml_editor: gr.Textbox
     save_btn: gr.Button
+    image_format: gr.Radio
     start_btn: gr.Button
     stop_btn: gr.Button
     clear_btn: gr.Button
@@ -513,6 +517,13 @@ def build_training_panel(
                     elem_id="studio-training-save",
                     size="sm",
                 )
+                image_format = gr.Radio(
+                    choices=IMAGE_FORMAT_CHOICES,
+                    value=DEFAULT_IMAGE_FORMAT,
+                    label="Format",
+                    info="JPEG is smaller; PNG is lossless.",
+                    elem_id="studio-training-image-format",
+                )
             with gr.Column(scale=6):
                 operational_state = gr.Markdown(
                     format_operational_state({}),
@@ -561,6 +572,7 @@ def build_training_panel(
         log_delta,
         start_btn,
         stop_btn,
+        image_format,
     ]
 
     def on_create_or_open(name, generation=0):
@@ -589,6 +601,9 @@ def build_training_panel(
     def on_save(current_id, text, status):
         data = handle_save(current_id, text, status, callbacks=resolved)
         return _save_outputs(data)
+
+    def on_image_format_change(fmt, text):
+        return _yaml_with_image_format(text, fmt)
 
     def on_start(current_id):
         data = handle_start(current_id, callbacks=resolved)
@@ -645,7 +660,14 @@ def build_training_panel(
             preview_gallery,
             status_state,
             message,
+            image_format,
         ],
+        show_progress="minimal",
+    )
+    image_format.change(
+        on_image_format_change,
+        inputs=[image_format, yaml_editor],
+        outputs=[yaml_editor],
         show_progress="minimal",
     )
     start_btn.click(
@@ -733,6 +755,7 @@ def build_training_panel(
         yaml_accordion=yaml_accordion,
         yaml_editor=yaml_editor,
         save_btn=save_btn,
+        image_format=image_format,
         start_btn=start_btn,
         stop_btn=stop_btn,
         clear_btn=clear_btn,
@@ -781,12 +804,15 @@ def _load_outputs(
         generation,
         _log_delta_payload("", True, generation),
         *_run_button_visibility(data.state),
+        _image_format_from_yaml(
+            data.config_text if data.config_text is not None else ""
+        ),
     )
 
 
 def _skip_load_outputs():
     """Leave panel outputs unchanged (e.g. typed custom name not yet Create'd)."""
-    return (gr.skip(),) * 13
+    return (gr.skip(),) * 14
 
 
 def _save_outputs(data: JobPanelData):
@@ -795,7 +821,59 @@ def _save_outputs(data: JobPanelData):
     state_md = format_operational_state(data.state) if has_state else gr.skip()
     previews = list(data.previews) if data.previews is not None else gr.skip()
     status = _status_of(data.state) if has_state else gr.skip()
-    return yaml_out, state_md, previews, status, data.message
+    fmt = (
+        _image_format_from_yaml(data.config_text)
+        if data.config_text is not None
+        else gr.skip()
+    )
+    return yaml_out, state_md, previews, status, data.message, fmt
+
+
+def _image_format_from_yaml(text: Any) -> str:
+    parsed = _parse_yaml_mapping(text)
+    if parsed is None:
+        return DEFAULT_IMAGE_FORMAT
+    sampling = parsed.get("sampling")
+    if not isinstance(sampling, Mapping):
+        return DEFAULT_IMAGE_FORMAT
+    raw = sampling.get("image_format")
+    if not isinstance(raw, str):
+        return DEFAULT_IMAGE_FORMAT
+    value = raw.strip().lower()
+    return value if value in IMAGE_FORMAT_CHOICES else DEFAULT_IMAGE_FORMAT
+
+
+def _yaml_with_image_format(text: Any, image_format: Any) -> Any:
+    parsed = _parse_yaml_mapping(text)
+    if parsed is None:
+        return gr.skip()
+    fmt = DEFAULT_IMAGE_FORMAT
+    if (
+        isinstance(image_format, str)
+        and image_format.strip().lower() in IMAGE_FORMAT_CHOICES
+    ):
+        fmt = image_format.strip().lower()
+    sampling = parsed.get("sampling")
+    if not isinstance(sampling, dict):
+        sampling = {}
+        parsed["sampling"] = sampling
+    sampling["image_format"] = fmt
+    return yaml.safe_dump(
+        parsed,
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )
+
+
+def _parse_yaml_mapping(text: Any) -> dict[str, Any] | None:
+    try:
+        parsed = yaml.safe_load(_yaml_text(text))
+    except yaml.YAMLError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 
 
 def _action_outputs(data: JobPanelData):

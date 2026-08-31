@@ -13,6 +13,7 @@ from uuid import uuid4
 import yaml
 from slugify import slugify
 
+from zimage.config import DEFAULT_IMAGE_FORMAT, canonical_image_format
 from zimage.training.contracts import (
     JobState,
     JobStatus,
@@ -78,10 +79,26 @@ def resolve_job_path(jobs_dir: str | Path, job_id: str) -> Path:
     return Path(jobs_dir) / job_id
 
 
-def preview_sample_path(job_dir: str | Path, step: int, index: int) -> Path:
-    """Return ``{job_dir}/previews/{step:05d}-{index:02d}-sample.png``."""
+def _preview_sample_suffix(image_format: str | None = DEFAULT_IMAGE_FORMAT) -> str:
+    """Return ``.jpg`` for jpeg (and aliases) or ``.png`` — never ``.jpeg``."""
 
-    return Path(job_dir) / PREVIEWS_DIR / f"{int(step):05d}-{int(index):02d}-sample.png"
+    if canonical_image_format(image_format) == "png":
+        return ".png"
+    return ".jpg"
+
+
+def preview_sample_path(
+    job_dir: str | Path,
+    step: int,
+    index: int,
+    image_format: str | None = DEFAULT_IMAGE_FORMAT,
+) -> Path:
+    """Return ``{job_dir}/previews/{step:05d}-{index:02d}-sample.{jpg,png}``."""
+
+    suffix = _preview_sample_suffix(image_format)
+    return (
+        Path(job_dir) / PREVIEWS_DIR / f"{int(step):05d}-{int(index):02d}-sample{suffix}"
+    )
 
 
 def clear_job_previews(job_dir: str | Path) -> None:

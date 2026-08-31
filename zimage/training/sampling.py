@@ -16,11 +16,15 @@ from typing import Any, Callable
 import torch
 from PIL import Image
 
+from zimage.config import JPEG_QUALITY
 from zimage.training.checkpoints import load_lora_state
 from zimage.training.contracts import SavedCheckpoint
 from zimage.training.schema import merge_sample_parameters
 
 log = logging.getLogger("zimage.training")
+
+_PREVIEW_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
+_JPEG_SUFFIXES = frozenset({".jpg", ".jpeg"})
 
 LoraConfigFactory = Callable[..., Any]
 PreviewQuantizer = Callable[[Any], None]
@@ -234,7 +238,7 @@ class UnfusedPreviewSampler:
             self._move_preview_components(self._resolve_device())
             image = self._run_pipeline(merged)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            image.save(destination)
+            _write_preview_image(image, destination)
             return destination
         except BaseException as exc:
             failure = exc
@@ -447,6 +451,26 @@ def resolve_preview_parameters(
     """Merge root sampling parameters with one sample (sample wins)."""
 
     return merge_sample_parameters(common, sample)
+
+
+def _write_preview_image(image: Image.Image, destination: Path) -> None:
+    """Save RGB preview as JPEG or PNG from the destination suffix.
+
+    Unlinks sibling files at the same stem with the other suffixes in
+    ``{.png, .jpg, .jpeg}`` before writing so a hot-reload of
+    ``image_format`` replaces that step/index preview without leaving
+    both encodings.
+    """
+
+    destination = Path(destination)
+    for suffix in _PREVIEW_IMAGE_SUFFIXES:
+        sibling = destination.with_suffix(suffix)
+        if sibling != destination:
+            sibling.unlink(missing_ok=True)
+    if destination.suffix.lower() in _JPEG_SUFFIXES:
+        image.save(destination, format="JPEG", quality=JPEG_QUALITY)
+    else:
+        image.save(destination, format="PNG")
 
 
 def _invoke_pipeline(pipeline: Any, request: dict[str, Any]) -> Any:

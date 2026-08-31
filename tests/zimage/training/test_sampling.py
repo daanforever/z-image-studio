@@ -263,6 +263,8 @@ def test_sample_unfused_uses_merged_parameters_and_preencoded_embeds(tmp_path):
     )
     assert path == destination
     assert destination.is_file()
+    with Image.open(destination) as preview:
+        assert preview.format == "PNG"
     assert sampler.last_parameters["prompt"] == "subject"
     assert sampler.last_parameters["seed"] == 11
     assert sampler.last_parameters["width"] == 48
@@ -277,6 +279,57 @@ def test_sample_unfused_uses_merged_parameters_and_preencoded_embeds(tmp_path):
     assert pipeline.text_encoder is None
     assert pipeline.tokenizer is None
     assert pipeline.vae.label == "shared-vae"
+
+
+def test_sample_unfused_jpeg_destination_writes_jpeg_and_unlinks_siblings(tmp_path):
+    job = tmp_path / "job"
+    (job / "checkpoints").mkdir(parents=True)
+    checkpoint = _write_adapter_checkpoint(job, step=1, sign=1.0)
+    transformer = TinyTransformer().to(dtype=torch.bfloat16)
+    pipeline = RecordingPipeline(transformer)
+    sampler = UnfusedPreviewSampler(
+        transformer=transformer,
+        pipeline=pipeline,
+        prompt_embeddings=_embeddings(),
+        common_parameters={"prompt": "a cat", "width": 16, "height": 16},
+    )
+    destination = tmp_path / "00001-00-sample.jpg"
+    png_sibling = tmp_path / "00001-00-sample.png"
+    jpeg_sibling = tmp_path / "00001-00-sample.jpeg"
+    png_sibling.write_bytes(b"old-png")
+    jpeg_sibling.write_bytes(b"old-jpeg")
+    other_step = tmp_path / "00002-00-sample.png"
+    other_step.write_bytes(b"keep")
+
+    path = sampler.sample_unfused(
+        checkpoint=checkpoint,
+        parameters={"prompt": "a cat"},
+        destination=destination,
+    )
+    assert path == destination
+    assert destination.is_file()
+    assert not png_sibling.exists()
+    assert not jpeg_sibling.exists()
+    assert other_step.read_bytes() == b"keep"
+    with Image.open(destination) as preview:
+        assert preview.format == "JPEG"
+
+
+def test_write_preview_image_png_codec_unlinks_jpeg_siblings(tmp_path):
+    from zimage.training.sampling import _write_preview_image
+
+    destination = tmp_path / "00001-00-sample.png"
+    jpg_sibling = tmp_path / "00001-00-sample.jpg"
+    jpeg_sibling = tmp_path / "00001-00-sample.jpeg"
+    jpg_sibling.write_bytes(b"old-jpg")
+    jpeg_sibling.write_bytes(b"old-jpeg")
+    image = Image.new("RGB", (8, 8), (10, 20, 30))
+    _write_preview_image(image, destination)
+    assert destination.is_file()
+    assert not jpg_sibling.exists()
+    assert not jpeg_sibling.exists()
+    with Image.open(destination) as preview:
+        assert preview.format == "PNG"
 
 
 def test_sampling_failure_does_not_delete_checkpoint(tmp_path):
@@ -406,6 +459,7 @@ def test_sampling_module_does_not_import_fuse_loader():
     source = Path(__file__).resolve().parents[3] / "zimage" / "training" / "sampling.py"
     text = source.read_text(encoding="utf-8")
     assert "zimage.engine.lora" not in text
+    assert "zimage.engine.pipeline" not in text
     assert "apply_quantization" not in text
     assert "fuse_lora" not in text
     assert "sync_lora_adapters" not in text
@@ -413,7 +467,7 @@ def test_sampling_module_does_not_import_fuse_loader():
     code = """
 import sys
 import zimage.training.sampling
-forbidden = [name for name in ("zimage.engine.lora", "zimage.engine.quantization") if name in sys.modules]
+forbidden = [name for name in ("zimage.engine.lora", "zimage.engine.quantization", "zimage.engine.pipeline") if name in sys.modules]
 if forbidden:
     print(",".join(forbidden), file=sys.stderr)
 raise SystemExit(bool(forbidden))

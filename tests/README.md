@@ -50,7 +50,7 @@ A test's **designed claim** is what a green result would prove. An **observed re
 
 **Real-model capability gate.** Opt-in. Designed claim: load a persistent FP8 Turbo transformer from a local snapshot and replace unfused adapters; latent forwards differ across adapters and match on repeat. This is Diffusers + PEFT + TorchAO **latent** sampling on Blackwell, not the training loop, not `UnfusedPreviewSampler`, and not VAE PNG decode.
 
-**Full hardware smoke.** Opt-in. Designed claim: real Base FP8 optimizer step → native checkpoint → Turbo preview PNG → warm-start second run → GPU lease release. That path **would prove** production Base train/sample on this machine **when it passes**. The metadata prerequisite is repaired and the smoke is ready for a controlled rerun; it has not been rerun and has not passed. See observed results below.
+**Full hardware smoke.** Opt-in. Designed claim: real Base FP8 optimizer step → native checkpoint → Turbo preview JPEG → warm-start second run → GPU lease release. That path **would prove** production Base train/sample on this machine **when it passes**. The metadata prerequisite is repaired and the smoke is ready for a controlled rerun; it has not been rerun and has not passed. See observed results below.
 
 ## Observed local evidence
 
@@ -185,7 +185,7 @@ Snapshots must be absolute existing directories. The tests set Hub/Transformers 
 
 ### `test_real_blackwell_fp8_warm_start_turbo_preview_smoke`
 
-- **Designed claim:** One real Base FP8 optimizer step, native LoRA checkpoint (no optimizer tensors), Turbo preview PNG, lease free, `max_steps` bump, warm-start second run to step 2, second preview, lease released again. That **would prove** the production train/sample path **when it passes**.
+- **Designed claim:** One real Base FP8 optimizer step, native LoRA checkpoint (no optimizer tensors), Turbo preview JPEG, lease free, `max_steps` bump, warm-start second run to step 2, second preview, lease released again. That **would prove** the production train/sample path **when it passes**.
 - **How:** Set `ZIMAGE_RUN_HARDWARE_SMOKE=1`, `ZIMAGE_REAL_MAIN_MODEL`, and `ZIMAGE_REAL_SAMPLING_MODEL`, then run the e2e node id above.
 - **Why CPU mocks are insufficient:** Mocked e2e injects fake writers/samplers and never loads weights. Only this test would exercise Base train → checkpoint → Turbo sample → warm start → lease on real hardware.
 - **Observed:** Metadata prerequisite repaired; smoke ready for a controlled rerun. The earlier run was intentionally aborted and has **not** been rerun. Has **not** passed. Production Base GPU training remains unverified until explicit rerun permission.

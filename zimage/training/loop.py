@@ -886,9 +886,10 @@ def _sample_previews(
 ) -> None:
     sampling = config["sampling"]
     common = sampling_base_parameters(sampling)
+    image_format = sampling.get("image_format")
     for index, sample in enumerate(sampling["samples"]):
         parameters = merge_sample_parameters(common, sample)
-        destination = preview_sample_path(job_dir, step, index)
+        destination = preview_sample_path(job_dir, step, index, image_format)
         sampler.sample_unfused(
             checkpoint=checkpoint,
             parameters=parameters,

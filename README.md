@@ -196,6 +196,7 @@ sampling:
   seed: 42
   prompt: ''
   negative_prompt: ''
+  image_format: jpeg
   samples:
   - prompt: 'a photo of a dog'
 ```
@@ -221,11 +222,11 @@ jobs/{job_id}/
   commands/
   checkpoints/
   previews/
-    {step:05d}-{index:02d}-sample.png
+    {step:05d}-{index:02d}-sample.{jpg,png}
   logs/
 ```
 
-No `metrics/`. Training writes `logs/job.log`. `state.json` is operational only (`job_id`, `status`, `step`, `epoch`, `last_error`, `exit_code`). Checkpoints are native LoRA weights (`checkpoints/step-N/`); optimizer state is not saved. Preview images are flat `{step:05d}-{index:02d}-sample.png` files under `previews/`; there are no `step-N/` directories under `previews/`.
+No `metrics/`. Training writes `logs/job.log`. `state.json` is operational only (`job_id`, `status`, `step`, `epoch`, `last_error`, `exit_code`). Checkpoints are native LoRA weights (`checkpoints/step-N/`); optimizer state is not saved. Preview images are flat `{step:05d}-{index:02d}-sample.{jpg,png}` files under `previews/` (extension from `sampling.image_format`); there are no `step-N/` directories under `previews/`.
 
 ### CLI
 

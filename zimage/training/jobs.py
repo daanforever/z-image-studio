@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -30,7 +31,8 @@ from zimage.training.schema import (
 
 CONFIG_FILE = "config.yaml"
 STATE_FILE = "state.json"
-JOB_DIRECTORIES = ("commands", "checkpoints", "previews", LOGS_DIR)
+PREVIEWS_DIR = "previews"
+JOB_DIRECTORIES = ("commands", "checkpoints", PREVIEWS_DIR, LOGS_DIR)
 JOB_ROOT_ENTRIES = (CONFIG_FILE, STATE_FILE, *JOB_DIRECTORIES)
 
 _WINDOWS_RESERVED_STEMS = {
@@ -74,6 +76,44 @@ def resolve_job_path(jobs_dir: str | Path, job_id: str) -> Path:
     if Path(job_id).name != job_id or job_id in {".", ".."}:
         raise ValueError("job ID must be a direct child name")
     return Path(jobs_dir) / job_id
+
+
+def preview_sample_path(job_dir: str | Path, step: int, index: int) -> Path:
+    """Return ``{job_dir}/previews/{step:05d}-{index:02d}-sample.png``."""
+
+    return Path(job_dir) / PREVIEWS_DIR / f"{int(step):05d}-{int(index):02d}-sample.png"
+
+
+def clear_job_previews(job_dir: str | Path) -> None:
+    """Wipe ``{job_dir}/previews/``. Missing directory is a no-op."""
+
+    root = Path(job_dir) / PREVIEWS_DIR
+    if not root.is_dir():
+        return
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+
+
+def reset_job_progress(job_dir: str | Path) -> JobState:
+    """Wipe ``{job_dir}/checkpoints/`` and reset operational state to stopped."""
+
+    root = Path(job_dir)
+    checkpoints = root / "checkpoints"
+    if checkpoints.is_dir():
+        shutil.rmtree(checkpoints)
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    if any(checkpoints.iterdir()):
+        raise OSError(f"failed to wipe checkpoints: {checkpoints}")
+    state = JobState(
+        job_id=root.name,
+        status=JobStatus.STOPPED,
+        step=0,
+        epoch=0,
+        last_error=None,
+        exit_code=None,
+    )
+    write_job_state(root, state)
+    return state
 
 
 def create_or_open_job(base_name: str, jobs_dir: str | Path) -> Path:

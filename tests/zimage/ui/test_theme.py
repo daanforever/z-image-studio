@@ -153,5 +153,8 @@ def test_training_toolbar_flex_and_button_hints():
                 content_hits += 1
             pos = idx + 1
         assert content_hits == 1, elem_id
-    assert "Clear the training log for the selected job." in section
+    assert (
+        "Clear the training log, preview images, and progress/checkpoints "
+        "for the selected job."
+    ) in section
     assert "MutationObserver" not in CUSTOM_JS

@@ -49,7 +49,7 @@ class TrainingCallbackAPI(Protocol):
         """Return ``{chunk, next_offset, reset}`` for the job log."""
 
     def clear_log(self, job_id: str) -> None:
-        """Truncate the job log. Missing file is a no-op."""
+        """Truncate log + clear previews + reset progress."""
 
 
 @dataclass(frozen=True)
@@ -352,16 +352,24 @@ def handle_clear_log(
     generation: Any,
     *,
     callbacks: TrainingCallbacks,
-) -> tuple[int, int, str, str]:
+) -> tuple:
     """Ask the injected callback to truncate the log. Does not touch the filesystem."""
     resolved = _require_job_id(job_id)
-    _invoke(callbacks.clear_log, resolved)
+    payload = _invoke(callbacks.clear_log, resolved)
+    data = _job_payload(payload, fallback_id=resolved)
     next_generation = _next_log_generation(generation)
+    state = data.state or empty_job_state(resolved)
+    start_vis, stop_vis = _run_button_visibility(state)
     return (
         0,
         next_generation,
         _log_delta_payload("", True, next_generation),
-        "Log cleared.",
+        data.message or "Log, previews, and progress cleared.",
+        [],
+        format_operational_state(state),
+        _status_of(state),
+        start_vis,
+        stop_vis,
     )
 
 
@@ -669,7 +677,17 @@ def build_training_panel(
     clear_event = clear_btn.click(
         on_clear,
         inputs=[job_id, log_generation],
-        outputs=[log_offset, log_generation, log_delta, message],
+        outputs=[
+            log_offset,
+            log_generation,
+            log_delta,
+            message,
+            preview_gallery,
+            operational_state,
+            status_state,
+            start_btn,
+            stop_btn,
+        ],
         show_progress="minimal",
     )
     clear_event.then(None, inputs=[log_delta], js=APPLY_TRAINING_LOG_JS)

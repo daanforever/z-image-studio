@@ -303,7 +303,7 @@ pre.studio-training-job-log-pre {
 }
 #studio-training-clear:hover::after,
 #studio-training-clear:focus-within::after {
-    content: "Clear the training log for the selected job.";
+    content: "Clear the training log, preview images, and progress/checkpoints for the selected job.";
 }
 #studio-training-start:hover::after,
 #studio-training-start:focus-within::after,

@@ -51,6 +51,7 @@ from zimage.training.gpu_usage import GpuUsageProbe
 from zimage.training.jobs import (
     load_job_config,
     load_job_state,
+    preview_sample_path,
     save_job_config,
     write_job_state,
 )
@@ -887,7 +888,7 @@ def _sample_previews(
     common = sampling_base_parameters(sampling)
     for index, sample in enumerate(sampling["samples"]):
         parameters = merge_sample_parameters(common, sample)
-        destination = job_dir / "previews" / f"step-{step}" / f"{index:02d}.png"
+        destination = preview_sample_path(job_dir, step, index)
         sampler.sample_unfused(
             checkpoint=checkpoint,
             parameters=parameters,

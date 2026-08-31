@@ -514,13 +514,28 @@ def test_clear_log_event_is_wired():
         panel.log_generation,
         panel.log_delta,
         panel.message,
+        panel.preview_gallery,
+        panel.operational_state,
+        panel.status_state,
+        panel.start_btn,
+        panel.stop_btn,
     ]
     assert clear_fn.targets
     assert clear_fn.targets[0][1] == "click"
     assert clear_fn.targets[0][0] == getattr(panel.clear_btn, "_id", panel.clear_btn)
 
     recorder.calls.clear()
-    offset, generation, delta, message = clear_fn.fn("demo-job", 3)
+    (
+        offset,
+        generation,
+        delta,
+        message,
+        gallery,
+        operational_state,
+        status_state,
+        start_vis,
+        stop_vis,
+    ) = clear_fn.fn("demo-job", 3)
     assert recorder.kinds() == ["clear_log"]
     assert recorder.calls == [("clear_log", "demo-job")]
     assert offset == 0
@@ -529,7 +544,14 @@ def test_clear_log_event_is_wired():
     assert payload["reset"] is True
     assert payload["chunk"] == ""
     assert payload["generation"] == 4
-    assert message == "Log cleared."
+    assert message == "Log, previews, and progress cleared."
+    assert gallery == []
+    assert "**Status:** `stopped`" in operational_state
+    assert "**Step:** 0" in operational_state
+    assert "**Epoch:** 0" in operational_state
+    assert status_state == "stopped"
+    assert _as_update_dict(start_vis).get("visible") is True
+    assert _as_update_dict(stop_vis).get("visible") is False
 
 
 def test_start_stop_visibility_follows_running():
@@ -1086,17 +1108,41 @@ def test_handle_poll_log_swallows_callback_errors():
 def test_handle_clear_log_resets_offset_and_bumps_generation():
     recorder = RecordingCallbacks()
     callbacks = as_training_callbacks(recorder)
-    offset, generation, delta, message = handle_clear_log(
-        "demo-job", 3, callbacks=callbacks
-    )
+    (
+        offset,
+        generation,
+        delta,
+        message,
+        gallery,
+        operational_state,
+        status_state,
+        start_vis,
+        stop_vis,
+    ) = handle_clear_log("demo-job", 3, callbacks=callbacks)
     assert ("clear_log", "demo-job") in recorder.calls
+    assert "poll_state" not in recorder.kinds()
     assert offset == 0
     assert generation == 4
     payload = json.loads(delta)
     assert payload["reset"] is True
     assert payload["chunk"] == ""
     assert payload["generation"] == 4
-    assert message == "Log cleared."
+    assert message == "Log, previews, and progress cleared."
+    assert gallery == []
+    assert "**Status:** `stopped`" in operational_state
+    assert "**Step:** 0" in operational_state
+    assert "**Epoch:** 0" in operational_state
+    assert status_state == "stopped"
+    assert _as_update_dict(start_vis).get("visible") is True
+    assert _as_update_dict(stop_vis).get("visible") is False
+
+    noop_result = handle_clear_log(
+        "demo-job", 0, callbacks=noop_training_callbacks()
+    )
+    assert "**Status:** `stopped`" in noop_result[5]
+    assert "**Step:** 0" in noop_result[5]
+    assert "**Epoch:** 0" in noop_result[5]
+    assert noop_result[6] == "stopped"
 
 
 def test_clear_log_is_on_callbacks_and_duck_typed_hosts():

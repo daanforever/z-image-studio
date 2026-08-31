@@ -16,6 +16,20 @@ import torch
 log = logging.getLogger("zimage.training")
 
 MODULE_KEYS = ("vae", "text_encoder", "transformer")
+_UNITS = ("B", "KB", "MB", "GB")
+
+
+def format_bytes(n: int) -> str:
+    value = float(n)
+    unit = "B"
+    for next_unit in _UNITS[1:]:
+        if value < 1024:
+            break
+        value /= 1024
+        unit = next_unit
+    if unit == "B":
+        return f"{int(value)}B"
+    return f"{value:.1f}{unit}"
 
 
 @dataclass(frozen=True)
@@ -72,9 +86,9 @@ def format_gpu_usage(snapshot: GpuUsageSnapshot) -> str:
     return (
         f"gpu usage phase={snapshot.phase} "
         f"cuda={int(snapshot.cuda_available)} "
-        f"allocated={snapshot.allocated_bytes} "
-        f"reserved={snapshot.reserved_bytes} "
-        f"peak_allocated={snapshot.peak_allocated_bytes} "
+        f"allocated={format_bytes(snapshot.allocated_bytes)} "
+        f"reserved={format_bytes(snapshot.reserved_bytes)} "
+        f"peak_allocated={format_bytes(snapshot.peak_allocated_bytes)} "
         f"vae={devices.get('vae', 'none')} "
         f"text_encoder={devices.get('text_encoder', 'none')} "
         f"transformer={devices.get('transformer', 'none')}"

@@ -1627,8 +1627,7 @@ def test_poll_training_state_lists_previews(tmp_path: Path, monkeypatch):
 
     jobs = tmp_path / "jobs"
     root = create_or_open_job("job", jobs)
-    preview = root / "previews" / "step-1" / "00.png"
-    preview.parent.mkdir(parents=True)
+    preview = root / "previews" / "00001-00-sample.png"
     preview.write_bytes(b"\x89PNG\r\n\x1a\n")
     monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
     payload = handlers.poll_training_state("job")
@@ -1666,9 +1665,23 @@ def test_clear_training_log_truncates_existing_file(tmp_path: Path, monkeypatch)
     log_path = root / LOGS_DIR / LOG_FILE
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_bytes(b"hello log\n")
+    nested = root / "previews" / "step-1" / "00.png"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested.write_bytes(b"\x89PNG\r\n\x1a\n")
+    flat = root / "previews" / "00001-00-sample.png"
+    flat.write_bytes(b"\x89PNG\r\n\x1a\n")
     monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
-    handlers.clear_training_log("job")
+    payload = handlers.clear_training_log("job")
     assert log_path.stat().st_size == 0
+    previews = root / "previews"
+    assert previews.is_dir()
+    assert list(previews.iterdir()) == []
+    assert not nested.exists()
+    assert not flat.exists()
+    assert payload["job_id"] == "job"
+    assert payload["previews"] == []
+    assert payload["state"]["status"] == "stopped"
+    assert payload["state"]["step"] == 0
 
 
 def test_clear_training_log_missing_file_does_not_raise(tmp_path: Path, monkeypatch):
@@ -1677,7 +1690,8 @@ def test_clear_training_log_missing_file_does_not_raise(tmp_path: Path, monkeypa
     jobs = tmp_path / "jobs"
     create_or_open_job("job", jobs)
     monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
-    handlers.clear_training_log("job")
+    payload = handlers.clear_training_log("job")
+    assert payload["job_id"] == "job"
 
 
 def test_clear_training_log_unknown_job_fails(tmp_path: Path, monkeypatch):
@@ -1686,6 +1700,222 @@ def test_clear_training_log_unknown_job_fails(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
     with pytest.raises(FileNotFoundError, match="does not exist"):
         handlers.clear_training_log("missing")
+
+
+def test_clear_training_log_resets_progress_and_returns_job_view(
+    tmp_path: Path, monkeypatch
+):
+    from zimage.training.contracts import JobState, JobStatus
+    from zimage.training.job_log import LOG_FILE, LOGS_DIR
+    from zimage.training.jobs import create_or_open_job, load_job_state, write_job_state
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    log_path = root / LOGS_DIR / LOG_FILE
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_bytes(b"hello log\n")
+    (root / "previews" / "00001-00-sample.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    ckpt = root / "checkpoints" / "step-3" / "adapter.bin"
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    ckpt.write_bytes(b"ckpt")
+    write_job_state(
+        root,
+        JobState(
+            "job",
+            JobStatus.COMPLETED,
+            step=3,
+            epoch=1,
+            last_error="old",
+            exit_code=0,
+        ),
+    )
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+
+    payload = handlers.clear_training_log("job")
+
+    assert log_path.stat().st_size == 0
+    assert list((root / "previews").iterdir()) == []
+    checkpoints = root / "checkpoints"
+    assert checkpoints.is_dir()
+    assert list(checkpoints.iterdir()) == []
+    assert not ckpt.exists()
+    state = load_job_state(root)
+    assert state.status is JobStatus.STOPPED
+    assert state.step == 0
+    assert state.epoch == 0
+    assert state.last_error is None
+    assert state.exit_code is None
+    assert payload["job_id"] == "job"
+    assert "job_name:" in payload["config_text"]
+    assert payload["state"]["status"] == "stopped"
+    assert payload["state"]["step"] == 0
+    assert payload["state"]["epoch"] == 0
+    assert payload["previews"] == []
+    assert "message" not in payload
+
+
+def test_clear_training_log_refuses_when_this_job_running(tmp_path: Path, monkeypatch):
+    from zimage.training.contracts import JobState, JobStatus
+    from zimage.training.job_log import LOG_FILE, LOGS_DIR
+    from zimage.training.jobs import create_or_open_job, load_job_state, write_job_state
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    log_path = root / LOGS_DIR / LOG_FILE
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_bytes = b"hello log\n"
+    log_path.write_bytes(log_bytes)
+    preview = root / "previews" / "00001-00-sample.png"
+    preview.write_bytes(b"\x89PNG\r\n\x1a\n")
+    ckpt = root / "checkpoints" / "step-3" / "adapter.bin"
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    ckpt.write_bytes(b"ckpt")
+    write_job_state(root, JobState("job", JobStatus.RUNNING, step=3, epoch=1))
+    state_bytes = (root / "state.json").read_bytes()
+
+    class RunningManager:
+        job_id = "job"
+
+        def is_running(self):
+            return True
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: RunningManager())
+    monkeypatch.setattr(handlers, "training_start_fence_is_set", lambda: False)
+
+    with pytest.raises(RuntimeError, match="Stop first"):
+        handlers.clear_training_log("job")
+
+    assert log_path.read_bytes() == log_bytes
+    assert preview.is_file()
+    assert ckpt.is_file()
+    assert (root / "state.json").read_bytes() == state_bytes
+    assert load_job_state(root).step == 3
+
+
+def test_clear_training_log_refuses_when_start_fence_set(tmp_path: Path, monkeypatch):
+    from zimage.training.contracts import JobState, JobStatus
+    from zimage.training.job_log import LOG_FILE, LOGS_DIR
+    from zimage.training.jobs import create_or_open_job, write_job_state
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    log_path = root / LOGS_DIR / LOG_FILE
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_bytes = b"hello log\n"
+    log_path.write_bytes(log_bytes)
+    preview = root / "previews" / "00001-00-sample.png"
+    preview.write_bytes(b"\x89PNG\r\n\x1a\n")
+    ckpt = root / "checkpoints" / "step-3" / "adapter.bin"
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    ckpt.write_bytes(b"ckpt")
+    write_job_state(root, JobState("job", JobStatus.COMPLETED, step=3, epoch=1, exit_code=0))
+    state_bytes = (root / "state.json").read_bytes()
+
+    class IdleManager:
+        job_id = None
+
+        def is_running(self):
+            return False
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: IdleManager())
+    monkeypatch.setattr(handlers, "training_start_fence_is_set", lambda: True)
+
+    with pytest.raises(RuntimeError, match="Stop first"):
+        handlers.clear_training_log("job")
+
+    assert log_path.read_bytes() == log_bytes
+    assert preview.is_file()
+    assert ckpt.is_file()
+    assert (root / "state.json").read_bytes() == state_bytes
+
+
+def test_clear_training_log_succeeds_when_other_job_running(
+    tmp_path: Path, monkeypatch
+):
+    from zimage.training.contracts import JobState, JobStatus
+    from zimage.training.jobs import create_or_open_job, load_job_state, write_job_state
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    ckpt = root / "checkpoints" / "step-2" / "adapter.bin"
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    ckpt.write_bytes(b"ckpt")
+    write_job_state(root, JobState("job", JobStatus.STOPPED, step=2, epoch=0))
+
+    class OtherManager:
+        job_id = "other"
+
+        def is_running(self):
+            return True
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: OtherManager())
+    monkeypatch.setattr(handlers, "training_start_fence_is_set", lambda: False)
+
+    payload = handlers.clear_training_log("job")
+
+    assert payload["state"]["step"] == 0
+    assert load_job_state(root).status is JobStatus.STOPPED
+    assert list((root / "checkpoints").iterdir()) == []
+
+
+def test_clear_training_log_succeeds_when_stale_job_id_not_running(
+    tmp_path: Path, monkeypatch
+):
+    from zimage.training.jobs import create_or_open_job, load_job_state
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+
+    class StaleManager:
+        job_id = "job"
+
+        def is_running(self):
+            return False
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: StaleManager())
+    monkeypatch.setattr(handlers, "training_start_fence_is_set", lambda: False)
+
+    payload = handlers.clear_training_log("job")
+
+    assert payload["job_id"] == "job"
+    assert load_job_state(root).step == 0
+
+
+def test_clear_training_log_succeeds_when_crashed_running_state(
+    tmp_path: Path, monkeypatch
+):
+    from zimage.training.contracts import JobState, JobStatus
+    from zimage.training.jobs import create_or_open_job, load_job_state, write_job_state
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    ckpt = root / "checkpoints" / "step-4" / "adapter.bin"
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    ckpt.write_bytes(b"ckpt")
+    write_job_state(root, JobState("job", JobStatus.RUNNING, step=4, epoch=1))
+
+    class DeadManager:
+        job_id = "job"
+
+        def is_running(self):
+            return False
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: DeadManager())
+    monkeypatch.setattr(handlers, "training_start_fence_is_set", lambda: False)
+
+    payload = handlers.clear_training_log("job")
+
+    state = load_job_state(root)
+    assert state.status is JobStatus.STOPPED
+    assert state.step == 0
+    assert list((root / "checkpoints").iterdir()) == []
+    assert payload["state"]["status"] == "stopped"
+    assert payload["state"]["step"] == 0
 
 
 def test_poll_training_log_read_error_does_not_raise(monkeypatch):

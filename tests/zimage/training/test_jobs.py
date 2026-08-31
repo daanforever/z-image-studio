@@ -9,9 +9,12 @@ from zimage.training.contracts import JobState, JobStatus
 from zimage.training.jobs import (
     JOB_ROOT_ENTRIES,
     JobController,
+    clear_job_previews,
     create_or_open_job,
     load_job_config,
     load_job_state,
+    preview_sample_path,
+    reset_job_progress,
     resolve_job_id,
     save_job_config,
     write_job_state,
@@ -381,3 +384,176 @@ def test_idle_save_rejects_immutable_lora_after_checkpoint(tmp_path):
     saved = save_job_config(root, lr_ok)
     assert saved["optimizer"]["learning_rate"] == 5.0e-5
     assert load_job_config(root)["optimizer"]["learning_rate"] == 5.0e-5
+
+
+def test_preview_sample_path_is_flat_filename(tmp_path):
+    job_dir = tmp_path / "job"
+    assert preview_sample_path(job_dir, 1, 0) == (
+        job_dir / "previews" / "00001-00-sample.png"
+    )
+    assert preview_sample_path(job_dir, 1, 1) == (
+        job_dir / "previews" / "00001-01-sample.png"
+    )
+    assert preview_sample_path(job_dir, 12, 3) == (
+        job_dir / "previews" / "00012-03-sample.png"
+    )
+
+
+def test_clear_job_previews_missing_dir_is_noop(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    clear_job_previews(job_dir)
+    assert not (job_dir / "previews").exists()
+
+
+def test_clear_job_previews_wipes_nested_and_flat_then_recreates_empty(tmp_path):
+    job_dir = tmp_path / "job"
+    previews = job_dir / "previews"
+    nested = previews / "step-1" / "00.png"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"nested")
+    flat = previews / "00001-00-sample.png"
+    flat.write_bytes(b"flat")
+
+    clear_job_previews(job_dir)
+
+    assert previews.is_dir()
+    assert list(previews.iterdir()) == []
+    assert not nested.exists()
+    assert not flat.exists()
+
+
+def test_reset_job_progress_missing_checkpoints_mkdirs_and_writes_state(tmp_path):
+    job_dir = tmp_path / "lonely-job"
+    job_dir.mkdir()
+    (job_dir / "config.yaml").write_text("sentinel config", encoding="utf-8")
+    (job_dir / "logs").mkdir()
+    (job_dir / "logs" / "job.log").write_text("planted log", encoding="utf-8")
+
+    state = reset_job_progress(job_dir)
+
+    checkpoints = job_dir / "checkpoints"
+    assert checkpoints.is_dir()
+    assert list(checkpoints.iterdir()) == []
+    assert state == JobState(
+        job_id="lonely-job",
+        status=JobStatus.STOPPED,
+        step=0,
+        epoch=0,
+        last_error=None,
+        exit_code=None,
+    )
+    assert load_job_state(job_dir) == state
+    assert (job_dir / "config.yaml").read_text(encoding="utf-8") == "sentinel config"
+    assert (job_dir / "logs" / "job.log").read_text(encoding="utf-8") == "planted log"
+
+
+def test_reset_job_progress_wipes_nested_tmp_and_resets_state(tmp_path):
+    root = create_or_open_job("My Job", tmp_path)
+    config_text = (root / "config.yaml").read_text(encoding="utf-8")
+    log_path = root / "logs" / "job.log"
+    log_path.write_text("planted log\n", encoding="utf-8")
+    (root / "previews" / "00001-00-sample.png").write_bytes(b"preview")
+    (root / "commands" / "cmd.json").write_text("{}", encoding="utf-8")
+    write_job_state(
+        root,
+        JobState(
+            job_id="wrong-id",
+            status=JobStatus.FAILED,
+            step=12,
+            epoch=3,
+            last_error="oom",
+            exit_code=1,
+        ),
+    )
+    nested = root / "checkpoints" / "step-1" / "adapter.bin"
+    nested.parent.mkdir()
+    nested.write_bytes(b"ckpt")
+    tmp_dir = root / "checkpoints" / "step-1.tmp" / "partial.bin"
+    tmp_dir.parent.mkdir()
+    tmp_dir.write_bytes(b"tmp")
+    tmp_file = root / "checkpoints" / "orphan.tmp"
+    tmp_file.write_bytes(b"tmpfile")
+
+    state = reset_job_progress(root)
+
+    checkpoints = root / "checkpoints"
+    assert checkpoints.is_dir()
+    assert list(checkpoints.iterdir()) == []
+    assert not nested.exists()
+    assert not tmp_dir.parent.exists()
+    assert not tmp_file.exists()
+    assert state == JobState(
+        job_id="my-job",
+        status=JobStatus.STOPPED,
+        step=0,
+        epoch=0,
+        last_error=None,
+        exit_code=None,
+    )
+    raw = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    assert raw == {
+        "epoch": 0,
+        "exit_code": None,
+        "job_id": "my-job",
+        "last_error": None,
+        "status": "stopped",
+        "step": 0,
+    }
+    assert (root / "config.yaml").read_text(encoding="utf-8") == config_text
+    assert log_path.read_text(encoding="utf-8") == "planted log\n"
+    assert (root / "previews" / "00001-00-sample.png").read_bytes() == b"preview"
+    assert (root / "commands" / "cmd.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_reset_job_progress_wipe_failure_leaves_state_untouched(tmp_path, monkeypatch):
+    root = create_or_open_job("job", tmp_path)
+    prior = JobState(
+        job_id="job",
+        status=JobStatus.COMPLETED,
+        step=8,
+        epoch=2,
+        last_error=None,
+        exit_code=0,
+    )
+    write_job_state(root, prior)
+    original = (root / "state.json").read_text(encoding="utf-8")
+    leftover = root / "checkpoints" / "step-4" / "w.bin"
+    leftover.parent.mkdir()
+    leftover.write_bytes(b"ckpt")
+
+    def fail_rmtree(*args, **kwargs):
+        raise OSError("simulated wipe failure")
+
+    monkeypatch.setattr("zimage.training.jobs.shutil.rmtree", fail_rmtree)
+
+    with pytest.raises(OSError, match="simulated wipe failure"):
+        reset_job_progress(root)
+
+    assert (root / "state.json").read_text(encoding="utf-8") == original
+    assert leftover.is_file()
+
+
+def test_reset_job_progress_leftover_after_wipe_does_not_write_state(tmp_path, monkeypatch):
+    root = create_or_open_job("job", tmp_path)
+    prior = JobState(
+        job_id="job",
+        status=JobStatus.FAILED,
+        step=4,
+        epoch=1,
+        last_error="err",
+        exit_code=1,
+    )
+    write_job_state(root, prior)
+    original = (root / "state.json").read_text(encoding="utf-8")
+    leftover = root / "checkpoints" / "step-2" / "w.bin"
+    leftover.parent.mkdir()
+    leftover.write_bytes(b"ckpt")
+
+    monkeypatch.setattr("zimage.training.jobs.shutil.rmtree", lambda *args, **kwargs: None)
+
+    with pytest.raises(OSError, match="failed to wipe checkpoints"):
+        reset_job_progress(root)
+
+    assert (root / "state.json").read_text(encoding="utf-8") == original
+    assert leftover.is_file()

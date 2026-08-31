@@ -53,6 +53,9 @@ from zimage.training.contracts import JobStatus
 from zimage.training.job_log import read_job_log_chunk, truncate_job_log
 from zimage.training.jobs import (
     CONFIG_FILE,
+    PREVIEWS_DIR,
+    clear_job_previews,
+    reset_job_progress,
     create_or_open_job,
     load_job_state,
     resolve_job_path,
@@ -642,10 +645,18 @@ def poll_training_state(job_id: str) -> dict[str, Any]:
     }
 
 
-def clear_training_log(job_id: str) -> None:
-    """Truncate ``logs/job.log`` for the job. Missing file is a no-op."""
+def clear_training_log(job_id: str) -> dict[str, Any]:
+    """Truncate log, wipe previews, and reset progress. Refuses while this job is live."""
     job_dir = _require_job_dir(job_id)
+    manager = _get_training_process_manager()
+    if training_start_fence_is_set() or (
+        manager.is_running() and manager.job_id == job_id
+    ):
+        raise RuntimeError("cannot clear training log while training is running; Stop first")
     truncate_job_log(job_dir)
+    clear_job_previews(job_dir)
+    reset_job_progress(job_dir)
+    return _job_view(job_dir)
 
 
 def poll_training_log(job_id: str, offset: int) -> dict[str, Any]:
@@ -791,7 +802,7 @@ def _state_mapping(state: Any) -> dict[str, Any]:
 
 
 def _list_previews(job_dir: Path) -> list[str]:
-    root = job_dir / "previews"
+    root = job_dir / PREVIEWS_DIR
     if not root.is_dir():
         return []
     paths = [

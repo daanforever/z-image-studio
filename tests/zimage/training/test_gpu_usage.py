@@ -13,6 +13,7 @@ from zimage.training.dataset import DatasetSample
 from zimage.training.gpu_usage import (
     GpuUsageProbe,
     GpuUsageSnapshot,
+    format_bytes,
     format_gpu_usage,
     snapshot_gpu_usage,
 )
@@ -138,6 +139,21 @@ def test_snapshot_released_text_encoder_is_none():
     }
 
 
+@pytest.mark.parametrize(
+    ("nbytes", "expected"),
+    [
+        (0, "0B"),
+        (7, "7B"),
+        (1024, "1.0KB"),
+        (1024**3, "1.0GB"),
+        (12458741248, "11.6GB"),
+        (12809404416, "11.9GB"),
+    ],
+)
+def test_format_bytes(nbytes: int, expected: str) -> None:
+    assert format_bytes(nbytes) == expected
+
+
 def test_format_gpu_usage_stable_line():
     snap = GpuUsageSnapshot(
         phase="cache_place",
@@ -152,8 +168,8 @@ def test_format_gpu_usage_stable_line():
         },
     )
     assert format_gpu_usage(snap) == (
-        "gpu usage phase=cache_place cuda=1 allocated=1024 "
-        "reserved=2048 peak_allocated=4096 "
+        "gpu usage phase=cache_place cuda=1 allocated=1.0KB "
+        "reserved=2.0KB peak_allocated=4.0KB "
         "vae=cuda text_encoder=cuda transformer=cpu"
     )
 

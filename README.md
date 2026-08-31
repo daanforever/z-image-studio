@@ -221,10 +221,11 @@ jobs/{job_id}/
   commands/
   checkpoints/
   previews/
+    {step:05d}-{index:02d}-sample.png
   logs/
 ```
 
-No `metrics/`. Training writes `logs/job.log`. `state.json` is operational only (`job_id`, `status`, `step`, `epoch`, `last_error`, `exit_code`). Checkpoints are native LoRA weights (`checkpoints/step-N/`); optimizer state is not saved.
+No `metrics/`. Training writes `logs/job.log`. `state.json` is operational only (`job_id`, `status`, `step`, `epoch`, `last_error`, `exit_code`). Checkpoints are native LoRA weights (`checkpoints/step-N/`); optimizer state is not saved. Preview images are flat `{step:05d}-{index:02d}-sample.png` files under `previews/`; there are no `step-N/` directories under `previews/`.
 
 ### CLI
 
@@ -241,7 +242,7 @@ python train.py status <job_id>
 
 ### UI
 
-**Generate** | **Training**. On Training: **Job** dropdown (select an existing job, or type a new name and click **Create**), YAML editor for `jobs/{id}/config.yaml`, **Validate** / **Save** / **Start** / **Stop**, operational status, **Previews** in the right column, and a full-width **Log** accordion (expanded by default) that live-tails `logs/job.log`. **Stop** is immediate: the trainer process is killed and no extra checkpoint is written.
+**Generate** | **Training**. On Training: **Job** dropdown (select an existing job, or type a new name and click **Create**), YAML editor for `jobs/{id}/config.yaml`, **Validate** / **Save** / **Start** / **Stop** / **Clear**, operational status, **Previews** in the right column, and a full-width **Log** accordion (expanded by default) that live-tails `logs/job.log`. **Stop** is immediate: the trainer process is killed and no extra checkpoint is written. **Clear** resets the log, previews, and progress/checkpoints.
 
 ### Policy
 

@@ -1001,6 +1001,11 @@ def test_checkpoint_writer_then_preview_sampler_order(tmp_path):
     assert [call[1]["prompt"] for call in sampler.calls] == ["one", "two"]
     assert sampler.calls[1][1]["seed"] == 7
     assert sampler.calls[0][0] is writer.saved[0]
+    assert [call[2] for call in sampler.calls] == [
+        root / "previews" / "00001-00-sample.png",
+        root / "previews" / "00001-01-sample.png",
+    ]
+    assert not any(child.is_dir() for child in (root / "previews").iterdir())
 
 
 def test_cuda_checkpoint_preview_handoff_exact_order(tmp_path):

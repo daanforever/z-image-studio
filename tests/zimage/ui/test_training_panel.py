@@ -180,6 +180,15 @@ def test_panel_constructs_without_launching_server_models_or_gpu(monkeypatch):
     assert demo.local_url is None
 
 
+def _ancestor_chain(block):
+    chain = []
+    current = block
+    while current is not None:
+        chain.append(current)
+        current = getattr(current, "parent", None)
+    return chain
+
+
 def test_panel_has_required_controls():
     demo, panel = _construct()
     ids = _elem_ids(demo)
@@ -188,6 +197,7 @@ def test_panel_has_required_controls():
     assert "studio-training-job-id" not in ids
     assert "studio-training-create-open" in ids
     assert "studio-training-job-selector" in ids
+    assert "studio-training-yaml-accordion" in ids
     assert "studio-training-yaml" in ids
     assert "studio-training-validate" in ids
     assert "studio-training-save" in ids
@@ -201,14 +211,33 @@ def test_panel_has_required_controls():
     assert panel.job_selector.label == "Job"
     assert panel.job_selector.allow_custom_value is True
     assert isinstance(panel.job_id, gr.State)
-    assert panel.yaml_editor.label == "config.yaml"
+    assert isinstance(panel.yaml_accordion, gr.Accordion)
+    assert panel.yaml_accordion.label == "config.yaml"
+    assert panel.yaml_accordion.open is False
+    assert panel.yaml_accordion.elem_id == "studio-training-yaml-accordion"
+    assert panel.yaml_editor.show_label is False
     assert panel.validate_btn.value == "Validate"
     assert panel.save_btn.value == "Save"
     assert panel.start_btn.value == "Start"
     assert panel.stop_btn.value == "Stop"
     assert isinstance(panel.yaml_editor, gr.Textbox)
+    assert panel.yaml_editor.elem_id == "studio-training-yaml"
     assert isinstance(panel.preview_gallery, gr.Gallery)
     assert panel.preview_gallery.preview is True
+
+
+def test_yaml_editor_inside_collapsed_config_accordion():
+    demo, panel = _construct()
+    assert panel.yaml_accordion in _ancestor_chain(panel.yaml_editor)
+    for btn in (
+        panel.validate_btn,
+        panel.save_btn,
+        panel.start_btn,
+        panel.stop_btn,
+        panel.create_open_btn,
+        panel.job_selector,
+    ):
+        assert panel.yaml_accordion not in _ancestor_chain(btn)
 
 
 def test_yaml_editor_is_raw_textbox_not_sampling_form():

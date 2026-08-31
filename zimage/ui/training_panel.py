@@ -76,6 +76,7 @@ class TrainingPanel:
     create_open_btn: gr.Button
     job_id: gr.State
     job_selector: gr.Dropdown
+    yaml_accordion: gr.Accordion
     yaml_editor: gr.Textbox
     validate_btn: gr.Button
     save_btn: gr.Button
@@ -369,19 +370,25 @@ def build_training_panel(
                         variant="primary",
                         elem_id="studio-training-create-open",
                     )
-                yaml_editor = gr.Textbox(
-                    label="config.yaml",
-                    value="",
-                    lines=22,
-                    max_lines=48,
-                    placeholder="Canonical jobs/{id}/config.yaml",
-                    info=(
-                        "Raw YAML for jobs/{id}/config.yaml. Sampling keys use "
-                        "Diffusers names (guidance_scale, num_inference_steps, …)."
-                    ),
-                    elem_id="studio-training-yaml",
-                    elem_classes=["studio-training-yaml"],
-                )
+                with gr.Accordion(
+                    "config.yaml",
+                    open=False,
+                    elem_id="studio-training-yaml-accordion",
+                ) as yaml_accordion:
+                    yaml_editor = gr.Textbox(
+                        label="config.yaml",
+                        show_label=False,
+                        value="",
+                        lines=22,
+                        max_lines=48,
+                        placeholder="Canonical jobs/{id}/config.yaml",
+                        info=(
+                            "Raw YAML for jobs/{id}/config.yaml. Sampling keys use "
+                            "Diffusers names (guidance_scale, num_inference_steps, …)."
+                        ),
+                        elem_id="studio-training-yaml",
+                        elem_classes=["studio-training-yaml"],
+                    )
                 with gr.Row():
                     validate_btn = gr.Button(
                         "Validate",
@@ -527,6 +534,7 @@ def build_training_panel(
         create_open_btn=create_open_btn,
         job_id=job_id,
         job_selector=job_selector,
+        yaml_accordion=yaml_accordion,
         yaml_editor=yaml_editor,
         validate_btn=validate_btn,
         save_btn=save_btn,

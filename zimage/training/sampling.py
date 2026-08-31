@@ -37,7 +37,11 @@ class PreviewSamplingError(RuntimeError):
 
 
 class UnfusedPreviewSampler:
-    """Serial PreviewSampler that swaps an unfused PEFT adapter on one transformer."""
+    """Serial PreviewSampler that swaps an unfused PEFT adapter on one transformer.
+
+    Loop parks main+optimizer; sampler moves sampling transformer+VAE for
+    denoise/decode, then parks both.
+    """
 
     def __init__(
         self,
@@ -595,6 +599,8 @@ def _empty_negative_embeds(prompt_embeds: Any) -> Any:
 
 
 def _as_embed_list(embeds: Any, device: torch.device) -> list[Any]:
+    """Copy embeddings onto *device*; do not mutate the stored maps."""
+
     if isinstance(embeds, torch.Tensor):
         return [embeds.to(device=device)]
     if isinstance(embeds, (list, tuple)):

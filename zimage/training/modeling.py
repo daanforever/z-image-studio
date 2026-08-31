@@ -367,7 +367,15 @@ def encode_prompt(
             output_hidden_states=True,
         )
     hidden_states = _field(output, "hidden_states")[-2]
-    return hidden_states[0][attention_mask[0]].detach().to(dtype=torch.bfloat16)
+    # Cache/preview tensors are CPU-resident. Sampler copies them onto the
+    # inference device in `_as_embed_list` (zimage/training/sampling.py) and
+    # must not write CUDA tensors back into the stores.
+    return (
+        hidden_states[0][attention_mask[0]]
+        .detach()
+        .to(device="cpu", dtype=torch.bfloat16)
+        .contiguous()
+    )
 
 
 @dataclass
@@ -569,7 +577,27 @@ def validate_sampling_topology(
 
 
 class TrainingModelLifecycle:
-    """Explicit encoder/cache lifecycle with no implicit component reload."""
+    """Explicit encoder/cache lifecycle with no implicit component reload.
+
+    Device residency (exclusive; production device is CUDA):
+
+    1. Load: tokenizer, TE, VAE, main transformer, sampling transformer stay
+       CPU (from_pretrained, no device_map). Never tokenizer.to(cuda).
+    2. Cache encode: before first stale encode_sample, VAE+TE to CUDA.
+       Main and sampling transformers stay CPU.
+    3. After cache and job-start preview prompt encode: VAE+TE to CPU,
+       empty_cache. Latents and prompt embeddings are CPU bf16. Then drop Qwen.
+    4. Preview prompt encode is cache-phase CUDA TE work. Sampler does not
+       re-encode. It copies CPU embeddings to CUDA only for the pipeline call
+       and must not write CUDA tensors back into the stores.
+    5. After training prep: CUDA holds only main transformer + LoRA.
+    6. Before preview sampling: loop moves main+optimizer to CPU. Sampler
+       moves sampling transformer+VAE to CUDA. Denoise and VAE decode on CUDA.
+    7. After preview sampling: sampler parks sampling transformer+VAE.
+       Loop restores main+LoRA and optimizer to CUDA.
+
+    device="cpu" is unit-test injection only.
+    """
 
     def __init__(self, components: TrainingModelComponents) -> None:
         self.components = components
@@ -636,30 +664,40 @@ class TrainingModelLifecycle:
             )
         return self._cache_encoder
 
-    def place_cache_modules(self, device: str | torch.device) -> None:
-        """Move VAE and text encoder onto ``device`` for cache encoding.
+    def place_cache_modules(
+        self, device: str | torch.device, *, vae: bool = True
+    ) -> None:
+        """Move cache modules onto ``device`` for encoding.
 
-        Updates ``ModelBackedCacheEncoder.device`` when the adapter already
-        exists. Does not move the training or sampling transformer, does not
-        quantize, and does not call ``tokenizer.to``.
+        ``vae=True`` moves VAE and text encoder and updates
+        ``ModelBackedCacheEncoder.device`` when the adapter already exists.
+        ``vae=False`` moves the text encoder only and does not set
+        ``cache_encoder.device``. Does not move the training or sampling
+        transformer, does not quantize, and does not call ``tokenizer.to``.
         """
 
-        for module in (self.components.vae, self.components.text_encoder):
+        modules = [self.components.text_encoder]
+        if vae:
+            modules = [self.components.vae, self.components.text_encoder]
+        for module in modules:
             if module is not None and hasattr(module, "to"):
                 module.to(device)
-        if self._cache_encoder is not None:
+        if vae and self._cache_encoder is not None:
             self._cache_encoder.device = device
 
     def park_cache_modules(self) -> None:
         """Move VAE and text encoder to CPU and reclaim accelerator memory.
 
-        Idempotent. Does not drop tokenizer or text-encoder references;
+        Idempotent. Sets ``cache_encoder.device`` to CPU when the adapter
+        exists. Does not drop tokenizer or text-encoder references;
         call ``release_text_resources`` to unload them.
         """
 
         for module in (self.components.vae, self.components.text_encoder):
             if module is not None and hasattr(module, "to"):
                 module.to("cpu")
+        if self._cache_encoder is not None:
+            self._cache_encoder.device = "cpu"
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -702,11 +740,11 @@ class TrainingModelLifecycle:
         loaders: ComponentLoaders | None = None,
         disable_mmap: bool = True,
     ) -> tuple[Any, Any]:
-        """Reload tokenizer + Qwen on CPU after ``release_text_resources``.
+        """Load tokenizer + Qwen weights on CPU after ``release_text_resources``.
 
-        Used only by the loop's serial mid-run prompt handoff. Callers must
-        invoke ``release_text_resources`` again after encoding. Never moves
-        Qwen onto CUDA.
+        Used only by the loop's serial mid-run prompt handoff. Does not place
+        Qwen onto the training device; callers must call ``place_cache_modules``
+        then ``release_text_resources`` after encoding.
         """
 
         if self.text_resources_loaded:

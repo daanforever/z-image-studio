@@ -84,6 +84,11 @@ class FakeVae(torch.nn.Module):
         self.config = {"shift_factor": 0.0, "scaling_factor": 1.0}
         self.revision = "fake-revision"
         self.dtype = torch.bfloat16
+        self.moved_to: list[object] = []
+
+    def to(self, *args, **kwargs):
+        self.moved_to.append(args[0] if args else kwargs.get("device"))
+        return super().to(*args, **kwargs)
 
     def encode(self, pixels):
         _batch, _channels, height, width = pixels.shape
@@ -1427,10 +1432,10 @@ def _track_place_park(monkeypatch, events: list, *, call_real: bool = True):
     real_place = loop_module.TrainingModelLifecycle.place_cache_modules
     real_park = loop_module.TrainingModelLifecycle.park_cache_modules
 
-    def tracking_place(self, device):
+    def tracking_place(self, device, *, vae=True):
         events.append(("place", torch.device(device).type))
         if call_real:
-            return real_place(self, device)
+            return real_place(self, device, vae=vae)
         return None
 
     def tracking_park(self):
@@ -1547,16 +1552,15 @@ def test_warm_cache_default_sampler_probe_records_place_and_end(
     root = make_job(tmp_path, max_steps=1)
     assert cache_job(root, **injections()) == 0
     phases: list[str] = []
-    assert (
-        run_job(
-            root,
-            **default_sampler_injections(
-                gpu_usage_probe=_recording_gpu_probe(phases)
-            ),
-        )
-        == 0
+    payload = default_sampler_injections(
+        gpu_usage_probe=_recording_gpu_probe(phases)
     )
+    assert run_job(root, **payload) == 0
     assert phases == ["cache_place", "cache_end", "train_placed", "teardown"]
+    text_encoder = payload["loaders"].text_encoder.created[0]
+    vae = payload["loaders"].vae.created[0]
+    assert text_encoder.moved_to
+    assert all(torch.device(target).type != "cuda" for target in vae.moved_to)
 
 
 def test_raising_gpu_probe_does_not_fail_job(tmp_path):
@@ -1625,10 +1629,16 @@ def test_preview_prompts_place_when_cache_is_valid(tmp_path, monkeypatch):
 
     def tracking_preview(self, prompts, *, max_sequence_length):
         events.append("preview")
-        assert next(self.components.text_encoder.parameters()).device.type == "cpu"
-        return real_preview(
+        place_target = events[0][1]
+        assert next(self.components.text_encoder.parameters()).device.type == (
+            place_target
+        )
+        embeddings = real_preview(
             self, prompts, max_sequence_length=max_sequence_length
         )
+        for tensor in embeddings.values():
+            assert tensor.device.type == "cpu"
+        return embeddings
 
     monkeypatch.setattr(
         loop_module.TrainingModelLifecycle,
@@ -1636,8 +1646,11 @@ def test_preview_prompts_place_when_cache_is_valid(tmp_path, monkeypatch):
         tracking_preview,
     )
 
-    assert run_job(root, **default_sampler_injections()) == 0
+    payload = default_sampler_injections()
+    assert run_job(root, **payload) == 0
     assert events == [("place", "cpu"), "preview", "park"]
+    vae = payload["loaders"].vae.created[0]
+    assert all(torch.device(target).type != "cuda" for target in vae.moved_to)
 
 
 def test_stale_cache_preview_runs_after_place_before_park(tmp_path, monkeypatch):
@@ -2080,6 +2093,52 @@ def test_bf16_cuda_path_accepted(monkeypatch):
     )
 
 
+def _cuda_prepared_runtime_kwargs(**overrides):
+    payload = {
+        "accelerator": PassthroughAccelerator("cuda"),
+        "transformer": torch.nn.Module(),
+        "setup": SimpleNamespace(fp8_enabled=False, adapter_name="default"),
+        "device": torch.device("cuda"),
+        "job": {"precision": "bf16"},
+        "injected": {},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_leftover_cuda_vae_fails_prepared_runtime():
+    components = SimpleNamespace(
+        vae=SimpleNamespace(device=torch.device("cuda")),
+        text_encoder=None,
+        sampling_transformer=None,
+    )
+    with pytest.raises(TrainingConfigError, match="vae on CUDA"):
+        _validate_prepared_training_runtime(
+            **_cuda_prepared_runtime_kwargs(components=components)
+        )
+
+
+def test_leftover_cuda_embed_tensor_fails_prepared_runtime():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    components = SimpleNamespace(
+        vae=SimpleNamespace(device=torch.device("cpu")),
+        text_encoder=None,
+        sampling_transformer=None,
+    )
+    with pytest.raises(
+        TrainingConfigError, match="preview_prompt_embeddings\\['prompt'\\] on CUDA"
+    ):
+        _validate_prepared_training_runtime(
+            **_cuda_prepared_runtime_kwargs(
+                components=components,
+                preview_prompt_embeddings={
+                    "prompt": torch.zeros(1, device="cuda"),
+                },
+            )
+        )
+
+
 def test_invalid_yaml_update_sets_last_error_and_consumes_command(tmp_path):
     root = make_job(tmp_path, max_steps=2)
     # Enqueue a structurally broken update payload via raw command file.
@@ -2144,7 +2203,9 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
         loop_module.TrainingModelLifecycle.prepare_preview_prompt_embeddings
     )
     real_release = loop_module.TrainingModelLifecycle.release_text_resources
+    real_place = loop_module.TrainingModelLifecycle.place_cache_modules
     real_apply = loop_module._apply_hot_runtime
+    placed = {"device": None, "vae": None}
 
     def tracking_reload(self, *args, **kwargs):
         tokenizer, encoder = real_reload(self, *args, **kwargs)
@@ -2154,10 +2215,33 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
             assert torch.device(encoder.moved_to[-1]).type == "cpu"
         return tokenizer, encoder
 
+    def tracking_place(self, device, *, vae=True):
+        target = torch.device(device)
+        if vae:
+            return real_place(self, device, vae=vae)
+        # Record residency without allocating CUDA tensors.
+        events.append("te_place")
+        placed["device"] = target
+        placed["vae"] = vae
+        encoder = self.components.text_encoder
+        if encoder is None:
+            return None
+        encoder.residency = target.type
+        if target.type != "cuda":
+            encoder.to(device)
+        return None
+
     def tracking_prepare(self, prompts, *, max_sequence_length):
         events.append("te_encode")
         assert self.text_resources_loaded
         encoder = self.components.text_encoder
+        target = placed["device"]
+        assert target is not None
+        assert placed["vae"] is False
+        residency = getattr(
+            encoder, "residency", next(encoder.parameters()).device.type
+        )
+        assert residency == target.type
         assert next(encoder.parameters()).device.type == "cpu"
         return real_prepare(
             self, prompts, max_sequence_length=max_sequence_length
@@ -2218,6 +2302,11 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
         loop_module.TrainingModelLifecycle,
         "reload_text_resources_on_cpu",
         tracking_reload,
+    )
+    monkeypatch.setattr(
+        loop_module.TrainingModelLifecycle,
+        "place_cache_modules",
+        tracking_place,
     )
     monkeypatch.setattr(
         loop_module.TrainingModelLifecycle,
@@ -2292,17 +2381,28 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
         "empty_cache",
         "sampler_release",
         "te_loaded",
+        "te_place",
         "te_encode",
         "te_released",
         "main_cuda",
         "optimizer_cuda",
         "sync",
     ]
+    assert placed["device"] is not None
+    assert placed["device"].type == "cuda"
+    assert placed["vae"] is False
     assert after_handoff["tokenizer"] is None
     assert after_handoff["text_encoder"] is None
     assert after_handoff["text_resources_loaded"] is False
     assert "brand new prompt" in after_handoff["prompts"]
     assert "brand new prompt" in sampler.prompt_embeddings
+    assert all(
+        tensor.device.type == "cpu"
+        for tensor in after_handoff["prompts"].values()
+        if isinstance(tensor, torch.Tensor)
+    )
+    vae = payload["loaders"].vae.created[0]
+    assert all(torch.device(target).type != "cuda" for target in vae.moved_to)
     assert after_handoff["main_residency"] == "cuda"
     assert set(after_handoff["main_devices"].values()) <= {"cpu"}
     assert set(after_handoff["optimizer_devices"] or ["cpu"]) <= {"cpu"}

@@ -241,9 +241,10 @@ class FakeTextEncoder(torch.nn.Module):
 
     def forward(self, **kwargs):
         self.calls.append(kwargs)
-        penultimate = torch.arange(4 * 2560, dtype=torch.float32).reshape(
-            1, 4, 2560
-        )
+        device = kwargs["input_ids"].device
+        penultimate = torch.arange(
+            4 * 2560, dtype=torch.float32, device=device
+        ).reshape(1, 4, 2560)
         final = torch.full_like(penultimate, -1)
         return SimpleNamespace(hidden_states=[torch.zeros_like(final), penultimate, final])
 
@@ -288,6 +289,29 @@ def test_prompt_encoding_matches_zimage_chat_template_and_removes_padding():
         .reshape(4, 2560)[:3]
         .to(torch.bfloat16),
     )
+
+
+def test_encode_prompt_stages_embeddings_to_cpu_bfloat16():
+    tokenizer = FakeTokenizer()
+    encoder = FakeTextEncoder()
+    target_device = (
+        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    )
+    if target_device.type == "cuda":
+        encoder.to(target_device)
+
+    embedding = encode_prompt(
+        tokenizer,
+        encoder,
+        "caption",
+        max_sequence_length=4,
+        device=target_device,
+    )
+
+    assert encoder.calls[0]["input_ids"].device.type == target_device.type
+    assert embedding.device.type == "cpu"
+    assert embedding.dtype is torch.bfloat16
+    assert embedding.is_contiguous()
 
 
 class FakeLatentDistribution:
@@ -986,7 +1010,7 @@ def test_place_cache_modules_moves_vae_and_text_encoder_not_transformer():
     device = torch.device("cpu")
     assert encoder.device is None
 
-    lifecycle.place_cache_modules(device)
+    lifecycle.place_cache_modules(device, vae=True)
 
     assert lifecycle.components.vae.to_calls == [device]
     assert lifecycle.components.text_encoder.to_calls == [device]
@@ -1001,8 +1025,29 @@ def test_place_cache_modules_moves_vae_and_text_encoder_not_transformer():
     assert lifecycle.components.tokenizer.to_calls == []
 
 
+def test_place_cache_modules_vae_false_moves_text_encoder_only():
+    lifecycle = make_lifecycle()
+    encoder = lifecycle.cache_encoder()
+    device = torch.device("cpu")
+    assert encoder.device is None
+
+    lifecycle.place_cache_modules(device, vae=False)
+
+    assert lifecycle.components.vae.to_calls == []
+    assert lifecycle.components.text_encoder.to_calls == [device]
+    assert next(lifecycle.components.text_encoder.parameters()).device.type == (
+        device.type
+    )
+    assert encoder.device is None
+    assert lifecycle.cache_encoder() is encoder
+    assert lifecycle.components.main_transformer.to_calls == []
+    assert lifecycle.components.sampling_transformer.to_calls == []
+    assert lifecycle.components.tokenizer.to_calls == []
+
+
 def test_park_cache_modules_is_idempotent_and_keeps_text_refs_until_release():
     lifecycle = make_lifecycle()
+    encoder = lifecycle.cache_encoder()
     tokenizer = lifecycle.components.tokenizer
     text_encoder = lifecycle.components.text_encoder
     lifecycle.place_cache_modules(torch.device("cpu"))
@@ -1013,15 +1058,18 @@ def test_park_cache_modules_is_idempotent_and_keeps_text_refs_until_release():
     assert lifecycle.components.text_encoder.to_calls[-1] == "cpu"
     assert next(lifecycle.components.vae.parameters()).device.type == "cpu"
     assert next(lifecycle.components.text_encoder.parameters()).device.type == "cpu"
+    assert torch.device(encoder.device).type == "cpu"
     assert lifecycle.components.tokenizer is tokenizer
     assert lifecycle.components.text_encoder is text_encoder
     assert lifecycle.text_resources_loaded is True
     assert tokenizer.to_calls == []
+    assert lifecycle.cache_encoder() is encoder
 
     lifecycle.park_cache_modules()
     assert lifecycle.components.vae.to_calls[-1] == "cpu"
     assert lifecycle.components.text_encoder is text_encoder
     assert lifecycle.components.tokenizer is tokenizer
+    assert torch.device(encoder.device).type == "cpu"
 
     lifecycle.release_text_resources()
     assert lifecycle.text_resources_loaded is False

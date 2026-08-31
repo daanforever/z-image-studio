@@ -321,9 +321,11 @@ def _place_cache_modules(
     target: torch.device,
     injected: Mapping[str, Any],
     components: TrainingModelComponents,
+    *,
+    vae: bool = True,
 ) -> None:
     placed[0] = True
-    lifecycle.place_cache_modules(target)
+    lifecycle.place_cache_modules(target, vae=vae)
     _probe_gpu_usage(injected, "cache_place", components)
 
 
@@ -349,7 +351,9 @@ def _prepare_cache(
             if device is not None
             else _resolve_training_device(injected)
         )
-        _place_cache_modules(flag, lifecycle, target, injected, components)
+        _place_cache_modules(
+            flag, lifecycle, target, injected, components, vae=True
+        )
 
     log.info("cache prepare samples=%s", len(samples))
     return prepare(
@@ -397,6 +401,8 @@ def _build_runtime(
     accelerator: Any = None,
     device: torch.device | str | None = None,
 ) -> dict[str, Any]:
+    """Assemble cache and training objects. Device residency: see TrainingModelLifecycle."""
+
     training_device = (
         torch.device(device)
         if device is not None
@@ -422,7 +428,12 @@ def _build_runtime(
         )
         if "preview_sampler" not in injected and not placed[0]:
             _place_cache_modules(
-                placed, lifecycle, training_device, injected, components
+                placed,
+                lifecycle,
+                training_device,
+                injected,
+                components,
+                vae=False,
             )
         if "preview_sampler" not in injected:
             preview_prompt_embeddings, preview_negative_embeddings = (
@@ -473,6 +484,9 @@ def _build_runtime(
         device=training_device,
         job=job,
         injected=injected,
+        components=components,
+        preview_prompt_embeddings=preview_prompt_embeddings,
+        preview_negative_embeddings=preview_negative_embeddings,
     )
     _probe_gpu_usage(injected, "train_placed", components)
     _seed_everything(int(job["seed"]))
@@ -687,6 +701,7 @@ def _write_checkpoint_then_sample(
     runtime: dict[str, Any],
     injected: Mapping[str, Any],
 ) -> int:
+    """Loop parks main+optimizer; sampler moves sampling transformer+VAE for denoise/decode, then parks both."""
     writer: CheckpointWriter | None = _injected_or_default(
         injected, "checkpoint_writer", _default_checkpoint_writer
     )
@@ -1100,10 +1115,11 @@ def _refresh_preview_embeddings_serial(
     runtime: dict[str, Any],
     injected: Mapping[str, Any],
 ) -> None:
-    """Pause main + sampling, encode new prompts on CPU TE, restore main.
+    """Pause main, encode new prompts on the training-device TE, restore main.
 
-    Does not rebuild the training stack. Text encoder stays on CPU and is
-    released again before training resumes.
+    Does not rebuild the training stack. Reloads Qwen weights on CPU, places
+    the text encoder (not VAE) onto the training device, encodes, releases
+    text resources, then restores main.
     """
 
     lifecycle = runtime.get("lifecycle")
@@ -1133,6 +1149,7 @@ def _refresh_preview_embeddings_serial(
         loaders = injected.get("loaders")
         lifecycle.reload_text_resources_on_cpu(loaders=loaders)
         try:
+            lifecycle.place_cache_modules(training_device, vae=False)
             prompt_embeds, negative_embeds = _prepare_preview_embeddings(
                 runtime["config"],
                 lifecycle,
@@ -1584,6 +1601,9 @@ def _validate_prepared_training_runtime(
     device: torch.device,
     job: Mapping[str, Any],
     injected: Mapping[str, Any],
+    components: Any = None,
+    preview_prompt_embeddings: Mapping[str, Any] | None = None,
+    preview_negative_embeddings: Mapping[str, Any] | None = None,
 ) -> None:
     """Fail before the first step if prepare drifted off the target contract."""
 
@@ -1622,6 +1642,60 @@ def _validate_prepared_training_runtime(
             f"{device} after accelerator.prepare; "
             f"violations: {', '.join(violations)}"
         )
+
+    if device.type == "cuda" and components is not None:
+        leftovers: list[str] = []
+        for name in ("vae", "text_encoder", "sampling_transformer"):
+            module = getattr(components, name, None)
+            if module is None:
+                continue
+            if _reports_cuda(module):
+                leftovers.append(f"{name} on CUDA")
+        leftovers.extend(
+            _cuda_embed_leftovers(
+                "preview_prompt_embeddings", preview_prompt_embeddings
+            )
+        )
+        leftovers.extend(
+            _cuda_embed_leftovers(
+                "preview_negative_embeddings", preview_negative_embeddings
+            )
+        )
+        if leftovers:
+            raise TrainingConfigError(
+                "leftover CUDA VAE, text encoder, sampling transformer, "
+                "or preview embeddings after training prep; "
+                f"violations: {', '.join(leftovers)}"
+            )
+
+
+def _reports_cuda(module: Any) -> bool:
+    try:
+        reported = getattr(module, "device", None)
+        if reported is not None and not callable(reported):
+            return torch.device(reported).type == "cuda"
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        pass
+    try:
+        return next(module.parameters()).device.type == "cuda"
+    except (AttributeError, StopIteration, TypeError, RuntimeError):
+        return False
+
+
+def _cuda_embed_leftovers(label: str, store: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(store, Mapping):
+        return []
+    leftovers: list[str] = []
+    for key, value in store.items():
+        if isinstance(value, torch.Tensor):
+            tensors = [value]
+        elif isinstance(value, (list, tuple)):
+            tensors = [item for item in value if isinstance(item, torch.Tensor)]
+        else:
+            continue
+        if any(tensor.device.type == "cuda" for tensor in tensors):
+            leftovers.append(f"{label}[{key!r}] on CUDA")
+    return leftovers
 
 
 def _training_device_from_runtime(

@@ -432,6 +432,10 @@ def _prepare_cache(
             encode_scope.__exit__(None, None, None)
             peak_bytes = encode_scope.peak_bytes
             encode_scope = None
+        collect = injected.get("garbage_collect", gc.collect)
+        empty_cache = injected.get("cuda_empty_cache", torch.cuda.empty_cache)
+        collect()
+        empty_cache()
         width, height = image_size
         log.info(
             "cache encode n=%s samples=%s path=%s size=%sx%s",

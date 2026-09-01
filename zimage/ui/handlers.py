@@ -73,6 +73,7 @@ _stop_event = threading.Event()
 _LEASE_WAIT_TIMEOUT_SECONDS = 300.0
 _LEASE_WAIT_POLL_SECONDS = 0.05
 _training_manager: TrainingProcessManager | None = None
+_training_start_job_id: str | None = None
 _PREVIEW_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
 
 
@@ -598,12 +599,14 @@ def queue_training_update(job_id: str, text: str) -> dict[str, Any]:
 
 def start_training_job(job_id: str) -> dict[str, Any]:
     """Handoff the GPU lease, unload inference, then start the trainer child."""
+    global _training_start_job_id
     job_dir = _require_job_dir(job_id)
     manager = _get_training_process_manager()
     if manager.is_running() or training_start_fence_is_set():
         raise RuntimeError("training is already running")
     request_stop()
     guard = _wait_for_gpu_lease()
+    _training_start_job_id = job_id
     set_training_start_fence()
     try:
         guard.release()
@@ -620,6 +623,7 @@ def start_training_job(job_id: str) -> dict[str, Any]:
     finally:
         # Child holds the GPU lease, or start failed / timed out.
         clear_training_start_fence()
+        _training_start_job_id = None
     return _job_view(job_dir, message="Start requested.")
 
 
@@ -645,13 +649,17 @@ def poll_training_state(job_id: str) -> dict[str, Any]:
     }
 
 
+def _training_job_is_live(job_id: str) -> bool:
+    if training_start_fence_is_set() and _training_start_job_id == job_id:
+        return True
+    manager = _get_training_process_manager()
+    return bool(manager.is_running() and manager.job_id == job_id)
+
+
 def clear_training_log(job_id: str) -> dict[str, Any]:
     """Truncate log, wipe previews, and reset progress. Refuses while this job is live."""
     job_dir = _require_job_dir(job_id)
-    manager = _get_training_process_manager()
-    if training_start_fence_is_set() or (
-        manager.is_running() and manager.job_id == job_id
-    ):
+    if _training_job_is_live(job_id):
         raise RuntimeError("cannot clear training log while training is running; Stop first")
     truncate_job_log(job_dir)
     clear_job_previews(job_dir)

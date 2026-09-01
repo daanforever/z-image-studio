@@ -1258,6 +1258,7 @@ def test_start_training_job_handoff_sequence(tmp_path: Path, monkeypatch):
 
         def start(self, job_id):
             fence_at["start"] = training_start_fence_is_set()
+            fence_at["start_job_id"] = handlers._training_start_job_id
             order.append(("start", job_id))
 
         def stop(self):
@@ -1284,7 +1285,9 @@ def test_start_training_job_handoff_sequence(tmp_path: Path, monkeypatch):
     assert fence_at["acquire"] is False
     assert fence_at["release"] is True
     assert fence_at["start"] is True
+    assert fence_at["start_job_id"] == "job"
     assert training_start_fence_is_set() is False
+    assert handlers._training_start_job_id is None
     handlers.stop_training_job("job")
     assert order[-1] == "stop"
 
@@ -1335,6 +1338,7 @@ def test_start_training_keeps_fence_until_foreign_holder_pid(tmp_path: Path, mon
     assert fence_before_holder[0] is True
     assert fence_before_holder[1] is True
     assert training_start_fence_is_set() is False
+    assert handlers._training_start_job_id is None
 
 
 def test_start_training_clears_fence_when_start_fails(tmp_path: Path, monkeypatch):
@@ -1371,6 +1375,7 @@ def test_start_training_clears_fence_when_start_fails(tmp_path: Path, monkeypatc
     with pytest.raises(RuntimeError, match="spawn failed"):
         handlers.start_training_job("job")
     assert training_start_fence_is_set() is False
+    assert handlers._training_start_job_id is None
 
 
 def test_start_training_clears_fence_when_holder_wait_times_out(tmp_path: Path, monkeypatch):
@@ -1419,6 +1424,7 @@ def test_start_training_clears_fence_when_holder_wait_times_out(tmp_path: Path, 
     with pytest.raises(RuntimeError, match="Timed out waiting for the trainer"):
         handlers.start_training_job("job")
     assert training_start_fence_is_set() is False
+    assert handlers._training_start_job_id is None
     assert manager.stopped is True
 
 
@@ -1821,6 +1827,7 @@ def test_clear_training_log_refuses_when_start_fence_set(tmp_path: Path, monkeyp
     monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
     monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: IdleManager())
     monkeypatch.setattr(handlers, "training_start_fence_is_set", lambda: True)
+    monkeypatch.setattr(handlers, "_training_start_job_id", "job")
 
     with pytest.raises(RuntimeError, match="Stop first"):
         handlers.clear_training_log("job")
@@ -1829,6 +1836,37 @@ def test_clear_training_log_refuses_when_start_fence_set(tmp_path: Path, monkeyp
     assert preview.is_file()
     assert ckpt.is_file()
     assert (root / "state.json").read_bytes() == state_bytes
+
+
+def test_clear_training_log_succeeds_when_start_fence_is_for_other_job(
+    tmp_path: Path, monkeypatch
+):
+    from zimage.training.contracts import JobState, JobStatus
+    from zimage.training.jobs import create_or_open_job, load_job_state, write_job_state
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    ckpt = root / "checkpoints" / "step-2" / "adapter.bin"
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    ckpt.write_bytes(b"ckpt")
+    write_job_state(root, JobState("job", JobStatus.STOPPED, step=2, epoch=0))
+
+    class IdleManager:
+        job_id = None
+
+        def is_running(self):
+            return False
+
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+    monkeypatch.setattr(handlers, "_get_training_process_manager", lambda: IdleManager())
+    monkeypatch.setattr(handlers, "training_start_fence_is_set", lambda: True)
+    monkeypatch.setattr(handlers, "_training_start_job_id", "other")
+
+    payload = handlers.clear_training_log("job")
+
+    assert payload["state"]["step"] == 0
+    assert load_job_state(root).status is JobStatus.STOPPED
+    assert list((root / "checkpoints").iterdir()) == []
 
 
 def test_clear_training_log_succeeds_when_other_job_running(
@@ -2056,6 +2094,7 @@ def test_start_training_unloads_cached_pipeline_and_next_inference_reloads(
     assert pipeline_mod._pipe_key is None
     assert fence_at["start"] is True
     assert training_start_fence_is_set() is False
+    assert handlers._training_start_job_id is None
     assert loads == []
 
     child_lease = FileRuntimeGuard(lock_path)

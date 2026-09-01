@@ -6,8 +6,6 @@ REM --- Hugging Face cache (local weights) ---
 if not defined HF_HUB_CACHE set "HF_HUB_CACHE=E:\Backup\huggingface\hub"
 if not defined HF_HOME set "HF_HOME=E:\Backup\huggingface"
 set "HF_HUB_OFFLINE=0"
-set "TRANSFORMERS_OFFLINE=0"
-set "HF_DATASETS_OFFLINE=0"
 
 REM Model: HF id or full snapshot path.
 REM Uncomment to skip the Hub and load a specific snapshot:

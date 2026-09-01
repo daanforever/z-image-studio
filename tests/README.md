@@ -201,7 +201,7 @@ CUDA missing → exit 1. nvidia-smi missing → zeros; the job continues.
 | `ZIMAGE_REAL_MAIN_MODEL` | yes | Absolute local **Base** snapshot |
 | `ZIMAGE_REAL_SAMPLING_MODEL` | yes | Absolute local **Turbo** snapshot |
 
-Snapshots must be absolute existing directories. The tests set Hub/Transformers offline flags so they cannot download weights.
+Snapshots must be absolute existing directories. The test sets `HF_HUB_OFFLINE=1`.
 
 ## What / How / Why (real GPU tests)
 

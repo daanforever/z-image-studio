@@ -415,7 +415,6 @@ def test_real_blackwell_fp8_warm_start_turbo_preview_smoke(
     main_model = required_local_snapshot(REAL_MAIN_MODEL)
     sampling_model = required_local_snapshot(REAL_SAMPLING_MODEL)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
 
     dataset_dir = (tmp_path / "dataset").resolve()
     dataset_dir.mkdir()

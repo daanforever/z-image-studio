@@ -367,6 +367,13 @@ def test_training_two_column_job_and_preview_layout():
     assert getattr(right_col, "scale", None) == 6
     assert right_col in _ancestor_chain(panel.preview_gallery)
     assert right_col in _ancestor_chain(panel.operational_state)
+    right_children = list(right_col.children)
+    assert right_children.index(panel.preview_gallery) < right_children.index(
+        panel.operational_state
+    )
+    assert right_children.index(panel.operational_state) < right_children.index(
+        panel.message
+    )
     assert right_col not in _ancestor_chain(job)
     assert body_row not in _ancestor_chain(panel.log_accordion)
     assert body_row not in _ancestor_chain(panel.start_btn)

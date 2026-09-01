@@ -525,11 +525,6 @@ def build_training_panel(
                     elem_id="studio-training-image-format",
                 )
             with gr.Column(scale=6):
-                operational_state = gr.Markdown(
-                    format_operational_state({}),
-                    elem_id="studio-training-state",
-                )
-                message = gr.Markdown("", elem_id="studio-training-message")
                 preview_gallery = gr.Gallery(
                     label="Previews",
                     columns=2,
@@ -539,6 +534,11 @@ def build_training_panel(
                     format="png",
                     elem_id="studio-training-previews",
                 )
+                operational_state = gr.Markdown(
+                    format_operational_state({}),
+                    elem_id="studio-training-state",
+                )
+                message = gr.Markdown("", elem_id="studio-training-message")
                 log_delta = gr.Textbox(
                     value="",
                     label="log delta",

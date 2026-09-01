@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import logging
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -95,19 +97,19 @@ def test_component_loading_uses_main_and_separate_sampling_sources():
         ("tokenizer", "org/main", "tokenizer", "main-rev"),
         ("text_encoder", "org/main", "text_encoder", "main-rev"),
         ("scheduler", "org/main", "scheduler", "main-rev"),
+        (
+            "transformer",
+            "Tongyi-MAI/Z-Image-Turbo",
+            "transformer",
+            "sample-rev",
+        ),
+        (
+            "scheduler",
+            "Tongyi-MAI/Z-Image-Turbo",
+            "scheduler",
+            "sample-rev",
+        ),
         ("transformer", "org/main", "transformer", "main-rev"),
-        (
-            "transformer",
-            "Tongyi-MAI/Z-Image-Turbo",
-            "transformer",
-            "sample-rev",
-        ),
-        (
-            "scheduler",
-            "Tongyi-MAI/Z-Image-Turbo",
-            "scheduler",
-            "sample-rev",
-        ),
     ]
     model_calls = [
         kwargs
@@ -138,8 +140,8 @@ def test_load_training_components_logs_loading_order(caplog):
     required = [
         "loading vae",
         "loading text encoder",
-        "loading main transformer",
         "loading sampling transformer",
+        "loading main transformer",
     ]
 
     with caplog.at_level(logging.INFO, logger="zimage.training"):
@@ -152,6 +154,7 @@ def test_load_training_components_logs_loading_order(caplog):
     ]
     assert [message for message in messages if message in required] == required
     assert [kind for kind, *_ in calls][:1] == ["vae"]
+    assert not any("quantize" in message for message in messages)
 
 
 def test_omitted_sampling_source_loads_distinct_instances_from_main():
@@ -167,15 +170,311 @@ def test_omitted_sampling_source_loads_distinct_instances_from_main():
     assert [kind for kind, *_ in calls].count("transformer") == 2
     assert [kind for kind, *_ in calls].count("scheduler") == 2
     assert [
-        (source, kwargs["revision"])
+        (kind, source, kwargs["subfolder"], kwargs["revision"])
         for kind, source, kwargs, _ in calls
         if kind in {"transformer", "scheduler"}
     ] == [
-        ("local/model", None),
-        ("local/model", None),
-        ("local/model", None),
-        ("local/model", None),
+        ("scheduler", "local/model", "scheduler", None),
+        ("transformer", "local/model", "transformer", None),
+        ("scheduler", "local/model", "scheduler", None),
+        ("transformer", "local/model", "transformer", None),
     ]
+
+
+def _separate_source_job(**extra):
+    payload = {
+        "model": {
+            "main_transformer": {"path": "org/main", "revision": "main-rev"},
+            "sampling_transformer": {
+                "path": "Tongyi-MAI/Z-Image-Turbo",
+                "revision": "sample-rev",
+            },
+        },
+    }
+    payload.update(extra)
+    return payload
+
+
+def _boom_quantize(*_args, **_kwargs):
+    raise AssertionError("load-time quantization must not run")
+
+
+def test_fp8_capable_load_order_quantizes_te_and_sampling_before_main(
+    monkeypatch,
+):
+    events = []
+
+    def quantize_te(module, *, precision="fp8"):
+        events.append(("quantize", "text_encoder", module, precision))
+
+    def quantize_sampling(module, *, precision="fp8"):
+        events.append(("quantize", "sampling_transformer", module, precision))
+
+    monkeypatch.setattr("zimage.training.modeling.quantize_text_encoder", quantize_te)
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_sampling_transformer",
+        quantize_sampling,
+    )
+    monkeypatch.setattr(
+        "zimage.training.modeling.setup_main_transformer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("main-transformer conversion")
+        ),
+    )
+    monkeypatch.setattr(
+        "zimage.training.modeling.gc.collect",
+        lambda: events.append(("gc",)),
+    )
+
+    original_from_pretrained = RecordingOwner.from_pretrained
+
+    def tracking_from_pretrained(self, source, **kwargs):
+        component = original_from_pretrained(self, source, **kwargs)
+        events.append(("load", self.label, source, kwargs["subfolder"]))
+        original_requires_grad = component.requires_grad_
+
+        def tracking_requires_grad(value):
+            events.append(("freeze", self.label))
+            return original_requires_grad(value)
+
+        component.requires_grad_ = tracking_requires_grad
+        return component
+
+    monkeypatch.setattr(RecordingOwner, "from_pretrained", tracking_from_pretrained)
+
+    source = inspect.getsource(load_training_components)
+    assert "setup_main_transformer" not in source
+    assert "convert_to_float8" not in source
+
+    components = load_training_components(
+        _separate_source_job(precision=" FP8 "),
+        loaders=make_loaders([]),
+        quantize_capable=True,
+    )
+
+    observed = [
+        ("quantize", event[1], event[3]) if event[0] == "quantize" else event
+        for event in events
+    ]
+    assert observed == [
+        ("load", "vae", "org/main", "vae"),
+        ("load", "tokenizer", "org/main", "tokenizer"),
+        ("load", "text_encoder", "org/main", "text_encoder"),
+        ("freeze", "text_encoder"),
+        ("quantize", "text_encoder", "fp8"),
+        ("gc",),
+        ("load", "scheduler", "org/main", "scheduler"),
+        ("load", "transformer", "Tongyi-MAI/Z-Image-Turbo", "transformer"),
+        ("quantize", "sampling_transformer", "fp8"),
+        ("gc",),
+        ("load", "scheduler", "Tongyi-MAI/Z-Image-Turbo", "scheduler"),
+        ("load", "transformer", "org/main", "transformer"),
+        ("freeze", "vae"),
+    ]
+    te_event = next(
+        event for event in events if event[:2] == ("quantize", "text_encoder")
+    )
+    sampling_event = next(
+        event
+        for event in events
+        if event[:2] == ("quantize", "sampling_transformer")
+    )
+    assert te_event[2] is components.text_encoder
+    assert sampling_event[2] is components.sampling_transformer
+    assert sampling_event[2] is not components.main_transformer
+    assert components.vae.frozen is True
+    assert components.text_encoder.frozen is True
+
+
+def test_same_source_sampling_helper_receives_distinct_instance(monkeypatch):
+    received = []
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_text_encoder",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_sampling_transformer",
+        lambda module, *, precision="fp8": received.append(module),
+    )
+
+    components = load_training_components(
+        {
+            "precision": "fp8",
+            "model": {"main_transformer": {"path": "local/model", "revision": None}},
+        },
+        loaders=make_loaders([]),
+        quantize_capable=True,
+    )
+
+    assert received == [components.sampling_transformer]
+    assert components.sampling_transformer is not components.main_transformer
+
+
+@pytest.mark.parametrize(
+    "job_precision,load_kwargs",
+    [
+        (None, {}),
+        ("fp8", {}),
+        ("fp8", {"quantize_capable": False}),
+        ("bf16", {"quantize_capable": True}),
+        (" BF16 ", {"quantize_capable": True}),
+    ],
+)
+def test_load_skips_quantization_without_capable_fp8(
+    monkeypatch, caplog, job_precision, load_kwargs
+):
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_text_encoder", _boom_quantize
+    )
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_sampling_transformer",
+        _boom_quantize,
+    )
+    gc_calls = []
+    monkeypatch.setattr(
+        "zimage.training.modeling.gc.collect", lambda: gc_calls.append(1)
+    )
+    extra = {} if job_precision is None else {"precision": job_precision}
+    caplog.set_level(logging.INFO, logger="zimage.training")
+
+    components = load_training_components(
+        _separate_source_job(**extra),
+        loaders=make_loaders([]),
+        **load_kwargs,
+    )
+
+    assert gc_calls == []
+    assert getattr(components.text_encoder, "_quantized_precision", None) is None
+    assert getattr(components.sampling_transformer, "_quantized_precision", None) is None
+    assert getattr(components.main_transformer, "_quantized_precision", None) is None
+    assert components.vae.frozen is True
+    assert components.text_encoder.frozen is True
+    assert "quantize" not in caplog.text
+
+
+def test_unsupported_load_precision_raises_before_loading():
+    calls = []
+    with pytest.raises(ModelConfigurationError, match="unsupported precision"):
+        load_training_components(
+            _separate_source_job(precision="int8"),
+            loaders=make_loaders(calls),
+            quantize_capable=True,
+        )
+    assert calls == []
+
+
+def test_text_encoder_quantization_failure_identifies_component(monkeypatch):
+    calls = []
+    gc_calls = []
+    monkeypatch.setattr(
+        "zimage.training.modeling.gc.collect", lambda: gc_calls.append(1)
+    )
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_text_encoder",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("forced conversion failure")
+        ),
+    )
+
+    with pytest.raises(ModelConfigurationError, match="text encoder"):
+        load_training_components(
+            _separate_source_job(precision="fp8"),
+            loaders=make_loaders(calls),
+            quantize_capable=True,
+        )
+
+    assert [kind for kind, *_ in calls] == ["vae", "tokenizer", "text_encoder"]
+    text_encoder = next(item[3] for item in calls if item[0] == "text_encoder")
+    assert getattr(text_encoder, "_quantized_precision", None) is None
+    assert gc_calls == []
+
+
+def test_sampling_quantization_failure_identifies_component(monkeypatch):
+    calls = []
+    gc_calls = []
+    monkeypatch.setattr(
+        "zimage.training.modeling.gc.collect", lambda: gc_calls.append(1)
+    )
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_text_encoder",
+        lambda module, *, precision="fp8": setattr(
+            module, "_quantized_precision", precision
+        ),
+    )
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_sampling_transformer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("forced conversion failure")
+        ),
+    )
+
+    with pytest.raises(ModelConfigurationError, match="sampling transformer"):
+        load_training_components(
+            _separate_source_job(precision="fp8"),
+            loaders=make_loaders(calls),
+            quantize_capable=True,
+        )
+
+    assert [kind for kind, *_ in calls] == [
+        "vae",
+        "tokenizer",
+        "text_encoder",
+        "scheduler",
+        "transformer",
+    ]
+    sampling = next(item[3] for item in calls if item[0] == "transformer")
+    assert getattr(sampling, "_quantized_precision", None) is None
+    assert gc_calls == [1]
+
+
+def test_bf16_and_incapable_load_do_not_import_torchao_quantization():
+    code = r"""
+import sys
+from types import SimpleNamespace
+
+from zimage.training.modeling import ComponentLoaders, load_training_components
+
+
+class Owner:
+    def from_pretrained(self, source, **kwargs):
+        obj = SimpleNamespace()
+        obj.requires_grad_ = lambda _value: obj
+        return obj
+
+
+loaders = ComponentLoaders(
+    vae=Owner(),
+    tokenizer=Owner(),
+    text_encoder=Owner(),
+    transformer=Owner(),
+    scheduler=Owner(),
+)
+job = {
+    "model": {"main_transformer": {"path": "org/main", "revision": None}},
+}
+load_training_components(job, loaders=loaders)
+load_training_components(
+    {**job, "precision": "bf16"},
+    loaders=loaders,
+    quantize_capable=True,
+)
+load_training_components(
+    {**job, "precision": "fp8"},
+    loaders=loaders,
+    quantize_capable=False,
+)
+forbidden = [name for name in sys.modules if name.startswith("torchao.quantization")]
+if forbidden:
+    print(",".join(forbidden), file=sys.stderr)
+raise SystemExit(bool(forbidden))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -312,6 +611,40 @@ def test_encode_prompt_stages_embeddings_to_cpu_bfloat16():
     assert embedding.device.type == "cpu"
     assert embedding.dtype is torch.bfloat16
     assert embedding.is_contiguous()
+
+
+class TinyLinearTextEncoder(torch.nn.Module):
+    def __init__(self, hidden: int = 16, vocab: int = 64) -> None:
+        super().__init__()
+        self.embed = torch.nn.Embedding(vocab, hidden)
+        self.proj = torch.nn.Linear(hidden, hidden, bias=False)
+
+    def forward(self, input_ids, attention_mask=None, output_hidden_states=True, **kwargs):
+        hidden = self.proj(self.embed(input_ids))
+        return SimpleNamespace(hidden_states=[hidden, hidden, hidden])
+
+
+def test_encode_prompt_after_weight_only_linear_encoder():
+    from torchao.quantization import Float8Tensor
+
+    from zimage.training.quantization import quantize_text_encoder
+
+    encoder = TinyLinearTextEncoder().to(dtype=torch.bfloat16).eval()
+    assert not isinstance(encoder.proj.weight, Float8Tensor)
+
+    quantize_text_encoder(encoder, precision="fp8")
+    assert isinstance(encoder.proj.weight, Float8Tensor)
+    assert not isinstance(encoder.embed.weight, Float8Tensor)
+
+    embedded = encode_prompt(
+        FakeTokenizer(),
+        encoder,
+        "caption",
+        max_sequence_length=4,
+    )
+    assert torch.isfinite(embedded).all()
+    assert embedded.shape == (3, 16)
+    assert embedded.dtype is torch.bfloat16
 
 
 class FakeLatentDistribution:
@@ -968,6 +1301,9 @@ def test_lifecycle_prepares_dataset_and_preview_embeddings_then_unloads():
 
 
 def test_reload_text_resources_on_cpu_then_release(monkeypatch):
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_text_encoder", _boom_quantize
+    )
     calls: list[tuple] = []
     lifecycle = make_lifecycle()
     lifecycle.release_text_resources()
@@ -978,6 +1314,8 @@ def test_reload_text_resources_on_cpu_then_release(monkeypatch):
     assert lifecycle.text_resources_loaded is True
     assert tokenizer is lifecycle.components.tokenizer
     assert encoder is lifecycle.components.text_encoder
+    assert encoder.frozen is True
+    assert getattr(encoder, "_quantized_precision", None) is None
     assert encoder.kwargs.get("torch_dtype") == torch.bfloat16
     # Fake loaders do not move to CUDA; ensure no cuda device was requested.
     assert encoder.kwargs.get("device_map") is None
@@ -1002,6 +1340,266 @@ def test_reload_text_resources_on_cpu_then_release(monkeypatch):
     lifecycle.reload_text_resources_on_cpu(loaders=loaders)
     with pytest.raises(RuntimeError, match="already loaded"):
         lifecycle.reload_text_resources_on_cpu(loaders=loaders)
+
+
+def test_fp8_capable_reload_quantizes_text_encoder_once(monkeypatch):
+    events = []
+    lifecycle = make_lifecycle()
+    lifecycle.release_text_resources()
+
+    def quantize_te(module, *, precision="fp8"):
+        events.append(("quantize", module, precision))
+
+    monkeypatch.setattr("zimage.training.modeling.quantize_text_encoder", quantize_te)
+    monkeypatch.setattr(
+        "zimage.training.modeling.gc.collect",
+        lambda: events.append(("gc",)),
+    )
+    original_requires_grad = FakeLoadedComponent.requires_grad_
+
+    def tracking_requires_grad(self, value):
+        events.append(("freeze", self.label))
+        return original_requires_grad(self, value)
+
+    monkeypatch.setattr(FakeLoadedComponent, "requires_grad_", tracking_requires_grad)
+
+    _, encoder = lifecycle.reload_text_resources_on_cpu(
+        loaders=make_loaders([]),
+        precision=" FP8 ",
+        quantize_capable=True,
+    )
+
+    assert events == [
+        ("freeze", "text_encoder"),
+        ("quantize", encoder, "fp8"),
+        ("gc",),
+    ]
+    assert encoder.frozen is True
+    assert encoder is lifecycle.components.text_encoder
+
+
+@pytest.mark.parametrize(
+    "precision,quantize_capable",
+    [
+        ("bf16", True),
+        (" BF16 ", True),
+        ("fp8", False),
+        ("fp8", None),
+    ],
+)
+def test_reload_skips_quantization_without_capable_fp8(
+    monkeypatch, caplog, precision, quantize_capable
+):
+    lifecycle = make_lifecycle()
+    lifecycle.release_text_resources()
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_text_encoder", _boom_quantize
+    )
+    gc_calls = []
+    monkeypatch.setattr(
+        "zimage.training.modeling.gc.collect", lambda: gc_calls.append(1)
+    )
+    kwargs = {"precision": precision}
+    if quantize_capable is not None:
+        kwargs["quantize_capable"] = quantize_capable
+    caplog.set_level(logging.INFO, logger="zimage.training")
+
+    _, encoder = lifecycle.reload_text_resources_on_cpu(
+        loaders=make_loaders([]),
+        **kwargs,
+    )
+
+    assert gc_calls == []
+    assert encoder.frozen is True
+    assert getattr(encoder, "_quantized_precision", None) is None
+    assert "quantize" not in caplog.text
+
+
+def test_unsupported_reload_precision_raises_before_loading():
+    calls = []
+    lifecycle = make_lifecycle()
+    lifecycle.release_text_resources()
+    with pytest.raises(ModelConfigurationError, match="unsupported precision"):
+        lifecycle.reload_text_resources_on_cpu(
+            loaders=make_loaders(calls),
+            precision="int8",
+            quantize_capable=True,
+        )
+    assert calls == []
+    assert lifecycle.text_resources_loaded is False
+
+
+def test_reload_quantization_failure_identifies_component(monkeypatch):
+    calls = []
+    gc_calls = []
+    lifecycle = make_lifecycle()
+    lifecycle.release_text_resources()
+    monkeypatch.setattr(
+        "zimage.training.modeling.gc.collect", lambda: gc_calls.append(1)
+    )
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_text_encoder",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("forced conversion failure")
+        ),
+    )
+
+    with pytest.raises(ModelConfigurationError, match="text encoder"):
+        lifecycle.reload_text_resources_on_cpu(
+            loaders=make_loaders(calls),
+            precision="fp8",
+            quantize_capable=True,
+        )
+
+    assert [kind for kind, *_ in calls] == ["tokenizer", "text_encoder"]
+    text_encoder = next(item[3] for item in calls if item[0] == "text_encoder")
+    assert getattr(text_encoder, "_quantized_precision", None) is None
+    assert gc_calls == []
+    assert lifecycle.text_resources_loaded is False
+
+
+def test_reload_converts_fresh_encoder_after_prior_release(monkeypatch):
+    converted = []
+
+    def quantize_te(module, *, precision="fp8"):
+        converted.append((module, getattr(module, "_quantized_precision", None)))
+        setattr(module, "_quantized_precision", precision)
+
+    monkeypatch.setattr("zimage.training.modeling.quantize_text_encoder", quantize_te)
+    lifecycle = make_lifecycle()
+    lifecycle.release_text_resources()
+    loaders = make_loaders([])
+
+    _, first = lifecycle.reload_text_resources_on_cpu(
+        loaders=loaders, precision="fp8", quantize_capable=True
+    )
+    lifecycle.release_text_resources()
+    _, second = lifecycle.reload_text_resources_on_cpu(
+        loaders=loaders, precision="fp8", quantize_capable=True
+    )
+
+    assert first is not second
+    assert converted == [(first, None), (second, None)]
+    assert getattr(first, "_quantized_precision", None) == "fp8"
+    assert getattr(second, "_quantized_precision", None) == "fp8"
+
+
+def test_reload_place_encode_release_converted_encoder(monkeypatch):
+    from torchao.quantization import Float8Tensor
+    from zimage.training.quantization import quantize_text_encoder as real_helper
+
+    class LinearFakeTextEncoder(FakeTextEncoder):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(8, 8, bias=False)
+            self.to(dtype=torch.bfloat16)
+
+    class Owner:
+        def __init__(self, factory) -> None:
+            self._factory = factory
+
+        def from_pretrained(self, *_args, **_kwargs):
+            return self._factory()
+
+    conversions = []
+
+    def counting_quantize(module, *, precision="fp8"):
+        conversions.append(id(module))
+        real_helper(module, precision=precision)
+
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_text_encoder", counting_quantize
+    )
+    loaders = ComponentLoaders(
+        vae=Owner(FakeVae),
+        tokenizer=Owner(FakeTokenizer),
+        text_encoder=Owner(LinearFakeTextEncoder),
+        transformer=Owner(lambda: FakeLoadedComponent("transformer", "main", {})),
+        scheduler=Owner(lambda: FakeLoadedComponent("scheduler", "main", {})),
+    )
+    lifecycle = make_lifecycle()
+    lifecycle.release_text_resources()
+    _, encoder = lifecycle.reload_text_resources_on_cpu(
+        loaders=loaders, precision="fp8", quantize_capable=True
+    )
+
+    assert conversions == [id(encoder)]
+    assert isinstance(encoder.proj.weight, Float8Tensor)
+    lifecycle.place_cache_modules("cpu", vae=False)
+    embedded = encode_prompt(
+        lifecycle.components.tokenizer,
+        encoder,
+        "reload converted",
+        max_sequence_length=4,
+    )
+    assert torch.isfinite(embedded).all()
+    lifecycle.release_text_resources()
+    assert lifecycle.text_resources_loaded is False
+    assert lifecycle.components.text_encoder is None
+
+
+def test_bf16_and_incapable_reload_do_not_import_torchao_quantization():
+    code = r"""
+import sys
+from types import SimpleNamespace
+
+from zimage.training.modeling import (
+    ComponentLoaders,
+    ModelSource,
+    ModelSources,
+    TrainingModelComponents,
+    TrainingModelLifecycle,
+)
+
+
+class Owner:
+    def from_pretrained(self, source, **kwargs):
+        obj = SimpleNamespace()
+        obj.requires_grad_ = lambda _value: obj
+        obj.to = lambda *_args, **_kwargs: obj
+        return obj
+
+
+loaders = ComponentLoaders(
+    vae=Owner(),
+    tokenizer=Owner(),
+    text_encoder=Owner(),
+    transformer=Owner(),
+    scheduler=Owner(),
+)
+lifecycle = TrainingModelLifecycle(
+    TrainingModelComponents(
+        sources=ModelSources(ModelSource("org/main"), ModelSource("org/main")),
+        vae=Owner().from_pretrained("org/main"),
+        tokenizer=None,
+        text_encoder=None,
+        training_scheduler=object(),
+        main_transformer=Owner().from_pretrained("org/main"),
+        sampling_transformer=Owner().from_pretrained("org/main"),
+        sampling_scheduler=object(),
+    )
+)
+lifecycle.reload_text_resources_on_cpu(loaders=loaders)
+lifecycle.release_text_resources()
+lifecycle.reload_text_resources_on_cpu(
+    loaders=loaders, precision="bf16", quantize_capable=True
+)
+lifecycle.release_text_resources()
+lifecycle.reload_text_resources_on_cpu(
+    loaders=loaders, precision="fp8", quantize_capable=False
+)
+forbidden = [name for name in sys.modules if name.startswith("torchao.quantization")]
+if forbidden:
+    print(",".join(forbidden), file=sys.stderr)
+raise SystemExit(bool(forbidden))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_place_cache_modules_moves_vae_and_text_encoder_not_transformer():

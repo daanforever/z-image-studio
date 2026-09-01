@@ -20,6 +20,11 @@ from typing import Any
 import torch
 
 from zimage.training.hub_compat import install_hf_local_dir_symlinks_compat
+from zimage.training.quantization import (
+    quantize_sampling_transformer,
+    quantize_text_encoder,
+    should_quantize_at_load,
+)
 from zimage.training.schema import KNOWN_TURBO_SOURCE
 
 log = logging.getLogger("zimage.training")
@@ -147,12 +152,17 @@ def load_training_components(
     *,
     loaders: ComponentLoaders | None = None,
     disable_mmap: bool = True,
+    quantize_capable: bool = False,
 ) -> TrainingModelComponents:
     """Load train/cache components and an optional distinct preview sampler."""
 
     install_hf_local_dir_symlinks_compat()
     loaders = loaders or ComponentLoaders.defaults()
     sources = resolve_model_sources(job)
+    precision = str(job.get("precision", "fp8")).strip().lower()
+    if precision not in {"fp8", "bf16"}:
+        raise ModelConfigurationError(f"unsupported precision {precision!r}")
+    quantize_at_load = should_quantize_at_load(precision, quantize_capable)
 
     vae = _load_model_component(
         loaders.vae,
@@ -176,19 +186,20 @@ def load_training_components(
         disable_mmap=disable_mmap,
         what="text encoder",
     )
+    if hasattr(text_encoder, "requires_grad_"):
+        text_encoder.requires_grad_(False)
+    if quantize_at_load:
+        _quantize_loaded_component(
+            quantize_text_encoder,
+            text_encoder,
+            precision=precision,
+            what="text encoder",
+        )
     training_scheduler = _load_component(
         loaders.scheduler,
         sources.main,
         subfolder="scheduler",
         what="training scheduler",
-    )
-    main_transformer = _load_model_component(
-        loaders.transformer,
-        sources.main,
-        subfolder="transformer",
-        torch_dtype=torch.bfloat16,
-        disable_mmap=disable_mmap,
-        what="main transformer",
     )
 
     # The sampler must remain pristine while the main instance is frozen,
@@ -202,16 +213,30 @@ def load_training_components(
         disable_mmap=disable_mmap,
         what="sampling transformer",
     )
+    if quantize_at_load:
+        _quantize_loaded_component(
+            quantize_sampling_transformer,
+            sampling_transformer,
+            precision=precision,
+            what="sampling transformer",
+        )
     sampling_scheduler = _load_component(
         loaders.scheduler,
         sources.sampling,
         subfolder="scheduler",
         what="sampling scheduler",
     )
+    main_transformer = _load_model_component(
+        loaders.transformer,
+        sources.main,
+        subfolder="transformer",
+        torch_dtype=torch.bfloat16,
+        disable_mmap=disable_mmap,
+        what="main transformer",
+    )
 
-    for frozen_component in (vae, text_encoder):
-        if hasattr(frozen_component, "requires_grad_"):
-            frozen_component.requires_grad_(False)
+    if hasattr(vae, "requires_grad_"):
+        vae.requires_grad_(False)
 
     return TrainingModelComponents(
         sources=sources,
@@ -581,8 +606,12 @@ class TrainingModelLifecycle:
 
     Device residency (exclusive; production device is CUDA):
 
-    1. Load: tokenizer, TE, VAE, main transformer, sampling transformer stay
-       CPU (from_pretrained, no device_map). Never tokenizer.to(cuda).
+    1. Load: tokenizer, TE, VAE, sampling transformer, then main transformer
+       stay CPU (from_pretrained, no device_map). Never tokenizer.to(cuda).
+       Capable FP8 jobs apply CPU weight-only conversion to TE and the
+       sampling transformer immediately after those loads. Main transformer
+       conversion stays CUDA-first in setup_main_transformer after freeze
+       and device placement.
     2. Cache encode: before first stale encode_sample, VAE+TE to CUDA.
        Main and sampling transformers stay CPU.
     3. After cache and job-start preview prompt encode: VAE+TE to CPU,
@@ -739,12 +768,15 @@ class TrainingModelLifecycle:
         *,
         loaders: ComponentLoaders | None = None,
         disable_mmap: bool = True,
+        precision: str = "bf16",
+        quantize_capable: bool = False,
     ) -> tuple[Any, Any]:
         """Load tokenizer + Qwen weights on CPU after ``release_text_resources``.
 
         Used only by the loop's serial mid-run prompt handoff. Does not place
         Qwen onto the training device; callers must call ``place_cache_modules``
-        then ``release_text_resources`` after encoding.
+        then ``release_text_resources`` after encoding. Capable FP8 reloads
+        freeze and weight-only-quantize the new text encoder.
         """
 
         if self.text_resources_loaded:
@@ -752,6 +784,9 @@ class TrainingModelLifecycle:
                 "text encoder and tokenizer are already loaded; "
                 "release them before calling reload_text_resources_on_cpu"
             )
+        precision = str(precision).strip().lower()
+        if precision not in {"fp8", "bf16"}:
+            raise ModelConfigurationError(f"unsupported precision {precision!r}")
         loaders = loaders or ComponentLoaders.defaults()
         source = self.components.sources.main
         tokenizer = _load_component(
@@ -770,6 +805,15 @@ class TrainingModelLifecycle:
         )
         if hasattr(text_encoder, "to"):
             text_encoder.to("cpu")
+        if hasattr(text_encoder, "requires_grad_"):
+            text_encoder.requires_grad_(False)
+        if should_quantize_at_load(precision, quantize_capable):
+            _quantize_loaded_component(
+                quantize_text_encoder,
+                text_encoder,
+                precision=precision,
+                what="text encoder",
+            )
         self.components.tokenizer = tokenizer
         self.components.text_encoder = text_encoder
         return tokenizer, text_encoder
@@ -1015,6 +1059,20 @@ def _load_model_component(
         low_cpu_mem_usage=True,
         disable_mmap=disable_mmap,
     )
+
+
+def _quantize_loaded_component(
+    quantize: Callable[..., Any],
+    module: Any,
+    *,
+    precision: str,
+    what: str,
+) -> None:
+    try:
+        quantize(module, precision=precision)
+    except Exception as exc:
+        raise ModelConfigurationError(f"failed to quantize {what}: {exc}") from exc
+    gc.collect()
 
 
 def _normalise_hf_identity(value: str) -> str:

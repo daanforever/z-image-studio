@@ -129,6 +129,7 @@ def test_exact_tensors_and_complete_metadata_round_trip(tmp_path):
     assert cached.metadata["text_encoder_config"] == dict(
         config.text_encoder_config
     )
+    assert cached.metadata["text_encoder_precision"] == "bf16"
     assert cached.metadata["tokenizer_config"] == dict(config.tokenizer_config)
     assert cached.metadata["qwen_chat_template"] == dict(
         config.qwen_chat_template
@@ -231,6 +232,92 @@ def test_missing_and_revision_stale_states_are_explicit(tmp_path):
         image_size=image.size,
     )
     assert inspect_cache(path, changed).state is CacheState.STALE
+
+
+def test_text_encoder_precision_mismatch_is_stale(tmp_path):
+    sample = _sample(tmp_path)
+    encoder = FakeEncoder()
+    cache_dir = tmp_path / "cache"
+    image = cache_module.load_training_image(sample.image_path)
+    bf16_config = _config()
+    fp8_config = _config(text_encoder_precision="fp8")
+
+    cached = prepare_cache_at_job_start(
+        [sample],
+        encoder,
+        bf16_config,
+        cache_dir=cache_dir,
+    )[0]
+    assert cached.metadata["text_encoder_precision"] == "bf16"
+    assert cached.prompt_embedding.shape == (3, 2560)
+    assert inspect_cache(
+        cached.path,
+        expected_metadata(sample, bf16_config, image_size=image.size),
+    ).state is CacheState.VALID
+    assert inspect_cache(
+        cached.path,
+        expected_metadata(sample, fp8_config, image_size=image.size),
+    ).state is CacheState.STALE
+
+    replaced = prepare_cache_at_job_start(
+        [sample],
+        encoder,
+        fp8_config,
+        cache_dir=cache_dir,
+    )[0]
+    assert encoder.image_calls == 2
+    assert replaced.metadata["text_encoder_precision"] == "fp8"
+    assert replaced.prompt_embedding.shape == (3, 2560)
+    assert inspect_cache(
+        replaced.path,
+        expected_metadata(sample, fp8_config, image_size=image.size),
+    ).state is CacheState.VALID
+    assert inspect_cache(
+        replaced.path,
+        expected_metadata(sample, bf16_config, image_size=image.size),
+    ).state is CacheState.STALE
+
+    reused = prepare_cache_at_job_start(
+        [sample],
+        encoder,
+        fp8_config,
+        cache_dir=cache_dir,
+    )[0]
+    assert encoder.image_calls == 2
+    assert reused.metadata["text_encoder_precision"] == "fp8"
+    assert reused.prompt_embedding.shape == (3, 2560)
+
+
+def test_old_metadata_without_text_encoder_precision_is_stale(tmp_path):
+    sample = _sample(tmp_path)
+    cached = prepare_cache_at_job_start(
+        [sample],
+        FakeEncoder(),
+        _config(),
+        cache_dir=tmp_path / "cache",
+    )[0]
+    old_metadata = dict(cached.metadata)
+    del old_metadata["text_encoder_precision"]
+    write_cache_atomic(
+        cached.path,
+        cached.latent,
+        cached.prompt_embedding,
+        old_metadata,
+    )
+    image = cache_module.load_training_image(sample.image_path)
+    expected = expected_metadata(sample, _config(), image_size=image.size)
+
+    assert "text_encoder_precision" not in old_metadata
+    assert expected["text_encoder_precision"] == "bf16"
+    assert inspect_cache(cached.path, expected).state is CacheState.STALE
+    assert inspect_cache(
+        cached.path,
+        expected_metadata(
+            sample,
+            _config(text_encoder_precision="fp8"),
+            image_size=image.size,
+        ),
+    ).state is CacheState.STALE
 
 
 def test_cache_names_preserve_image_extensions(tmp_path):

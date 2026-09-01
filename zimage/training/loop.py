@@ -70,6 +70,7 @@ from zimage.training.modeling import (
     load_training_components,
     setup_main_transformer,
 )
+from zimage.training.quantization import quantized_precision
 from zimage.training.schema import (
     IMMUTABLE_JOB_FIELDS,
     GpuUsageSettings,
@@ -332,7 +333,11 @@ def _load_lifecycle(
     injected: Mapping[str, Any],
 ) -> tuple[TrainingModelComponents, TrainingModelLifecycle]:
     loaders = injected.get("loaders")
-    components = load_training_components(job, loaders=loaders)
+    components = load_training_components(
+        job,
+        loaders=loaders,
+        quantize_capable=_fp8_capable(injected),
+    )
     return components, TrainingModelLifecycle(components)
 
 
@@ -434,6 +439,9 @@ def cache_config_from_components(
         tokenizer_config=_as_mapping(getattr(components.tokenizer, "config", None)),
         qwen_chat_template=dict(QWEN_CHAT_TEMPLATE),
         max_sequence_length=int(job["max_sequence_length"]),
+        text_encoder_precision=(
+            quantized_precision(components.text_encoder) or "bf16"
+        ),
     )
 
 
@@ -1270,7 +1278,11 @@ def _refresh_preview_embeddings_serial(
             if callable(release):
                 release()
         loaders = injected.get("loaders")
-        lifecycle.reload_text_resources_on_cpu(loaders=loaders)
+        lifecycle.reload_text_resources_on_cpu(
+            loaders=loaders,
+            precision=str(runtime["config"]["precision"]).strip().lower(),
+            quantize_capable=_fp8_capable(injected),
+        )
         try:
             lifecycle.place_cache_modules(training_device, vae=False)
             prompt_embeds, negative_embeds = _prepare_preview_embeddings(

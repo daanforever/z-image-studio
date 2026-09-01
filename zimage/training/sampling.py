@@ -7,7 +7,6 @@ deletes a checkpoint when preview rendering fails.
 from __future__ import annotations
 
 import inspect
-import logging
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -21,8 +20,6 @@ from zimage.training.checkpoints import load_lora_state
 from zimage.training.contracts import SavedCheckpoint
 from zimage.training.gpu_usage import GpuProbeContext, PeakMemoryScope
 from zimage.training.schema import merge_sample_parameters
-
-log = logging.getLogger("zimage.training")
 
 _PREVIEW_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
 _JPEG_SUFFIXES = frozenset({".jpg", ".jpeg"})
@@ -156,11 +153,16 @@ class UnfusedPreviewSampler:
 
         self.remove_adapter()
         self._move_preview_components(torch.device("cpu"))
+        from zimage.training.quantization import is_sampling_transformer_quantized
+
+        if is_sampling_transformer_quantized(self.transformer):
+            _ensure_peft_torchao_requantizer(self.transformer)
+            self._fp8_quantized = True
+            return
         if self._resolve_device().type != "cuda" or self._fp8_quantized:
             return
         try:
             quantizer = self._quantizer or _quantize_float8_weight_only
-            log.info("quantize sampling transformer precision=fp8")
             quantizer(self.transformer)
         except PreviewSamplingError:
             raise
@@ -536,45 +538,17 @@ def _make_generator(device: torch.device, seed: int) -> torch.Generator:
 
 
 def _quantize_float8_weight_only(transformer: Any) -> None:
-    from torchao.quantization import Float8WeightOnlyConfig, quantize_
+    from zimage.training.quantization import quantize_sampling_transformer
 
-    config = Float8WeightOnlyConfig()
-    quantize_(transformer, config)
-    _attach_peft_torchao_requantizer(transformer, config)
-
-
-def _attach_peft_torchao_requantizer(transformer: Any, quant_type: Any) -> None:
-    """Expose the requantizer PEFT needs after post-load ``quantize_``.
-
-    PEFT wraps TorchAO tensors in ``TorchaoLoraLinear`` and looks up
-    ``model.hf_quantizer.quantization_config.get_apply_tensor_subclass`` so
-    ``merge()`` / ``unmerge()`` can re-quantize. That attribute is normally
-    set by ``from_pretrained(..., quantization_config=TorchAoConfig(...))``,
-    which crashes on Windows Blackwell. Preview quantizes after load, so this
-    attaches the same PEFT contract without going through that loader.
-    """
-
-    if _peft_torchao_requantizer(transformer) is not None:
-        return
-    from types import SimpleNamespace
-
-    transformer.hf_quantizer = SimpleNamespace(
-        quantization_config=SimpleNamespace(
-            get_apply_tensor_subclass=lambda: quant_type
-        )
-    )
-
-
-def _peft_torchao_requantizer(transformer: Any) -> Any | None:
-    getter = getattr(
-        getattr(getattr(transformer, "hf_quantizer", None), "quantization_config", None),
-        "get_apply_tensor_subclass",
-        None,
-    )
-    return getter if callable(getter) else None
+    quantize_sampling_transformer(transformer, precision="fp8")
 
 
 def _ensure_peft_torchao_requantizer(transformer: Any) -> None:
+    from zimage.training.quantization import (
+        _attach_peft_torchao_requantizer,
+        _peft_torchao_requantizer,
+    )
+
     if _peft_torchao_requantizer(transformer) is not None:
         return
     quant_type = _torchao_preview_quant_type(transformer)

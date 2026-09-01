@@ -90,6 +90,7 @@ class CacheConfig:
         default_factory=lambda: dict(DEFAULT_PREPROCESSING)
     )
     schema_version: int = CACHE_TENSOR_SCHEMA_VERSION
+    text_encoder_precision: str = "bf16"
 
     def __post_init__(self) -> None:
         if not isinstance(self.main_revision, str) or not self.main_revision.strip():
@@ -220,6 +221,7 @@ def expected_metadata(
         "main_revision": config.main_revision,
         "vae_config": dict(config.vae_config),
         "text_encoder_config": dict(config.text_encoder_config),
+        "text_encoder_precision": config.text_encoder_precision,
         "tokenizer_config": dict(config.tokenizer_config),
         "qwen_chat_template": dict(config.qwen_chat_template),
         "max_sequence_length": config.max_sequence_length,

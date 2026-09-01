@@ -32,13 +32,20 @@ from zimage.training.loop import (
     _validate_prepared_training_runtime,
     _write_checkpoint_then_sample,
     cache_job,
+    cache_config_from_components,
     get_scheduler_sigmas,
     official_flow_matching_step,
     pack_zimage_hidden_states,
     run_job,
 )
 from zimage.training.schema import TrainingConfigError
-from zimage.training.modeling import ComponentLoaders
+from zimage.training.modeling import (
+    ComponentLoaders,
+    ModelSource,
+    ModelSources,
+    TrainingModelComponents,
+    TrainingModelLifecycle,
+)
 
 
 class PassthroughAccelerator:
@@ -1400,6 +1407,61 @@ def test_sampling_failure_returns_nonzero_and_keeps_checkpoint(tmp_path):
     assert load_job_state(root).last_error == "preview failed"
 
 
+def test_cache_config_from_components_uses_effective_text_encoder_precision():
+    job = {
+        "max_sequence_length": 32,
+        "precision": "fp8",
+        "model": {"main_transformer": {"revision": "rev"}},
+    }
+
+    def components(text_encoder):
+        return TrainingModelComponents(
+            sources=ModelSources(ModelSource("main"), ModelSource("main")),
+            vae=FakeVae(),
+            tokenizer=FakeTokenizer(),
+            text_encoder=text_encoder,
+            training_scheduler=object(),
+            main_transformer=FakeTransformer([], trainable=False),
+            sampling_transformer=FakeTransformer([], trainable=False),
+            sampling_scheduler=object(),
+        )
+
+    unmarked = cache_config_from_components(job, components(FakeTextEncoder()))
+    assert unmarked.text_encoder_precision == "bf16"
+
+    marked_encoder = FakeTextEncoder()
+    marked_encoder._quantized_precision = "fp8"
+    marked = cache_config_from_components(job, components(marked_encoder))
+    assert marked.text_encoder_precision == "fp8"
+
+
+def test_load_lifecycle_passes_quantize_capable_from_fp8_capable(monkeypatch):
+    import zimage.training.loop as loop_module
+
+    captured: dict[str, object] = {}
+    real_load = loop_module.load_training_components
+
+    def wrapping_load(job, **kwargs):
+        captured["quantize_capable"] = kwargs.get("quantize_capable")
+        forwarded = dict(kwargs)
+        forwarded["quantize_capable"] = False
+        return real_load(job, **forwarded)
+
+    monkeypatch.setattr(loop_module, "load_training_components", wrapping_load)
+    job = {"model": {"main_transformer": {"path": "org/main", "revision": None}}}
+    loaders = make_loaders([])
+
+    injected = {"loaders": loaders, "fp8_capable": True}
+    loop_module._load_lifecycle(job, injected)
+    assert captured["quantize_capable"] is True
+    assert captured["quantize_capable"] == loop_module._fp8_capable(injected)
+
+    injected = {"loaders": loaders, "fp8_capable": False}
+    loop_module._load_lifecycle(job, injected)
+    assert captured["quantize_capable"] is False
+    assert captured["quantize_capable"] == loop_module._fp8_capable(injected)
+
+
 def test_cache_job_prepares_cache_without_running_optimizer(tmp_path):
     events: list = []
     root = make_job(tmp_path)
@@ -2222,6 +2284,14 @@ def test_explicit_fp8_capable_cuda_path_cannot_silently_disable_fp8(
         )
 
     monkeypatch.setattr(loop_module, "setup_main_transformer", fake_setup)
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_text_encoder",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "zimage.training.modeling.quantize_sampling_transformer",
+        lambda *_args, **_kwargs: None,
+    )
     root = make_job(tmp_path, max_steps=1, precision="fp8")
     # Materialize cache on CPU so injecting device="cuda" does not place.
     assert cache_job(root, **injections(device="cpu")) == 0
@@ -2585,6 +2655,93 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
     assert load_job_state(root).status is JobStatus.RUNNING or load_job_state(
         root
     ).step == 2
+
+
+def test_serial_refresh_passes_precision_and_converts_reloaded_encoder(monkeypatch):
+    import zimage.training.loop as loop_module
+
+    converted = []
+
+    def fake_quantize(module, *, precision="fp8"):
+        converted.append(
+            (id(module), getattr(module, "_quantized_precision", None), precision)
+        )
+        setattr(module, "_quantized_precision", precision)
+
+    monkeypatch.setattr("zimage.training.modeling.quantize_text_encoder", fake_quantize)
+    captured = {}
+    real_reload = loop_module.TrainingModelLifecycle.reload_text_resources_on_cpu
+
+    def tracking_reload(self, *args, **kwargs):
+        captured.update(kwargs)
+        tokenizer, encoder = real_reload(self, *args, **kwargs)
+        captured["encoder"] = encoder
+        return tokenizer, encoder
+
+    monkeypatch.setattr(
+        loop_module.TrainingModelLifecycle,
+        "reload_text_resources_on_cpu",
+        tracking_reload,
+    )
+
+    components = TrainingModelComponents(
+        sources=ModelSources(ModelSource("main"), ModelSource("main")),
+        vae=FakeVae(),
+        tokenizer=None,
+        text_encoder=None,
+        training_scheduler=object(),
+        main_transformer=FakeTransformer([], trainable=False),
+        sampling_transformer=FakeTransformer([], trainable=False),
+        sampling_scheduler=object(),
+    )
+    lifecycle = TrainingModelLifecycle(components)
+    sampler = SimpleNamespace(
+        prompt_embeddings={},
+        negative_prompt_embeddings={},
+        common_parameters={},
+    )
+    runtime = {
+        "lifecycle": lifecycle,
+        "config": {
+            "precision": " FP8 ",
+            "max_sequence_length": 4,
+            "sampling": {
+                "prompt": "refresh me",
+                "negative_prompt": "",
+                "samples": [{"prompt": "refresh me"}],
+            },
+        },
+        "transformer": components.main_transformer,
+        "device": "cpu",
+        "preview_prompt_embeddings": {},
+        "preview_negative_embeddings": {},
+    }
+    injected = {
+        "loaders": make_loaders([]),
+        "fp8_capable": True,
+        "device": "cpu",
+        "preview_sampler": sampler,
+    }
+
+    loop_module._refresh_preview_embeddings_serial(runtime, injected)
+
+    assert captured["precision"] == "fp8"
+    assert captured["quantize_capable"] is True
+    assert captured["quantize_capable"] == loop_module._fp8_capable(injected)
+    first_id = converted[0][0]
+    assert converted == [(first_id, None, "fp8")]
+    assert first_id == id(captured["encoder"])
+    embedded = runtime["preview_prompt_embeddings"]["refresh me"]
+    assert torch.isfinite(embedded).all()
+    assert lifecycle.text_resources_loaded is False
+    assert lifecycle.components.text_encoder is None
+    assert "refresh me" in sampler.prompt_embeddings
+
+    captured.clear()
+    loop_module._refresh_preview_embeddings_serial(runtime, injected)
+    assert converted[1][0] != first_id
+    assert converted[1][1] is None
+    assert captured["quantize_capable"] is True
 
 
 def _sampling_block(*, prompt: str, negative: str = "", **sample_extra) -> dict:

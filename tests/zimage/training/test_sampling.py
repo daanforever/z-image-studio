@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import inspect
+import logging
 import subprocess
 import sys
 import warnings
@@ -853,6 +854,91 @@ def test_cpu_preview_skips_quantization_and_never_fuses(tmp_path):
 
     assert result.is_file()
     assert _adapter_names(transformer) == set()
+    assert sampler._fp8_quantized is False
+
+
+def test_prepare_for_preview_skips_load_quantized_transformer(caplog):
+    from torchao.quantization import Float8WeightOnlyConfig
+
+    from zimage.training.quantization import quantize_sampling_transformer
+
+    transformer = TinyTransformer().to(dtype=torch.bfloat16).eval()
+    quantize_sampling_transformer(transformer)
+    calls: list[str] = []
+
+    def forbidden(_model):
+        calls.append("quantize")
+        raise AssertionError("load-quantized transformer must not be converted again")
+
+    sampler = UnfusedPreviewSampler(
+        transformer=transformer,
+        device="cuda",
+        quantizer=forbidden,
+    )
+    caplog.set_level(logging.INFO, logger="zimage.training")
+    caplog.clear()
+    sampler.prepare_for_preview()
+    sampler.prepare_for_preview()
+
+    assert calls == []
+    assert sampler._fp8_quantized is True
+    assert "quantize sampling transformer" not in caplog.text
+    getter = transformer.hf_quantizer.quantization_config.get_apply_tensor_subclass
+    assert callable(getter)
+    assert isinstance(getter(), Float8WeightOnlyConfig)
+
+
+def test_prepare_for_preview_attaches_requantizer_without_marker(caplog):
+    from torchao.quantization import Float8WeightOnlyConfig, quantize_
+
+    from zimage.training.quantization import _QUANTIZED_PRECISION_ATTR
+
+    transformer = TinyTransformer().to(dtype=torch.bfloat16).eval()
+    quantize_(transformer, Float8WeightOnlyConfig())
+    assert not hasattr(transformer, _QUANTIZED_PRECISION_ATTR)
+    assert not hasattr(transformer, "hf_quantizer")
+    calls: list[str] = []
+
+    sampler = UnfusedPreviewSampler(
+        transformer=transformer,
+        device="cuda",
+        quantizer=lambda _model: calls.append("quantize"),
+    )
+    caplog.set_level(logging.INFO, logger="zimage.training")
+    caplog.clear()
+    sampler.prepare_for_preview()
+
+    assert calls == []
+    assert sampler._fp8_quantized is True
+    assert "quantize sampling transformer" not in caplog.text
+    getter = transformer.hf_quantizer.quantization_config.get_apply_tensor_subclass
+    assert callable(getter)
+    assert isinstance(getter(), Float8WeightOnlyConfig)
+
+
+def test_prepare_for_preview_quantizes_unquantized_cuda_once(caplog):
+    from torchao.quantization import Float8Tensor
+
+    transformer = TinyTransformer().to(dtype=torch.bfloat16).eval()
+    calls: list[str] = []
+
+    def counting_quantizer(model):
+        calls.append("quantize")
+        _quantize_float8_weight_only(model)
+
+    sampler = UnfusedPreviewSampler(
+        transformer=transformer,
+        device="cuda",
+        quantizer=counting_quantizer,
+    )
+    caplog.set_level(logging.INFO, logger="zimage.training")
+    sampler.prepare_for_preview()
+    sampler.prepare_for_preview()
+
+    assert calls == ["quantize"]
+    assert sampler._fp8_quantized is True
+    assert isinstance(transformer.to_q.weight, Float8Tensor)
+    assert caplog.text.count("quantize sampling transformer precision=fp8") == 1
 
 
 def test_float8_preview_quantizer_exposes_peft_requantizer():

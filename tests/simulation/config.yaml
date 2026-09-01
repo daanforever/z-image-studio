@@ -1,0 +1,50 @@
+job_name: a01
+model:
+  main_transformer:
+    path: Tongyi-MAI/Z-Image
+    revision: null
+  sampling_transformer:
+    path: Tongyi-MAI/Z-Image-Turbo
+    revision: null
+datasets:
+- name: d01
+  default_caption: ''
+lora:
+  rank: 4
+  alpha: 4
+  dropout: 0.0
+  targets:
+  - to_k
+  - to_q
+  - to_v
+  - to_out.0
+precision: fp8
+gradient_checkpointing: true
+seed: 0
+epochs: 1
+max_steps: 1
+checkpoint_every: 1
+optimizer:
+  name: adamw
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+scheduler:
+  name: constant
+  warmup_steps: 0
+weighting_scheme: none
+logit_mean: 0.0
+logit_std: 1.0
+mode_scale: 1.29
+max_sequence_length: 512
+sampling:
+  num_inference_steps: 9
+  guidance_scale: 0.0
+  time_shift: 3.0
+  width: 1024
+  height: 1024
+  seed: 42
+  prompt: ''
+  negative_prompt: ''
+  image_format: jpeg
+  samples:
+  - prompt: a dog

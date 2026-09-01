@@ -8,7 +8,7 @@ __pycache__/
 .pytest_cache/
 .gradio/
 .env
-config.yaml
+/config.yaml
 outputs/*
 !outputs/.gitkeep
 datasets/*

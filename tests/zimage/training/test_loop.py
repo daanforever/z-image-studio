@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import subprocess
 import sys
 import weakref
@@ -1822,7 +1823,66 @@ def test_stale_cache_job_probe_records_place_and_end(tmp_path):
         cache_job(root, **injections(gpu_usage_probe=_recording_gpu_probe(phases)))
         == 0
     )
-    assert phases == ["cache_place", "cache_encode_peak", "cache_end"]
+    assert phases == ["cache_place", "cache_encode", "cache_end"]
+
+
+def test_stale_cache_job_probe_records_each_sample(tmp_path, caplog):
+    root = make_job(tmp_path)
+    dataset = Path(load_job_config(root)["datasets"][0]["name"])
+    Image.new("RGB", (48, 32), (1, 2, 3)).save(dataset / "b.png")
+    (dataset / "b.txt").write_text("b caption", encoding="utf-8")
+    phases: list[str] = []
+    with caplog.at_level(logging.INFO, logger="zimage.training"):
+        assert (
+            cache_job(
+                root, **injections(gpu_usage_probe=_recording_gpu_probe(phases))
+            )
+            == 0
+        )
+    assert phases == [
+        "cache_place",
+        "cache_encode",
+        "cache_encode",
+        "cache_end",
+    ]
+    encode_lines = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("cache encode n=")
+    ]
+    assert len(encode_lines) == 2
+    assert "n=1 samples=2" in encode_lines[0]
+    assert "a.png" in encode_lines[0]
+    assert "size=16x16" in encode_lines[0]
+    assert "n=2 samples=2" in encode_lines[1]
+    assert "b.png" in encode_lines[1]
+    assert "size=48x32" in encode_lines[1]
+
+
+def test_cache_job_park_failure_does_not_mask_encode_error(tmp_path, monkeypatch):
+    import zimage.training.loop as loop_module
+
+    def boom_prepare(
+        samples,
+        encoder,
+        config,
+        *,
+        job_dir,
+        on_before_encode=None,
+        **kwargs,
+    ):
+        if on_before_encode is not None:
+            on_before_encode()
+        raise RuntimeError("encode boom")
+
+    def boom_park(self):
+        raise RuntimeError("park boom")
+
+    monkeypatch.setattr(
+        loop_module.TrainingModelLifecycle, "park_cache_modules", boom_park
+    )
+    with pytest.raises(RuntimeError, match="encode boom"):
+        cache_job(make_job(tmp_path), **injections(prepare_cache=boom_prepare))
 
 
 def test_stale_run_job_probe_phase_order(tmp_path):
@@ -1836,7 +1896,7 @@ def test_stale_run_job_probe_phase_order(tmp_path):
     assert phases == [
         "load",
         "cache_place",
-        "cache_encode_peak",
+        "cache_encode",
         "cache_end",
         "train_placed",
         "step",
@@ -1854,7 +1914,7 @@ def test_warm_cache_run_job_probe_omits_cache_place(tmp_path):
         == 0
     )
     assert "cache_place" not in phases
-    assert "cache_encode_peak" not in phases
+    assert "cache_encode" not in phases
     assert "cache_end" not in phases
     assert phases == ["load", "train_placed", "step", "teardown", "summary"]
 
@@ -1901,7 +1961,7 @@ def test_run_job_preview_probe_phases(tmp_path):
     assert phases == [
         "load",
         "cache_place",
-        "cache_encode_peak",
+        "cache_encode",
         "cache_end",
         "train_placed",
         "step",
@@ -2036,9 +2096,14 @@ def test_encode_exception_still_parks_cache_modules(tmp_path, monkeypatch):
     )
     root = make_job(tmp_path)
 
-    with pytest.raises(RuntimeError, match="encode failed"):
+    from zimage.training.cache import CacheError
+
+    with pytest.raises(CacheError, match="size=16x16") as caught:
         cache_job(root, loaders=loaders, device="cpu", fp8_capable=False)
 
+    assert "a.png" in str(caught.value)
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert "encode failed" in str(caught.value.__cause__)
     assert events == [("place", "cpu"), "encode", "park"]
     assert torch.device(loaders.text_encoder.created[0].moved_to[-1]).type == "cpu"
 

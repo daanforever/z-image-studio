@@ -359,24 +359,30 @@ def prepare_cache_at_job_start(
     *,
     job_dir: str | Path,
     on_before_encode: Callable[[], None] | None = None,
-    on_after_first_encode: Callable[[], None] | None = None,
+    on_before_sample_encode: (
+        Callable[[DatasetSample, tuple[int, int]], None] | None
+    ) = None,
+    on_after_sample_encode: (
+        Callable[[DatasetSample, tuple[int, int]], None] | None
+    ) = None,
 ) -> list[Path]:
     """Inspect and materialize all caches at an explicit job-start boundary.
 
     ``on_before_encode`` runs once, immediately before the first
-    ``encode_sample``. ``on_after_first_encode`` runs once in a ``finally``
-    after that first encode returns or raises. VALID caches never invoke
-    either hook.
+    ``encode_sample``. ``on_before_sample_encode`` and
+    ``on_after_sample_encode`` run for every stale pair; the after hook
+    runs in a ``finally`` after ``encode_sample`` returns or raises.
+    VALID caches never invoke these hooks.
     """
 
     paths: list[Path] = []
     encode_hook = on_before_encode
-    after_hook = on_after_first_encode
     encoded = 0
     reused = 0
     for sample in samples:
         image = load_training_image(sample.image_path)
-        metadata = expected_metadata(sample, config, image_size=image.size)
+        image_size = image.size
+        metadata = expected_metadata(sample, config, image_size=image_size)
         path = cache_path_for(sample, job_dir)
         inspection = inspect_cache(path, metadata)
         if inspection.state is not CacheState.VALID:
@@ -384,17 +390,25 @@ def prepare_cache_at_job_start(
             if encode_hook is not None:
                 encode_hook()
                 encode_hook = None
+            if on_before_sample_encode is not None:
+                on_before_sample_encode(sample, image_size)
             try:
-                latent, prompt_embedding = encode_sample(
-                    sample,
-                    image,
-                    encoder,
-                    config,
-                )
+                try:
+                    latent, prompt_embedding = encode_sample(
+                        sample,
+                        image,
+                        encoder,
+                        config,
+                    )
+                except Exception as exc:
+                    width, height = image_size
+                    raise CacheError(
+                        f"cache encode failed path={sample.image_path} "
+                        f"size={width}x{height}"
+                    ) from exc
             finally:
-                if after_hook is not None:
-                    after_hook()
-                    after_hook = None
+                if on_after_sample_encode is not None:
+                    on_after_sample_encode(sample, image_size)
             try:
                 write_cache_atomic(path, latent, prompt_embedding, metadata)
             finally:

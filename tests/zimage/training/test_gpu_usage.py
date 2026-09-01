@@ -684,7 +684,7 @@ def test_run_job_injected_probe_wins_over_detailed_yaml(tmp_path, monkeypatch):
     assert phases == [
         "load",
         "cache_place",
-        "cache_encode_peak",
+        "cache_encode",
         "cache_end",
         "train_placed",
         "step",

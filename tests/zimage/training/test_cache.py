@@ -712,9 +712,10 @@ def test_on_before_encode_runs_once_on_stale_and_never_on_valid(tmp_path):
     assert encoder.image_calls == 1
 
 
-def test_on_after_first_encode_runs_once_after_first_stale_encode(tmp_path):
+def test_sample_encode_hooks_run_for_each_stale_and_never_on_valid(tmp_path):
     valid_sample = _sample(tmp_path, "valid.png")
-    stale_sample = _sample(tmp_path, "stale.png", color=(1, 2, 3))
+    first_stale = _sample(tmp_path, "stale-a.png", color=(1, 2, 3))
+    second_stale = _sample(tmp_path, "stale-b.png", color=(4, 5, 6))
     job_dir = _job_dir(tmp_path)
     prepare_cache_at_job_start(
         [valid_sample],
@@ -723,7 +724,7 @@ def test_on_after_first_encode_runs_once_after_first_stale_encode(tmp_path):
         job_dir=job_dir,
     )
 
-    events: list[str] = []
+    events: list[object] = []
 
     class TrackingEncoder(FakeEncoder):
         def encode_image(self, image):
@@ -732,29 +733,67 @@ def test_on_after_first_encode_runs_once_after_first_stale_encode(tmp_path):
 
     encoder = TrackingEncoder()
 
-    def on_after_first_encode() -> None:
-        events.append("after")
+    def on_before_sample_encode(sample, image_size):
+        events.append(("before", sample.image_path.name, image_size))
+
+    def on_after_sample_encode(sample, image_size):
+        events.append(("after", sample.image_path.name, image_size))
 
     prepare_cache_at_job_start(
-        [valid_sample, stale_sample],
+        [valid_sample, first_stale, second_stale],
         encoder,
         _config(),
         job_dir=job_dir,
-        on_after_first_encode=on_after_first_encode,
+        on_before_sample_encode=on_before_sample_encode,
+        on_after_sample_encode=on_after_sample_encode,
     )
-    assert events == ["encode", "after"]
-    assert encoder.image_calls == 1
+    assert events == [
+        ("before", "stale-a.png", (32, 16)),
+        "encode",
+        ("after", "stale-a.png", (32, 16)),
+        ("before", "stale-b.png", (32, 16)),
+        "encode",
+        ("after", "stale-b.png", (32, 16)),
+    ]
+    assert encoder.image_calls == 2
 
     events.clear()
     prepare_cache_at_job_start(
-        [valid_sample, stale_sample],
+        [valid_sample, first_stale, second_stale],
         encoder,
         _config(),
         job_dir=job_dir,
-        on_after_first_encode=on_after_first_encode,
+        on_before_sample_encode=on_before_sample_encode,
+        on_after_sample_encode=on_after_sample_encode,
     )
     assert events == []
-    assert encoder.image_calls == 1
+    assert encoder.image_calls == 2
+
+
+def test_after_sample_encode_runs_when_encode_raises(tmp_path):
+    sample = _sample(tmp_path, "boom.png")
+    events: list[object] = []
+
+    class BoomEncoder(FakeEncoder):
+        def encode_image(self, image):
+            events.append("encode")
+            raise RuntimeError("cuda oom")
+
+    def on_after_sample_encode(hook_sample, image_size):
+        events.append(("after", hook_sample.image_path.name, image_size))
+
+    with pytest.raises(CacheError, match="cache encode failed") as caught:
+        prepare_cache_at_job_start(
+            [sample],
+            BoomEncoder(),
+            _config(),
+            job_dir=_job_dir(tmp_path),
+            on_after_sample_encode=on_after_sample_encode,
+        )
+    assert "boom.png" in str(caught.value)
+    assert "size=32x16" in str(caught.value)
+    assert events == ["encode", ("after", "boom.png", (32, 16))]
+    assert isinstance(caught.value.__cause__, RuntimeError)
 
 
 def test_vae_output_is_released_before_prompt_encode(tmp_path):

@@ -154,7 +154,10 @@ def cache_job(job_dir: Path, **injected: Any) -> int:
         )
     finally:
         if placed[0]:
-            lifecycle.park_cache_modules()
+            try:
+                lifecycle.park_cache_modules()
+            except Exception:
+                log.exception("park cache modules failed")
             _probe_gpu_usage(
                 injected, "cache_end", context=GpuProbeContext(components=components)
             )
@@ -398,11 +401,11 @@ def _prepare_cache(
         cache_config = _resolve_cache_config(job, components, injected)
     prepare = injected.get("prepare_cache", prepare_cache_at_job_start)
     flag = placed if placed is not None else [False]
-    encode_scope = PeakMemoryScope()
-    encode_scope_entered = False
+    encode_scope: PeakMemoryScope | None = None
+    encode_count = 0
+    samples_total = len(samples)
 
     def on_before_encode() -> None:
-        nonlocal encode_scope_entered
         target = (
             torch.device(device)
             if device is not None
@@ -411,31 +414,51 @@ def _prepare_cache(
         _place_cache_modules(
             flag, lifecycle, target, injected, components, vae=True
         )
-        encode_scope.__enter__()
-        encode_scope_entered = True
 
-    def on_after_first_encode() -> None:
-        nonlocal encode_scope_entered
-        if encode_scope_entered:
+    def on_before_sample_encode(
+        _sample: DatasetSample, _image_size: tuple[int, int]
+    ) -> None:
+        nonlocal encode_scope, encode_count
+        encode_count += 1
+        encode_scope = PeakMemoryScope()
+        encode_scope.__enter__()
+
+    def on_after_sample_encode(
+        sample: DatasetSample, image_size: tuple[int, int]
+    ) -> None:
+        nonlocal encode_scope
+        peak_bytes = 0
+        if encode_scope is not None:
             encode_scope.__exit__(None, None, None)
-            encode_scope_entered = False
+            peak_bytes = encode_scope.peak_bytes
+            encode_scope = None
+        width, height = image_size
+        log.info(
+            "cache encode n=%s samples=%s path=%s size=%sx%s",
+            encode_count,
+            samples_total,
+            sample.image_path,
+            width,
+            height,
+        )
         _probe_gpu_usage(
             injected,
-            "cache_encode_peak",
+            "cache_encode",
             context=GpuProbeContext(
                 components=components,
-                phase_peak_bytes=encode_scope.peak_bytes,
+                phase_peak_bytes=peak_bytes,
             ),
         )
 
-    log.info("cache prepare samples=%s", len(samples))
+    log.info("cache prepare samples=%s", samples_total)
     return prepare(
         samples,
         lifecycle.cache_encoder(),
         cache_config,
         job_dir=job_dir,
         on_before_encode=on_before_encode,
-        on_after_first_encode=on_after_first_encode,
+        on_before_sample_encode=on_before_sample_encode,
+        on_after_sample_encode=on_after_sample_encode,
     )
 
 
@@ -546,7 +569,10 @@ def _build_runtime(
             )
     finally:
         if placed[0]:
-            lifecycle.park_cache_modules()
+            try:
+                lifecycle.park_cache_modules()
+            except Exception:
+                log.exception("park cache modules failed")
             _probe_gpu_usage(
                 injected, "cache_end", context=GpuProbeContext(components=components)
             )

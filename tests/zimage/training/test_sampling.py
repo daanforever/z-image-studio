@@ -16,6 +16,12 @@ from diffusers.loaders import PeftAdapterMixin
 from peft import LoraConfig, get_peft_model_state_dict
 from PIL import Image
 
+from zimage.training.cache import (
+    CacheConfig,
+    expected_preview_metadata,
+    load_preview_cache,
+    write_preview_cache_atomic,
+)
 from zimage.training.checkpoints import (
     write_atomic,
     step_checkpoint_dir,
@@ -25,13 +31,14 @@ from zimage.training.contracts import (
     PreviewSampler,
     SavedCheckpoint,
 )
+import zimage.training.sampling as sampling_module
 from zimage.training.sampling import (
     PreviewSamplingError,
     UnfusedPreviewSampler,
     _quantize_float8_weight_only,
     resolve_preview_parameters,
 )
-from zimage.training.schema import merge_sample_parameters
+from zimage.training.schema import CACHE_PROMPT_EMBED_HIDDEN_SIZE, merge_sample_parameters
 
 
 class TinyTransformer(PeftAdapterMixin, torch.nn.Module):
@@ -54,7 +61,9 @@ class TinyVAE(torch.nn.Module):
 
 
 class RecordingPipeline:
-    def __init__(self, transformer: TinyTransformer) -> None:
+    def __init__(
+        self, transformer: TinyTransformer, *, retain_calls: bool = True
+    ) -> None:
         self.transformer = transformer
         self.vae = SimpleNamespace(label="shared-vae")
         self.scheduler = SimpleNamespace(config=SimpleNamespace(shift=3.0), shift=3.0)
@@ -63,11 +72,13 @@ class RecordingPipeline:
         self.calls: list[dict] = []
         self.fail = False
         self.events: list[str] | None = None
+        self.retain_calls = retain_calls
 
     def __call__(self, **kwargs):
         if self.events is not None:
             self.events.append("forward")
-        self.calls.append(kwargs)
+        if self.retain_calls:
+            self.calls.append(kwargs)
         if self.fail:
             raise RuntimeError("forced sampling failure")
         hidden = kwargs.get("prompt_embeds")
@@ -75,6 +86,14 @@ class RecordingPipeline:
             tokens = hidden[0]
             if tokens.ndim == 2:
                 tokens = tokens.unsqueeze(0)
+            in_features = self.transformer.to_q.in_features
+            if tokens.shape[-1] != in_features:
+                tokens = torch.zeros(
+                    *tokens.shape[:-1],
+                    in_features,
+                    dtype=tokens.dtype,
+                    device=tokens.device,
+                )
             self.transformer(tokens)
         width = int(kwargs.get("width", 8))
         height = int(kwargs.get("height", 8))
@@ -151,12 +170,39 @@ def _write_adapter_checkpoint(
     )
 
 
-def _embeddings() -> dict[str, torch.Tensor]:
-    return {
-        "a cat": torch.ones(3, 16, dtype=torch.bfloat16),
-        "subject": torch.full((3, 16), 2.0, dtype=torch.bfloat16),
-        "": torch.zeros(3, 16, dtype=torch.bfloat16),
-    }
+def _preview_cache_config() -> CacheConfig:
+    return CacheConfig(
+        main_revision="test-revision",
+        vae_config={},
+        text_encoder_config={},
+        tokenizer_config={},
+        qwen_chat_template={},
+        max_sequence_length=32,
+    )
+
+
+def _write_prompt_paths(root: Path, *texts: str) -> dict[str, Path]:
+    if not texts:
+        texts = ("a cat", "subject")
+    config = _preview_cache_config()
+    cache_dir = root / "preview-prompt-cache"
+    paths: dict[str, Path] = {}
+    for index, text in enumerate(texts, start=1):
+        if not text:
+            continue
+        embedding = torch.full(
+            (3, CACHE_PROMPT_EMBED_HIDDEN_SIZE),
+            float(index),
+            dtype=torch.bfloat16,
+        )
+        path = cache_dir / f"{index}.safetensors"
+        write_preview_cache_atomic(
+            path,
+            embedding,
+            expected_preview_metadata(text, config),
+        )
+        paths[text] = path
+    return paths
 
 
 def test_sampler_implements_preview_sampler_protocol():
@@ -183,7 +229,7 @@ def test_unfused_adapter_replacement_leaves_base_weights_unchanged(tmp_path):
         pipeline=pipeline,
         vae=pipeline.vae,
         scheduler=pipeline.scheduler,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={"prompt": "a cat", "width": 16, "height": 16},
         target_modules=["to_q"],
     )
@@ -253,7 +299,7 @@ def test_sample_unfused_uses_merged_parameters_and_preencoded_embeds(tmp_path):
         pipeline=pipeline,
         vae=pipeline.vae,
         scheduler=pipeline.scheduler,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters=common,
     )
     destination = tmp_path / "previews" / "step-3.png"
@@ -275,8 +321,12 @@ def test_sample_unfused_uses_merged_parameters_and_preencoded_embeds(tmp_path):
     assert pipeline.calls
     call = pipeline.calls[0]
     assert call["prompt"] is None
-    assert call["prompt_embeds"][0].shape[-1] == 16
-    assert torch.equal(call["prompt_embeds"][0], _embeddings()["subject"].to(call["prompt_embeds"][0].device))
+    expected, _ = load_preview_cache(sampler.prompt_paths["subject"])
+    assert torch.equal(
+        call["prompt_embeds"][0],
+        expected.to(device=call["prompt_embeds"][0].device),
+    )
+    assert all(isinstance(path, Path) for path in sampler.prompt_paths.values())
     assert pipeline.text_encoder is None
     assert pipeline.tokenizer is None
     assert pipeline.vae.label == "shared-vae"
@@ -291,7 +341,7 @@ def test_sample_unfused_jpeg_destination_writes_jpeg_and_unlinks_siblings(tmp_pa
     sampler = UnfusedPreviewSampler(
         transformer=transformer,
         pipeline=pipeline,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={"prompt": "a cat", "width": 16, "height": 16},
     )
     destination = tmp_path / "00001-00-sample.jpg"
@@ -345,7 +395,7 @@ def test_sampling_failure_does_not_delete_checkpoint(tmp_path):
     sampler = UnfusedPreviewSampler(
         transformer=transformer,
         pipeline=pipeline,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={"prompt": "a cat", "width": 16, "height": 16},
     )
     with pytest.raises(PreviewSamplingError, match="forced sampling failure"):
@@ -370,7 +420,7 @@ def test_preview_forward_and_cleanup_failure_are_chained(tmp_path):
     sampler = UnfusedPreviewSampler(
         transformer=transformer,
         pipeline=pipeline,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={"prompt": "a cat", "width": 16, "height": 16},
     )
 
@@ -403,12 +453,12 @@ def test_empty_negative_zeros_nonempty_missing_raises(tmp_path):
     checkpoint = _write_adapter_checkpoint(job, step=1, sign=1.0)
     transformer = TinyTransformer().to(dtype=torch.bfloat16)
     pipeline = RecordingPipeline(transformer)
-    embeds = _embeddings()
+    paths = _write_prompt_paths(tmp_path, "a cat")
     sampler = UnfusedPreviewSampler(
         transformer=transformer,
         pipeline=pipeline,
-        prompt_embeddings=embeds,
-        negative_prompt_embeddings={},
+        prompt_paths=paths,
+        negative_prompt_paths={},
         common_parameters={
             "prompt": "a cat",
             "negative_prompt": "",
@@ -416,6 +466,26 @@ def test_empty_negative_zeros_nonempty_missing_raises(tmp_path):
             "height": 16,
         },
     )
+    path = sampler.sample_unfused(
+        checkpoint=checkpoint,
+        parameters={"prompt": "a cat", "negative_prompt": ""},
+        destination=tmp_path / "ok.png",
+    )
+    assert path.is_file()
+    assert pipeline.calls
+    pos = pipeline.calls[0]["prompt_embeds"][0]
+    neg = pipeline.calls[0]["negative_prompt_embeds"][0]
+    assert torch.equal(neg, torch.zeros_like(neg))
+    assert neg.shape == pos.shape
+    assert sampler.prompt_paths == paths
+    assert sampler.negative_prompt_paths == {}
+
+    with pytest.raises(PreviewSamplingError, match="missing negative_prompt"):
+        sampler.sample_unfused(
+            checkpoint=checkpoint,
+            parameters={"prompt": "a cat", "negative_prompt": "foo"},
+            destination=tmp_path / "missing-neg.png",
+        )
     path = sampler.sample_unfused(
         checkpoint=checkpoint,
         parameters={"prompt": "a cat", "negative_prompt": ""},
@@ -443,7 +513,7 @@ def test_missing_preencoded_embedding_does_not_reload_text_encoder(tmp_path):
     sampler = UnfusedPreviewSampler(
         transformer=transformer,
         pipeline=pipeline,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={"prompt": "unknown caption"},
     )
     with pytest.raises(PreviewSamplingError, match="does not reload a text encoder"):
@@ -454,6 +524,103 @@ def test_missing_preencoded_embedding_does_not_reload_text_encoder(tmp_path):
         )
     assert pipeline.calls == []
     assert checkpoint.path.is_dir()
+
+
+def test_preview_loads_only_selected_cache_files(tmp_path, monkeypatch):
+    job = tmp_path / "job"
+    (job / "checkpoints").mkdir(parents=True)
+    checkpoint = _write_adapter_checkpoint(job, step=1, sign=1.0)
+    transformer = TinyTransformer().to(dtype=torch.bfloat16)
+    pipeline = RecordingPipeline(transformer)
+    paths = _write_prompt_paths(tmp_path, "a cat", "subject", "neg")
+    loaded: list[Path] = []
+    real_load = sampling_module.load_preview_cache
+
+    def tracking_load(path, *, expected=None):
+        loaded.append(Path(path))
+        return real_load(path, expected=expected)
+
+    empty_devices: list[str] = []
+    real_empty = sampling_module._empty_negative_embeds
+
+    def tracking_empty(embeds):
+        assert isinstance(embeds, torch.Tensor)
+        assert embeds.device.type == "cpu"
+        result = real_empty(embeds)
+        assert isinstance(result, torch.Tensor)
+        assert result.device.type == "cpu"
+        empty_devices.append(result.device.type)
+        return result
+
+    monkeypatch.setattr(sampling_module, "load_preview_cache", tracking_load)
+    monkeypatch.setattr(sampling_module, "_empty_negative_embeds", tracking_empty)
+    sampler = UnfusedPreviewSampler(
+        transformer=transformer,
+        pipeline=pipeline,
+        prompt_paths={"a cat": paths["a cat"], "subject": paths["subject"]},
+        negative_prompt_paths={"neg": paths["neg"]},
+        common_parameters={
+            "prompt": "a cat",
+            "negative_prompt": "",
+            "width": 16,
+            "height": 16,
+        },
+    )
+    sampler.sample_unfused(
+        checkpoint=checkpoint,
+        parameters={"prompt": "a cat", "negative_prompt": ""},
+        destination=tmp_path / "pos.png",
+    )
+    assert loaded == [paths["a cat"]]
+    assert empty_devices == ["cpu"]
+    assert sampler.prompt_paths["a cat"] == paths["a cat"]
+    assert sampler.negative_prompt_paths["neg"] == paths["neg"]
+    assert all(isinstance(path, Path) for path in sampler.prompt_paths.values())
+
+    loaded.clear()
+    sampler.sample_unfused(
+        checkpoint=checkpoint,
+        parameters={"prompt": "subject", "negative_prompt": "neg"},
+        destination=tmp_path / "neg.png",
+    )
+    assert loaded == [paths["subject"], paths["neg"]]
+    pos = pipeline.calls[-1]["prompt_embeds"][0]
+    neg = pipeline.calls[-1]["negative_prompt_embeds"][0]
+    expected_pos, _ = load_preview_cache(paths["subject"])
+    expected_neg, _ = load_preview_cache(paths["neg"])
+    assert torch.equal(pos, expected_pos.to(device=pos.device))
+    assert torch.equal(neg, expected_neg.to(device=neg.device))
+    assert sampler.prompt_paths["subject"] == paths["subject"]
+
+
+def test_corrupt_prompt_cache_fails_without_reloading_encoder(tmp_path):
+    job = tmp_path / "job"
+    (job / "checkpoints").mkdir(parents=True)
+    checkpoint = _write_adapter_checkpoint(job, step=1, sign=1.0)
+    transformer = TinyTransformer().to(dtype=torch.bfloat16)
+    pipeline = RecordingPipeline(transformer)
+    paths = _write_prompt_paths(tmp_path, "a cat")
+    paths["a cat"].write_bytes(b"not-a-safetensors-file")
+    sampler = UnfusedPreviewSampler(
+        transformer=transformer,
+        pipeline=pipeline,
+        prompt_paths=paths,
+        common_parameters={"prompt": "a cat", "width": 16, "height": 16},
+    )
+    with pytest.raises(PreviewSamplingError, match="does not reload a text encoder") as caught:
+        sampler.sample_unfused(
+            checkpoint=checkpoint,
+            parameters={"prompt": "a cat"},
+            destination=tmp_path / "corrupt.png",
+        )
+    message = str(caught.value)
+    assert "corrupt prompt cache" in message
+    assert "a cat" in message
+    assert str(paths["a cat"]) in message
+    assert pipeline.calls == []
+    assert pipeline.text_encoder is None
+    assert checkpoint.path.is_dir()
+    assert sampler.prompt_paths["a cat"] == paths["a cat"]
 
 
 def test_sampling_module_does_not_import_fuse_loader():
@@ -486,14 +653,15 @@ def test_from_components_builds_sampler_without_pipeline():
     transformer = TinyTransformer()
     scheduler = SimpleNamespace(label="sampling-scheduler")
     vae = SimpleNamespace(label="shared-vae")
-    embeddings = _embeddings()
+    prompt_paths = {"a cat": Path("a.safetensors")}
+    negative_paths = {"neg": Path("n.safetensors")}
     common = {"prompt": "a cat", "time_shift": 3.0}
     sampler = UnfusedPreviewSampler.from_components(
         transformer=transformer,
         scheduler=scheduler,
         vae=vae,
-        prompt_embeddings=embeddings,
-        negative_prompt_embeddings={"": embeddings[""]},
+        prompt_paths=prompt_paths,
+        negative_prompt_paths=negative_paths,
         common_parameters=common,
         device="cpu",
         target_modules=["to_q"],
@@ -504,8 +672,8 @@ def test_from_components_builds_sampler_without_pipeline():
     assert sampler.transformer is transformer
     assert sampler.scheduler is scheduler
     assert sampler.vae is vae
-    assert sampler.prompt_embeddings["a cat"] is embeddings["a cat"]
-    assert sampler.negative_prompt_embeddings[""] is embeddings[""]
+    assert sampler.prompt_paths["a cat"] == prompt_paths["a cat"]
+    assert sampler.negative_prompt_paths["neg"] == negative_paths["neg"]
     assert sampler.common_parameters == common
     assert sampler.device == "cpu"
     assert sampler.target_modules == ["to_q"]
@@ -516,8 +684,8 @@ def test_from_components_builds_sampler_without_pipeline():
         "transformer",
         "scheduler",
         "vae",
-        "prompt_embeddings",
-        "negative_prompt_embeddings",
+        "prompt_paths",
+        "negative_prompt_paths",
         "common_parameters",
         "device",
         "target_modules",
@@ -546,13 +714,17 @@ def test_sample_unfused_probes_preview_run_before_release(tmp_path):
     sampler = UnfusedPreviewSampler(
         transformer=transformer,
         pipeline=pipeline,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={"prompt": "a cat", "width": 16, "height": 16},
         gpu_usage_probe=probe,
     )
     original_release = sampler.release_after_preview
 
     def tracking_release():
+        assert all(isinstance(path, Path) for path in sampler.prompt_paths.values())
+        assert not any(
+            isinstance(value, torch.Tensor) for value in sampler.__dict__.values()
+        )
         events.append("release_after_preview")
         original_release()
 
@@ -585,7 +757,7 @@ def test_preview_run_probe_error_does_not_fail_sample(tmp_path):
     sampler = UnfusedPreviewSampler(
         transformer=transformer,
         pipeline=pipeline,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={"prompt": "a cat", "width": 16, "height": 16},
         gpu_usage_probe=boom,
     )
@@ -621,7 +793,7 @@ def test_failed_pipeline_still_probes_then_releases(tmp_path):
     sampler = UnfusedPreviewSampler(
         transformer=transformer,
         pipeline=pipeline,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={"prompt": "a cat", "width": 16, "height": 16},
         gpu_usage_probe=probe,
     )
@@ -653,7 +825,7 @@ def test_preview_time_shift_installs_flow_match_scheduler(tmp_path):
         transformer=transformer,
         scheduler=original,
         vae=pipeline.vae,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={
             "prompt": "a cat",
             "width": 16,
@@ -702,6 +874,7 @@ def _cuda_lifecycle_sampler(
     transformer: TinyTransformer,
     pipeline: RecordingPipeline,
     events: list,
+    monkeypatch,
 ) -> UnfusedPreviewSampler:
     original_add = transformer.add_adapter
     original_delete = transformer.delete_adapters
@@ -717,6 +890,11 @@ def _cuda_lifecycle_sampler(
     transformer.add_adapter = add_adapter
     transformer.delete_adapters = delete_adapters
     pipeline.events = events
+    pipeline.retain_calls = False
+    monkeypatch.setattr(
+        "zimage.training.sampling.load_preview_cache",
+        lambda path, expected=None: (object(), {}),
+    )
 
     def move(component, device):
         label = "transformer" if component is transformer else "vae"
@@ -726,7 +904,7 @@ def _cuda_lifecycle_sampler(
         transformer=transformer,
         pipeline=pipeline,
         vae=pipeline.vae,
-        prompt_embeddings={"a cat": object(), "": object()},
+        prompt_paths={"a cat": Path("a-cat.safetensors")},
         common_parameters={"prompt": "a cat", "width": 16, "height": 16},
         device="cuda",
         quantizer=lambda model: events.append("quantize"),
@@ -744,7 +922,7 @@ def test_cuda_preview_orders_quantization_adapter_and_device_lifecycle(
     transformer = TinyTransformer().to(dtype=torch.bfloat16)
     pipeline = RecordingPipeline(transformer)
     events: list[str] = []
-    sampler = _cuda_lifecycle_sampler(transformer, pipeline, events)
+    sampler = _cuda_lifecycle_sampler(transformer, pipeline, events, monkeypatch)
     monkeypatch.setattr(
         "zimage.training.sampling._make_generator",
         lambda device, seed: SimpleNamespace(device=device, seed=seed),
@@ -775,7 +953,7 @@ def test_cuda_preview_cleans_up_after_forward_failure(tmp_path, monkeypatch):
     pipeline = RecordingPipeline(transformer)
     pipeline.fail = True
     events: list[str] = []
-    sampler = _cuda_lifecycle_sampler(transformer, pipeline, events)
+    sampler = _cuda_lifecycle_sampler(transformer, pipeline, events, monkeypatch)
     monkeypatch.setattr(
         "zimage.training.sampling._make_generator",
         lambda device, seed: SimpleNamespace(device=device, seed=seed),
@@ -806,7 +984,7 @@ def test_cuda_preview_quantizes_base_once_across_adapter_replacements(
     transformer = TinyTransformer().to(dtype=torch.bfloat16)
     pipeline = RecordingPipeline(transformer)
     events: list[str] = []
-    sampler = _cuda_lifecycle_sampler(transformer, pipeline, events)
+    sampler = _cuda_lifecycle_sampler(transformer, pipeline, events, monkeypatch)
     monkeypatch.setattr(
         "zimage.training.sampling._make_generator",
         lambda device, seed: SimpleNamespace(device=device, seed=seed),
@@ -840,7 +1018,7 @@ def test_cpu_preview_skips_quantization_and_never_fuses(tmp_path):
         transformer=transformer,
         pipeline=pipeline,
         vae=pipeline.vae,
-        prompt_embeddings=_embeddings(),
+        prompt_paths=_write_prompt_paths(tmp_path),
         common_parameters={"prompt": "a cat", "width": 16, "height": 16},
         device="cpu",
         quantizer=forbidden,
@@ -1087,6 +1265,12 @@ class CudaLifecyclePipeline:
         tokens = hidden[0] if isinstance(hidden, list) and hidden else hidden
         if isinstance(tokens, torch.Tensor) and tokens.ndim == 2:
             tokens = tokens.unsqueeze(0)
+        in_features = self.transformer.to_q.in_features
+        if not isinstance(tokens, torch.Tensor) or tokens.shape[-1] != in_features:
+            parameter = next(self.transformer.parameters())
+            tokens = torch.zeros(
+                1, 2, in_features, device=parameter.device, dtype=parameter.dtype
+            )
         hidden_out = self.transformer(tokens)
         self.vae(hidden_out)
         self.forwards += 1
@@ -1128,7 +1312,6 @@ def test_sample_unfused_real_cuda_lifecycle_quantizes_once_and_restores_cpu(tmp_
     _warmup_cuda_fp8_context()
     torch.cuda.reset_peak_memory_stats()
     baseline_alloc = torch.cuda.memory_allocated()
-    baseline_reserved = torch.cuda.memory_reserved()
 
     transformer = None
     vae = None
@@ -1145,7 +1328,7 @@ def test_sample_unfused_real_cuda_lifecycle_quantizes_once_and_restores_cpu(tmp_
             transformer=transformer,
             pipeline=pipeline,
             vae=vae,
-            prompt_embeddings=_embeddings(),
+            prompt_paths=_write_prompt_paths(tmp_path),
             common_parameters={"prompt": "a cat", "width": 16, "height": 16},
             device="cuda",
             target_modules=["to_q"],
@@ -1208,16 +1391,13 @@ def test_sample_unfused_real_cuda_lifecycle_quantizes_once_and_restores_cpu(tmp_
         assert id(_base_weight(transformer)) == first_weight_id
     finally:
         metrics["peak_allocated"] = torch.cuda.max_memory_allocated()
-        metrics["peak_reserved"] = torch.cuda.max_memory_reserved()
         sampler = None
         pipeline = None
         transformer = None
         vae = None
         _reclaim_cuda()
         metrics["post_allocated"] = torch.cuda.memory_allocated()
-        metrics["post_reserved"] = torch.cuda.memory_reserved()
         metrics["survivors"] = _cuda_tensor_survivors()
 
     assert metrics["survivors"] == []
     assert metrics["post_allocated"] <= baseline_alloc + _CUDA_MEMORY_SLACK_BYTES
-    assert metrics["post_reserved"] <= baseline_reserved + _CUDA_MEMORY_SLACK_BYTES

@@ -9,7 +9,7 @@ from __future__ import annotations
 import gc
 import importlib
 import logging
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,8 +24,14 @@ from tqdm import tqdm
 
 from zimage.training.cache import (
     CacheConfig,
-    CachedSample,
+    CacheError,
+    CacheState,
+    expected_preview_metadata,
+    inspect_preview_cache,
+    load_cache,
     prepare_cache_at_job_start,
+    prepare_preview_prompt_cache,
+    preview_cache_path,
 )
 from zimage.training.commands import consume_commands as consume_job_commands
 from zimage.training.contracts import (
@@ -115,7 +121,7 @@ class FlowMatchingStepResult:
 
 
 def cache_job(job_dir: Path, **injected: Any) -> int:
-    """Materialize the captioned cache, then release text-encoder resources."""
+    """Materialize dataset and preview caches, then release text-encoder resources."""
 
     job_dir = Path(job_dir)
     job = load_job_config(job_dir)
@@ -126,8 +132,25 @@ def cache_job(job_dir: Path, **injected: Any) -> int:
     components, lifecycle = _load_lifecycle(job, injected)
     placed = [False]
     try:
+        cache_config = _resolve_cache_config(job, components, injected)
         _prepare_cache(
-            samples, job, components, lifecycle, injected, placed=placed
+            samples,
+            job,
+            components,
+            lifecycle,
+            injected,
+            job_dir=job_dir,
+            placed=placed,
+            cache_config=cache_config,
+        )
+        _prepare_preview_prompt_paths(
+            job,
+            lifecycle,
+            cache_config,
+            injected,
+            components,
+            job_dir=job_dir,
+            placed=placed,
         )
     finally:
         if placed[0]:
@@ -366,12 +389,13 @@ def _prepare_cache(
     lifecycle: TrainingModelLifecycle,
     injected: Mapping[str, Any],
     *,
+    job_dir: Path,
     device: torch.device | str | None = None,
     placed: list[bool] | None = None,
-) -> list[CachedSample]:
-    cache_config = injected.get("cache_config")
+    cache_config: CacheConfig | None = None,
+) -> list[Path]:
     if cache_config is None:
-        cache_config = cache_config_from_components(job, components)
+        cache_config = _resolve_cache_config(job, components, injected)
     prepare = injected.get("prepare_cache", prepare_cache_at_job_start)
     flag = placed if placed is not None else [False]
     encode_scope = PeakMemoryScope()
@@ -409,9 +433,21 @@ def _prepare_cache(
         samples,
         lifecycle.cache_encoder(),
         cache_config,
+        job_dir=job_dir,
         on_before_encode=on_before_encode,
         on_after_first_encode=on_after_first_encode,
     )
+
+
+def _resolve_cache_config(
+    job: Mapping[str, Any],
+    components: TrainingModelComponents,
+    injected: Mapping[str, Any],
+) -> CacheConfig:
+    cache_config = injected.get("cache_config")
+    if cache_config is None:
+        cache_config = cache_config_from_components(job, components)
+    return cache_config
 
 
 def cache_config_from_components(
@@ -469,40 +505,41 @@ def _build_runtime(
     _probe_gpu_usage(
         injected, "load", context=GpuProbeContext(components=components)
     )
-    preview_prompt_embeddings: dict[str, Any] = {}
-    preview_negative_embeddings: dict[str, Any] = {}
+    preview_prompt_paths: dict[str, Path] = {}
+    preview_negative_paths: dict[str, Path] = {}
     preview_sampler = None
     placed = [False]
+    cache_config = _resolve_cache_config(job, components, injected)
     try:
-        cached = _prepare_cache(
+        cache_paths = _prepare_cache(
             samples,
             job,
             components,
             lifecycle,
             injected,
+            job_dir=job_dir,
+            device=training_device,
+            placed=placed,
+            cache_config=cache_config,
+        )
+        preview_prompt_paths, preview_negative_paths = _prepare_preview_prompt_paths(
+            job,
+            lifecycle,
+            cache_config,
+            injected,
+            components,
+            job_dir=job_dir,
             device=training_device,
             placed=placed,
         )
-        if "preview_sampler" not in injected and not placed[0]:
-            _place_cache_modules(
-                placed,
-                lifecycle,
-                training_device,
-                injected,
-                components,
-                vae=False,
-            )
         if "preview_sampler" not in injected:
-            preview_prompt_embeddings, preview_negative_embeddings = (
-                _prepare_preview_embeddings(job, lifecycle)
-            )
             preview_sampler = _default_preview_sampler(
                 {
                     "components": components,
                     "lifecycle": lifecycle,
                     "config": job,
-                    "preview_prompt_embeddings": preview_prompt_embeddings,
-                    "preview_negative_embeddings": preview_negative_embeddings,
+                    "preview_prompt_paths": preview_prompt_paths,
+                    "preview_negative_paths": preview_negative_paths,
                     "device": training_device,
                 },
                 injected,
@@ -544,8 +581,6 @@ def _build_runtime(
         job=job,
         injected=injected,
         components=components,
-        preview_prompt_embeddings=preview_prompt_embeddings,
-        preview_negative_embeddings=preview_negative_embeddings,
     )
     settings = injected.get("gpu_usage_settings")
     if not isinstance(settings, GpuUsageSettings):
@@ -557,8 +592,6 @@ def _build_runtime(
             components=components,
             optimizer=optimizer,
             transformer=transformer,
-            preview_prompt_embeddings=preview_prompt_embeddings,
-            preview_negative_embeddings=preview_negative_embeddings,
             preview_sampler=preview_sampler,
         ),
     )
@@ -570,14 +603,16 @@ def _build_runtime(
         "setup": setup,
         "transformer": transformer,
         "optimizer": optimizer,
-        "cached": cached,
+        "cache_paths": cache_paths,
         "samples": samples,
         "accelerator": accelerator,
         "device": training_device,
         "last_error": None,
+        "job_dir": job_dir,
+        "cache_config": cache_config,
         "preview_sampler": preview_sampler,
-        "preview_prompt_embeddings": preview_prompt_embeddings,
-        "preview_negative_embeddings": preview_negative_embeddings,
+        "preview_prompt_paths": preview_prompt_paths,
+        "preview_negative_paths": preview_negative_paths,
         "gpu_usage_settings": settings,
     }
 
@@ -618,14 +653,14 @@ def _optimize(
     runtime = holder["runtime"]
     step = int(state.step)
     epoch = int(state.epoch)
-    cached: list[CachedSample] = runtime["cached"]
-    sample_index = step % len(cached)
+    cache_paths: list[Path] = runtime["cache_paths"]
+    sample_index = step % len(cache_paths)
     hook: TrainingHook | None = injected.get("training_hook")
     ran = False
 
     kind, limit = resolve_stop_condition(runtime["config"])
     pbar = tqdm(
-        total=_progress_total(kind, limit, len(cached)),
+        total=_progress_total(kind, limit, len(cache_paths)),
         initial=step,
         disable=None,
     )
@@ -640,7 +675,6 @@ def _optimize(
             if kind == "epochs" and epoch >= limit:
                 break
 
-            sample = cached[sample_index]
             transformer = runtime["transformer"]
             if callable(getattr(transformer, "train", None)):
                 transformer.train()
@@ -652,38 +686,51 @@ def _optimize(
             probe_this_step = _should_probe_optimizer_step(next_step, config, settings)
             step_scope: Any = PeakMemoryScope() if probe_this_step else nullcontext()
             with step_scope as scope:
-                result = official_flow_matching_step(
-                    transformer=transformer,
-                    scheduler=runtime["components"].training_scheduler,
-                    latent=sample.latent,
-                    prompt_embedding=sample.prompt_embedding,
-                    weighting_scheme=str(config["weighting_scheme"]),
-                    logit_mean=float(config["logit_mean"]),
-                    logit_std=float(config["logit_std"]),
-                    mode_scale=float(config["mode_scale"]),
-                    noise=_resolve_noise(injected, sample.latent),
-                    density_u=injected.get("density_u"),
-                    device=device,
-                )
-                ran = True
+                cache_path = cache_paths[sample_index]
+                try:
+                    sample = load_cache(cache_path)
+                except CacheError:
+                    raise
+                except Exception as exc:
+                    raise CacheError(f"cannot read cache: {cache_path}") from exc
+                result = None
+                try:
+                    result = official_flow_matching_step(
+                        transformer=transformer,
+                        scheduler=runtime["components"].training_scheduler,
+                        latent=sample.latent,
+                        prompt_embedding=sample.prompt_embedding,
+                        weighting_scheme=str(config["weighting_scheme"]),
+                        logit_mean=float(config["logit_mean"]),
+                        logit_std=float(config["logit_std"]),
+                        mode_scale=float(config["mode_scale"]),
+                        noise=_resolve_noise(injected, sample.latent),
+                        density_u=injected.get("density_u"),
+                        device=device,
+                    )
+                    ran = True
 
-                accelerator = runtime["accelerator"]
-                accumulate = getattr(accelerator, "accumulate", None)
-                context = (
-                    accumulate(transformer) if callable(accumulate) else nullcontext()
-                )
-                with context:
-                    backward = getattr(accelerator, "backward", None)
-                    if callable(backward):
-                        backward(result.loss)
-                    else:
-                        result.loss.backward()
-                    runtime["optimizer"].step()
-                    runtime["optimizer"].zero_grad()
+                    accelerator = runtime["accelerator"]
+                    accumulate = getattr(accelerator, "accumulate", None)
+                    context = (
+                        accumulate(transformer)
+                        if callable(accumulate)
+                        else nullcontext()
+                    )
+                    with context:
+                        backward = getattr(accelerator, "backward", None)
+                        if callable(backward):
+                            backward(result.loss)
+                        else:
+                            result.loss.backward()
+                        runtime["optimizer"].step()
+                        runtime["optimizer"].zero_grad()
+                finally:
+                    del sample, result
 
             step += 1
             sample_index += 1
-            if sample_index >= len(cached):
+            if sample_index >= len(cache_paths):
                 sample_index = 0
                 epoch += 1
 
@@ -751,7 +798,7 @@ def _optimize(
                 )
                 return 1
             kind, limit = resolve_stop_condition(runtime["config"])
-            pbar.total = _progress_total(kind, limit, len(cached))
+            pbar.total = _progress_total(kind, limit, len(cache_paths))
             if reload.rebuild_required:
                 log.info("rebuild step=%s epoch=%s", step, epoch)
                 try:
@@ -764,10 +811,10 @@ def _optimize(
                     )
                     return 1
                 runtime = holder["runtime"]
-                cached = runtime["cached"]
-                sample_index = step % len(cached)
+                cache_paths = runtime["cache_paths"]
+                sample_index = step % len(cache_paths)
                 kind, limit = resolve_stop_condition(runtime["config"])
-                pbar.total = _progress_total(kind, limit, len(cached))
+                pbar.total = _progress_total(kind, limit, len(cache_paths))
 
         if ran and not _should_checkpoint(step, runtime["config"]):
             persisted = _write_running_state(
@@ -1190,9 +1237,9 @@ def _apply_hot_runtime(
     if any(field == "sampling" or field.startswith("sampling.") for field in changed):
         # ``_changed_paths`` does not descend into lists, so ``samples[0].prompt``
         # arrives as ``sampling.samples`` (same path as seed/size). Refresh TE
-        # only when resolved prompt / non-empty-negative keys are missing.
-        if _missing_preview_embedding_keys(runtime, injected):
-            _refresh_preview_embeddings_serial(runtime, injected)
+        # only when a required prompt file is missing or stale.
+        if _missing_preview_prompt_cache(runtime, injected):
+            _refresh_preview_prompt_cache_serial(runtime, injected)
 
 
 def _preview_sampler_from_runtime(
@@ -1204,24 +1251,24 @@ def _preview_sampler_from_runtime(
     return runtime.get("preview_sampler")
 
 
-def _preview_embedding_stores(
+def _preview_prompt_path_stores(
     runtime: Mapping[str, Any],
     injected: Mapping[str, Any],
-) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-    """Merged runtime + sampler embedding maps used for mid-run prompt checks."""
+) -> tuple[Mapping[str, Path], Mapping[str, Path]]:
+    """Merged runtime + sampler prompt-cache path maps."""
 
-    prompt_store: dict[str, Any] = {}
-    negative_store: dict[str, Any] = {}
-    runtime_prompts = runtime.get("preview_prompt_embeddings")
-    runtime_negatives = runtime.get("preview_negative_embeddings")
+    prompt_store: dict[str, Path] = {}
+    negative_store: dict[str, Path] = {}
+    runtime_prompts = runtime.get("preview_prompt_paths")
+    runtime_negatives = runtime.get("preview_negative_paths")
     if isinstance(runtime_prompts, Mapping):
         prompt_store.update(runtime_prompts)
     if isinstance(runtime_negatives, Mapping):
         negative_store.update(runtime_negatives)
     sampler = _preview_sampler_from_runtime(runtime, injected)
     if sampler is not None:
-        sampler_prompts = getattr(sampler, "prompt_embeddings", None)
-        sampler_negatives = getattr(sampler, "negative_prompt_embeddings", None)
+        sampler_prompts = getattr(sampler, "prompt_paths", None)
+        sampler_negatives = getattr(sampler, "negative_prompt_paths", None)
         if isinstance(sampler_prompts, Mapping):
             prompt_store.update(sampler_prompts)
         if isinstance(sampler_negatives, Mapping):
@@ -1229,28 +1276,37 @@ def _preview_embedding_stores(
     return prompt_store, negative_store
 
 
-def _missing_preview_embedding_keys(
+def _missing_preview_prompt_cache(
     runtime: Mapping[str, Any],
     injected: Mapping[str, Any],
 ) -> bool:
-    """True when a required resolved prompt or non-empty negative is unencoded."""
+    """True when a required prompt path is absent or its cache is missing/stale."""
 
     prompts, negatives = _collect_preview_prompt_texts(runtime["config"])
-    prompt_store, negative_store = _preview_embedding_stores(runtime, injected)
-    return any(prompt not in prompt_store for prompt in prompts) or any(
+    prompt_store, negative_store = _preview_prompt_path_stores(runtime, injected)
+    if any(prompt not in prompt_store for prompt in prompts if prompt) or any(
         negative not in negative_store for negative in negatives
+    ):
+        return True
+    cache_config = runtime.get("cache_config")
+    job_dir = runtime.get("job_dir")
+    if cache_config is None or job_dir is None:
+        return bool(_unique_preview_prompt_texts(runtime["config"]))
+    return _preview_prompt_files_need_encode(
+        _unique_preview_prompt_texts(runtime["config"]),
+        cache_config,
+        job_dir,
     )
 
 
-def _refresh_preview_embeddings_serial(
+def _refresh_preview_prompt_cache_serial(
     runtime: dict[str, Any],
     injected: Mapping[str, Any],
 ) -> None:
-    """Pause main, encode new prompts on the training-device TE, restore main.
+    """Pause main only when a prompt file must be encoded, then restore main.
 
-    Does not rebuild the training stack. Reloads Qwen weights on CPU, places
-    the text encoder (not VAE) onto the training device, encodes, releases
-    text resources, then restores main.
+    Compatible files are reused as paths. Reloads Qwen on CPU and places the
+    text encoder (not VAE) only for missing or stale prompt caches.
     """
 
     lifecycle = runtime.get("lifecycle")
@@ -1258,6 +1314,22 @@ def _refresh_preview_embeddings_serial(
         raise RuntimeError(
             "cannot refresh preview prompts: training lifecycle is missing"
         )
+    job_dir = runtime.get("job_dir")
+    cache_config = runtime.get("cache_config")
+    if job_dir is None or cache_config is None:
+        raise RuntimeError(
+            "cannot refresh preview prompts: job cache identity is missing"
+        )
+    job_dir = Path(job_dir)
+    texts = _unique_preview_prompt_texts(runtime["config"])
+    if not _preview_prompt_files_need_encode(texts, cache_config, job_dir):
+        _assign_preview_prompt_paths(
+            runtime,
+            injected,
+            {text: preview_cache_path(job_dir, text) for text in texts},
+        )
+        return
+
     training_device = _training_device_from_runtime(runtime, injected)
     transformer = runtime["transformer"]
     unwrap = getattr(runtime.get("accelerator"), "unwrap_model", None)
@@ -1285,22 +1357,15 @@ def _refresh_preview_embeddings_serial(
         )
         try:
             lifecycle.place_cache_modules(training_device, vae=False)
-            prompt_embeds, negative_embeds = _prepare_preview_embeddings(
-                runtime["config"],
-                lifecycle,
+            paths = prepare_preview_prompt_cache(
+                texts,
+                lifecycle.cache_encoder(),
+                cache_config,
+                job_dir=job_dir,
             )
         finally:
             lifecycle.release_text_resources()
-        runtime["preview_prompt_embeddings"] = prompt_embeds
-        runtime["preview_negative_embeddings"] = negative_embeds
-        if sampler is not None:
-            if hasattr(sampler, "prompt_embeddings"):
-                sampler.prompt_embeddings = dict(prompt_embeds)
-            if hasattr(sampler, "negative_prompt_embeddings"):
-                sampler.negative_prompt_embeddings = dict(negative_embeds)
-            sampling = runtime["config"].get("sampling") or {}
-            if hasattr(sampler, "common_parameters"):
-                sampler.common_parameters = dict(sampling_base_parameters(sampling))
+        _assign_preview_prompt_paths(runtime, injected, paths)
     except Exception as exc:
         failure = exc
     finally:
@@ -1461,9 +1526,9 @@ def _teardown_runtime(
         runtime_dict["components"] = None
         runtime_dict["lifecycle"] = None
         runtime_dict["preview_sampler"] = None
-        runtime_dict["preview_prompt_embeddings"] = None
-        runtime_dict["preview_negative_embeddings"] = None
-        runtime_dict["cached"] = None
+        runtime_dict["preview_prompt_paths"] = None
+        runtime_dict["preview_negative_paths"] = None
+        runtime_dict["cache_paths"] = None
         runtime_dict["accelerator"] = None
     gc.collect()
     if torch.cuda.is_available():
@@ -1737,8 +1802,6 @@ def _validate_prepared_training_runtime(
     job: Mapping[str, Any],
     injected: Mapping[str, Any],
     components: Any = None,
-    preview_prompt_embeddings: Mapping[str, Any] | None = None,
-    preview_negative_embeddings: Mapping[str, Any] | None = None,
 ) -> None:
     """Fail before the first step if prepare drifted off the target contract."""
 
@@ -1786,20 +1849,10 @@ def _validate_prepared_training_runtime(
                 continue
             if _reports_cuda(module):
                 leftovers.append(f"{name} on CUDA")
-        leftovers.extend(
-            _cuda_embed_leftovers(
-                "preview_prompt_embeddings", preview_prompt_embeddings
-            )
-        )
-        leftovers.extend(
-            _cuda_embed_leftovers(
-                "preview_negative_embeddings", preview_negative_embeddings
-            )
-        )
         if leftovers:
             raise TrainingConfigError(
-                "leftover CUDA VAE, text encoder, sampling transformer, "
-                "or preview embeddings after training prep; "
+                "leftover CUDA VAE, text encoder, or sampling transformer "
+                "after training prep; "
                 f"violations: {', '.join(leftovers)}"
             )
 
@@ -1815,22 +1868,6 @@ def _reports_cuda(module: Any) -> bool:
         return next(module.parameters()).device.type == "cuda"
     except (AttributeError, StopIteration, TypeError, RuntimeError):
         return False
-
-
-def _cuda_embed_leftovers(label: str, store: Mapping[str, Any] | None) -> list[str]:
-    if not isinstance(store, Mapping):
-        return []
-    leftovers: list[str] = []
-    for key, value in store.items():
-        if isinstance(value, torch.Tensor):
-            tensors = [value]
-        elif isinstance(value, (list, tuple)):
-            tensors = [item for item in value if isinstance(item, torch.Tensor)]
-        else:
-            continue
-        if any(tensor.device.type == "cuda" for tensor in tensors):
-            leftovers.append(f"{label}[{key!r}] on CUDA")
-    return leftovers
 
 
 def _training_device_from_runtime(
@@ -1942,8 +1979,6 @@ def _gpu_probe_context_from_runtime(
         optimizer=runtime.get("optimizer"),
         transformer=runtime.get("transformer"),
         phase_peak_bytes=phase_peak_bytes,
-        preview_prompt_embeddings=runtime.get("preview_prompt_embeddings"),
-        preview_negative_embeddings=runtime.get("preview_negative_embeddings"),
         preview_sampler=(
             preview_sampler
             if preview_sampler is not None
@@ -2059,23 +2094,91 @@ def _collect_preview_prompt_texts(
     return prompts, negatives
 
 
-def _prepare_preview_embeddings(
+def _unique_preview_prompt_texts(job: Mapping[str, Any]) -> list[str]:
+    prompts, negatives = _collect_preview_prompt_texts(job)
+    return [text for text in dict.fromkeys((*prompts, *negatives)) if text]
+
+
+def _preview_prompt_files_need_encode(
+    texts: Iterable[str],
+    cache_config: CacheConfig,
+    job_dir: Path,
+) -> bool:
+    for text in texts:
+        if not text:
+            continue
+        inspection = inspect_preview_cache(
+            preview_cache_path(job_dir, text),
+            expected_preview_metadata(text, cache_config),
+        )
+        if inspection.state is not CacheState.VALID:
+            return True
+    return False
+
+
+def _preview_path_maps(
+    job: Mapping[str, Any],
+    paths: Mapping[str, Path],
+) -> tuple[dict[str, Path], dict[str, Path]]:
+    prompts, negatives = _collect_preview_prompt_texts(job)
+    return (
+        {text: paths[text] for text in prompts if text in paths},
+        {text: paths[text] for text in negatives if text in paths},
+    )
+
+
+def _assign_preview_prompt_paths(
+    runtime: dict[str, Any],
+    injected: Mapping[str, Any],
+    paths: Mapping[str, Path],
+) -> None:
+    prompt_paths, negative_paths = _preview_path_maps(runtime["config"], paths)
+    runtime["preview_prompt_paths"] = prompt_paths
+    runtime["preview_negative_paths"] = negative_paths
+    sampler = _preview_sampler_from_runtime(runtime, injected)
+    if sampler is None:
+        return
+    if hasattr(sampler, "prompt_paths"):
+        sampler.prompt_paths = dict(prompt_paths)
+    if hasattr(sampler, "negative_prompt_paths"):
+        sampler.negative_prompt_paths = dict(negative_paths)
+    sampling = runtime["config"].get("sampling") or {}
+    if hasattr(sampler, "common_parameters"):
+        sampler.common_parameters = dict(sampling_base_parameters(sampling))
+
+
+def _prepare_preview_prompt_paths(
     job: Mapping[str, Any],
     lifecycle: TrainingModelLifecycle,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    prompts, negatives = _collect_preview_prompt_texts(job)
-    unique = list(dict.fromkeys([*prompts, *negatives]))
-    if not unique:
-        return {}, {}
-    log.info("encoding preview prompts")
-    encoded = lifecycle.prepare_preview_prompt_embeddings(
-        unique,
-        max_sequence_length=int(job["max_sequence_length"]),
-    )
-    return (
-        {prompt: encoded[prompt] for prompt in prompts if prompt in encoded},
-        {negative: encoded[negative] for negative in negatives if negative in encoded},
-    )
+    cache_config: CacheConfig,
+    injected: Mapping[str, Any],
+    components: TrainingModelComponents,
+    *,
+    job_dir: Path,
+    device: torch.device | str | None = None,
+    placed: list[bool] | None = None,
+) -> tuple[dict[str, Path], dict[str, Path]]:
+    texts = _unique_preview_prompt_texts(job)
+    flag = placed if placed is not None else [False]
+    if _preview_prompt_files_need_encode(texts, cache_config, job_dir):
+        if not flag[0]:
+            target = (
+                torch.device(device)
+                if device is not None
+                else _resolve_training_device(injected)
+            )
+            _place_cache_modules(
+                flag, lifecycle, target, injected, components, vae=False
+            )
+        paths = prepare_preview_prompt_cache(
+            texts,
+            lifecycle.cache_encoder(),
+            cache_config,
+            job_dir=job_dir,
+        )
+    else:
+        paths = {text: preview_cache_path(job_dir, text) for text in texts}
+    return _preview_path_maps(job, paths)
 
 
 def _preview_sampler_gpu_usage_probe(injected: Mapping[str, Any]) -> Any:
@@ -2104,10 +2207,8 @@ def _default_preview_sampler(
         "transformer": transformer,
         "scheduler": getattr(components, "sampling_scheduler", None),
         "vae": getattr(components, "vae", None),
-        "prompt_embeddings": dict(runtime.get("preview_prompt_embeddings") or {}),
-        "negative_prompt_embeddings": dict(
-            runtime.get("preview_negative_embeddings") or {}
-        ),
+        "prompt_paths": dict(runtime.get("preview_prompt_paths") or {}),
+        "negative_prompt_paths": dict(runtime.get("preview_negative_paths") or {}),
         "common_parameters": sampling_base_parameters(config.get("sampling") or {}),
         "device": _preview_sampler_device(runtime, injected),
         "target_modules": list((config.get("lora") or {}).get("targets") or []),

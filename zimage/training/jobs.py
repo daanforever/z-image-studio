@@ -33,7 +33,7 @@ from zimage.training.schema import (
 CONFIG_FILE = "config.yaml"
 STATE_FILE = "state.json"
 PREVIEWS_DIR = "previews"
-JOB_DIRECTORIES = ("commands", "checkpoints", PREVIEWS_DIR, LOGS_DIR)
+JOB_DIRECTORIES = ("commands", "checkpoints", PREVIEWS_DIR, LOGS_DIR, ".cache")
 JOB_ROOT_ENTRIES = (CONFIG_FILE, STATE_FILE, *JOB_DIRECTORIES)
 
 _WINDOWS_RESERVED_STEMS = {

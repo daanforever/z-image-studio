@@ -55,6 +55,7 @@ def test_create_has_exact_layout_and_preserves_original_name(tmp_path):
         "checkpoints",
         "previews",
         "logs",
+        ".cache",
     }
     assert not (root / "logs" / "job.log").exists()
     persisted = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))

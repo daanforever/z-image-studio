@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gc
 import subprocess
 import sys
+import weakref
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -347,10 +349,8 @@ class FakeDefaultSampler:
         self.kwargs = kwargs
         self.calls: list[tuple] = []
         self.used_factory = False
-        self.prompt_embeddings = dict(kwargs.get("prompt_embeddings") or {})
-        self.negative_prompt_embeddings = dict(
-            kwargs.get("negative_prompt_embeddings") or {}
-        )
+        self.prompt_paths = dict(kwargs.get("prompt_paths") or {})
+        self.negative_prompt_paths = dict(kwargs.get("negative_prompt_paths") or {})
         self.common_parameters = dict(kwargs.get("common_parameters") or {})
         FakeDefaultSampler.last = self
 
@@ -1478,14 +1478,255 @@ def test_cache_job_prepares_cache_without_running_optimizer(tmp_path):
     )
 
     dataset = Path(load_job_config(root)["datasets"][0]["name"])
-    cached = list((dataset / ".cache").rglob("*.safetensors"))
+    cached = list((root / ".cache" / "dataset").rglob("*.safetensors"))
     assert cached
+    previewed = list((root / ".cache" / "preview").rglob("*.safetensors"))
+    assert previewed
+    assert not (dataset / ".cache").exists()
     assert load_job_state(root).step == 0
     assert "step" not in events
     assert "forward" not in events
     moved = loaders.text_encoder.created[0].moved_to
     assert moved[-1] == "cpu"
     assert "cuda" not in moved
+
+
+def _add_dataset_image(dataset: Path, name: str, *, color=(40, 50, 60), caption: str) -> None:
+    Image.new("RGB", (16, 16), color).save(dataset / name)
+    (dataset / Path(name).with_suffix(".txt")).write_text(caption, encoding="utf-8")
+
+
+def test_runtime_stores_job_cache_paths_without_cached_samples(tmp_path, monkeypatch):
+    import zimage.training.loop as loop_module
+    from zimage.training.cache import CachedSample
+
+    captured: dict[str, object] = {}
+    real_optimize = loop_module._optimize
+
+    def wrapping_optimize(job_dir, state, holder, injected):
+        runtime = holder["runtime"]
+        captured["has_cached"] = "cached" in runtime
+        paths = list(runtime["cache_paths"])
+        captured["paths"] = paths
+        captured["contains_sample"] = any(isinstance(item, CachedSample) for item in paths)
+        cache_root = (Path(job_dir) / ".cache" / "dataset").resolve()
+        captured["parents"] = [Path(path).resolve().parent for path in paths]
+        captured["cache_root"] = cache_root
+        return real_optimize(job_dir, state, holder, injected)
+
+    monkeypatch.setattr(loop_module, "_optimize", wrapping_optimize)
+    root = make_job(tmp_path, max_steps=1)
+    assert run_job(root, **injections()) == 0
+    assert captured["has_cached"] is False
+    assert captured["contains_sample"] is False
+    assert captured["paths"]
+    assert captured["parents"] == [captured["cache_root"]] * len(captured["paths"])
+
+
+def test_one_cpu_load_per_training_step_and_device_move_keeps_cache_cpu(
+    tmp_path, monkeypatch
+):
+    import zimage.training.loop as loop_module
+
+    loads: list[Path] = []
+    real_load = loop_module.load_cache
+    real_step = loop_module.official_flow_matching_step
+
+    def tracking_load(path):
+        loads.append(Path(path))
+        sample = real_load(path)
+        assert sample.latent.device.type == "cpu"
+        assert sample.prompt_embedding.device.type == "cpu"
+        return sample
+
+    def tracking_step(**kwargs):
+        result = real_step(**kwargs)
+        assert kwargs["latent"].device.type == "cpu"
+        assert kwargs["prompt_embedding"].device.type == "cpu"
+        return result
+
+    monkeypatch.setattr(loop_module, "load_cache", tracking_load)
+    monkeypatch.setattr(loop_module, "official_flow_matching_step", tracking_step)
+    root = make_job(tmp_path, max_steps=3)
+    dataset = Path(load_job_config(root)["datasets"][0]["name"])
+    _add_dataset_image(dataset, "b.png", caption="b caption")
+    assert run_job(root, **injections()) == 0
+    assert len(loads) == 3
+    reloaded = real_load(loads[0])
+    assert reloaded.latent.device.type == "cpu"
+    assert reloaded.prompt_embedding.device.type == "cpu"
+
+
+def test_duplicate_cache_paths_preserve_order_across_epochs_resume_and_rebuild(
+    tmp_path, monkeypatch
+):
+    import zimage.training.loop as loop_module
+
+    captured_paths: list[list[Path]] = []
+    loads: list[Path] = []
+    real_build = loop_module._build_runtime
+    real_load = loop_module.load_cache
+
+    def tracking_build(*args, **kwargs):
+        runtime = real_build(*args, **kwargs)
+        captured_paths.append([Path(path) for path in runtime["cache_paths"]])
+        return runtime
+
+    def tracking_load(path):
+        loads.append(Path(path))
+        return real_load(path)
+
+    monkeypatch.setattr(loop_module, "_build_runtime", tracking_build)
+    monkeypatch.setattr(loop_module, "load_cache", tracking_load)
+
+    root = make_job(tmp_path, max_steps=4)
+    dataset = Path(load_job_config(root)["datasets"][0]["name"])
+    _add_dataset_image(dataset, "copy.png", color=(10, 20, 30), caption="a caption")
+    updated = load_job_config(root)
+    updated["max_sequence_length"] = 256
+    enqueue_update(root, updated)
+
+    assert run_job(root, **injections()) == 0
+    assert len(captured_paths) == 2
+    first, rebuilt = captured_paths
+    assert len(first) == 2
+    assert first[0] == first[1]
+    assert rebuilt == first
+    assert loads[:2] == first
+    assert load_job_state(root).epoch == 2
+
+
+def test_resume_uses_step_modulo_cache_paths(tmp_path, monkeypatch):
+    import zimage.training.loop as loop_module
+
+    loads: list[Path] = []
+    captured: dict[str, list[Path]] = {}
+    real_load = loop_module.load_cache
+    real_optimize = loop_module._optimize
+
+    def wrapping_optimize(job_dir, state, holder, injected):
+        captured["paths"] = [Path(path) for path in holder["runtime"]["cache_paths"]]
+        return real_optimize(job_dir, state, holder, injected)
+
+    def tracking_load(path):
+        loads.append(Path(path))
+        return real_load(path)
+
+    monkeypatch.setattr(loop_module, "_optimize", wrapping_optimize)
+    monkeypatch.setattr(loop_module, "load_cache", tracking_load)
+
+    root = make_job(tmp_path, max_steps=3)
+    dataset = Path(load_job_config(root)["datasets"][0]["name"])
+    _add_dataset_image(dataset, "b.png", caption="b caption")
+    _write_job_checkpoint(root, step=1)
+    write_job_state(root, JobState("job", JobStatus.STOPPED, step=2, epoch=0))
+
+    assert run_job(root, **default_loader_injections()) == 0
+    paths = captured["paths"]
+    assert len(paths) == 2
+    assert paths[0] != paths[1]
+    assert loads == [paths[1], paths[0]]
+
+
+def test_sample_and_result_released_before_checkpoint(tmp_path, monkeypatch):
+    import zimage.training.loop as loop_module
+
+    refs: list = []
+    real_load = loop_module.load_cache
+    real_step = loop_module.official_flow_matching_step
+    real_write = loop_module._write_checkpoint_then_sample
+
+    def tracking_load(path):
+        sample = real_load(path)
+        refs.append(weakref.ref(sample))
+        return sample
+
+    def tracking_step(**kwargs):
+        result = real_step(**kwargs)
+        refs.append(weakref.ref(result))
+        return result
+
+    def tracking_write(*args, **kwargs):
+        gc.collect()
+        assert refs and all(ref() is None for ref in refs)
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "load_cache", tracking_load)
+    monkeypatch.setattr(loop_module, "official_flow_matching_step", tracking_step)
+    monkeypatch.setattr(loop_module, "_write_checkpoint_then_sample", tracking_write)
+
+    root = make_job(tmp_path, max_steps=1, checkpoint_every=1)
+    assert run_job(root, **injections()) == 0
+    assert refs
+
+
+def test_sample_and_result_released_before_preview(tmp_path, monkeypatch):
+    import zimage.training.loop as loop_module
+
+    refs: list = []
+    real_load = loop_module.load_cache
+    real_step = loop_module.official_flow_matching_step
+
+    def tracking_load(path):
+        sample = real_load(path)
+        refs.append(weakref.ref(sample))
+        return sample
+
+    def tracking_step(**kwargs):
+        result = real_step(**kwargs)
+        refs.append(weakref.ref(result))
+        return result
+
+    class ProbeSampler:
+        def sample_unfused(self, *, checkpoint, parameters, destination):
+            gc.collect()
+            assert refs and all(ref() is None for ref in refs)
+            path = Path(destination)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("preview", encoding="utf-8")
+            return path
+
+    monkeypatch.setattr(loop_module, "load_cache", tracking_load)
+    monkeypatch.setattr(loop_module, "official_flow_matching_step", tracking_step)
+
+    root = make_job(tmp_path, max_steps=1, checkpoint_every=1)
+    writer = RecordingWriter([])
+    assert (
+        run_job(
+            root,
+            **injections(checkpoint_writer=writer, preview_sampler=ProbeSampler()),
+        )
+        == 0
+    )
+    assert refs
+    assert writer.saved
+
+
+def test_corrupt_cache_at_use_raises_without_reencoding(tmp_path, monkeypatch):
+    import zimage.training.loop as loop_module
+    from zimage.training.cache import CacheError
+
+    prepares = {"n": 0}
+    real_prepare = loop_module._prepare_cache
+    real_build = loop_module._build_runtime
+
+    def counting_prepare(*args, **kwargs):
+        prepares["n"] += 1
+        return real_prepare(*args, **kwargs)
+
+    def build_then_corrupt(*args, **kwargs):
+        runtime = real_build(*args, **kwargs)
+        for path in runtime["cache_paths"]:
+            Path(path).write_bytes(b"not-a-safetensors-file")
+        return runtime
+
+    monkeypatch.setattr(loop_module, "_prepare_cache", counting_prepare)
+    monkeypatch.setattr(loop_module, "_build_runtime", build_then_corrupt)
+
+    root = make_job(tmp_path, max_steps=1)
+    with pytest.raises(CacheError, match="cannot read cache"):
+        run_job(root, **injections())
+    assert prepares["n"] == 1
 
 
 def _track_place_park(monkeypatch, events: list, *, call_real: bool = True):
@@ -1618,7 +1859,7 @@ def test_warm_cache_run_job_probe_omits_cache_place(tmp_path):
     assert phases == ["load", "train_placed", "step", "teardown", "summary"]
 
 
-def test_warm_cache_default_sampler_probe_records_place_and_end(
+def test_warm_cache_default_sampler_probe_omits_cache_place(
     tmp_path, monkeypatch
 ):
     _install_fake_default_sampler(monkeypatch)
@@ -1629,11 +1870,8 @@ def test_warm_cache_default_sampler_probe_records_place_and_end(
         gpu_usage_probe=_recording_gpu_probe(phases)
     )
     assert run_job(root, **payload) == 0
-    assert "cache_encode_peak" not in phases
     assert phases == [
         "load",
-        "cache_place",
-        "cache_end",
         "train_placed",
         "step",
         "teardown",
@@ -1641,7 +1879,7 @@ def test_warm_cache_default_sampler_probe_records_place_and_end(
     ]
     text_encoder = payload["loaders"].text_encoder.created[0]
     vae = payload["loaders"].vae.created[0]
-    assert text_encoder.moved_to
+    assert all(torch.device(target).type != "cuda" for target in text_encoder.moved_to)
     assert all(torch.device(target).type != "cuda" for target in vae.moved_to)
 
 
@@ -1805,9 +2043,7 @@ def test_encode_exception_still_parks_cache_modules(tmp_path, monkeypatch):
     assert torch.device(loaders.text_encoder.created[0].moved_to[-1]).type == "cpu"
 
 
-def test_preview_prompts_place_when_cache_is_valid(tmp_path, monkeypatch):
-    import zimage.training.loop as loop_module
-
+def test_warm_preview_cache_does_not_place_text_encoder(tmp_path, monkeypatch):
     _install_fake_default_sampler(monkeypatch)
     root = make_job(
         tmp_path,
@@ -1818,51 +2054,26 @@ def test_preview_prompts_place_when_cache_is_valid(tmp_path, monkeypatch):
 
     events: list = []
     _track_place_park(monkeypatch, events)
-    real_preview = loop_module.TrainingModelLifecycle.prepare_preview_prompt_embeddings
-
-    def tracking_preview(self, prompts, *, max_sequence_length):
-        events.append("preview")
-        place_target = events[0][1]
-        assert next(self.components.text_encoder.parameters()).device.type == (
-            place_target
-        )
-        embeddings = real_preview(
-            self, prompts, max_sequence_length=max_sequence_length
-        )
-        for tensor in embeddings.values():
-            assert tensor.device.type == "cpu"
-        return embeddings
-
-    monkeypatch.setattr(
-        loop_module.TrainingModelLifecycle,
-        "prepare_preview_prompt_embeddings",
-        tracking_preview,
-    )
-
     payload = default_sampler_injections()
     assert run_job(root, **payload) == 0
-    assert events == [("place", "cpu"), "preview", "park"]
+    assert events == []
     vae = payload["loaders"].vae.created[0]
+    text_encoder = payload["loaders"].text_encoder.created[0]
     assert all(torch.device(target).type != "cuda" for target in vae.moved_to)
+    assert all(torch.device(target).type != "cuda" for target in text_encoder.moved_to)
 
 
 def test_stale_cache_preview_runs_after_place_before_park(tmp_path, monkeypatch):
     events: list = []
     loop_module = _track_place_park(monkeypatch, events)
     _install_fake_default_sampler(monkeypatch)
-    real_preview = loop_module.TrainingModelLifecycle.prepare_preview_prompt_embeddings
+    real_preview = loop_module.prepare_preview_prompt_cache
 
-    def tracking_preview(self, prompts, *, max_sequence_length):
+    def tracking_preview(prompts, encoder, config, *, job_dir):
         events.append("preview")
-        return real_preview(
-            self, prompts, max_sequence_length=max_sequence_length
-        )
+        return real_preview(prompts, encoder, config, job_dir=job_dir)
 
-    monkeypatch.setattr(
-        loop_module.TrainingModelLifecycle,
-        "prepare_preview_prompt_embeddings",
-        tracking_preview,
-    )
+    monkeypatch.setattr(loop_module, "prepare_preview_prompt_cache", tracking_preview)
 
     class TrackingVae(FakeVae):
         def encode(self, pixels):
@@ -1948,8 +2159,8 @@ def test_default_preview_sampler_uses_from_components_without_pipeline(monkeypat
         vae=object(),
         main_transformer=object(),
     )
-    embeddings = {"one": torch.ones(2, 4)}
-    negatives = {"neg": torch.zeros(2, 4)}
+    embeddings = {"one": Path("one.safetensors")}
+    negatives = {"neg": Path("neg.safetensors")}
     common = {"prompt": "one", "width": 8}
 
     sampler = loop_module._default_preview_sampler(
@@ -1959,8 +2170,8 @@ def test_default_preview_sampler_uses_from_components_without_pipeline(monkeypat
                 "sampling": common,
                 "lora": {"targets": ["to_k"]},
             },
-            "preview_prompt_embeddings": embeddings,
-            "preview_negative_embeddings": negatives,
+            "preview_prompt_paths": embeddings,
+            "preview_negative_paths": negatives,
         },
         {"device": "cpu"},
     )
@@ -1970,8 +2181,8 @@ def test_default_preview_sampler_uses_from_components_without_pipeline(monkeypat
     assert sampler.kwargs["transformer"] is components.sampling_transformer
     assert sampler.kwargs["scheduler"] is components.sampling_scheduler
     assert sampler.kwargs["vae"] is components.vae
-    assert sampler.kwargs["prompt_embeddings"]["one"] is embeddings["one"]
-    assert sampler.kwargs["negative_prompt_embeddings"]["neg"] is negatives["neg"]
+    assert sampler.kwargs["prompt_paths"]["one"] is embeddings["one"]
+    assert sampler.kwargs["negative_prompt_paths"]["neg"] is negatives["neg"]
     assert sampler.kwargs["common_parameters"] == common
     assert sampler.kwargs["device"] == "cpu"
     assert sampler.kwargs["target_modules"] == ["to_k"]
@@ -1999,7 +2210,7 @@ def test_default_preview_sampler_falls_back_to_init_kwargs(monkeypatch):
         {
             "components": components,
             "config": {"sampling": {}, "lora": {"targets": []}},
-            "preview_prompt_embeddings": {"p": 1},
+            "preview_prompt_paths": {"p": Path("p.safetensors")},
         },
         {"device": "cpu"},
     )
@@ -2008,7 +2219,7 @@ def test_default_preview_sampler_falls_back_to_init_kwargs(monkeypatch):
     assert sampler.kwargs["transformer"] == "xf"
     assert sampler.kwargs["scheduler"] == "sched"
     assert sampler.kwargs["vae"] == "vae"
-    assert sampler.kwargs["prompt_embeddings"] == {"p": 1}
+    assert sampler.kwargs["prompt_paths"] == {"p": Path("p.safetensors")}
     assert callable(sampler.kwargs["gpu_usage_probe"])
 
 
@@ -2057,20 +2268,19 @@ def test_cli_path_builds_default_sampler_before_releasing_text(monkeypatch, tmp_
 
     _install_fake_default_sampler(monkeypatch)
     order: list[str] = []
+    real_preview = loop_module.prepare_preview_prompt_cache
     real_lifecycle = loop_module.TrainingModelLifecycle
 
-    class TrackingLifecycle(real_lifecycle):
-        def prepare_preview_prompt_embeddings(self, prompts, *, max_sequence_length):
-            order.append("prepare")
-            assert self.text_resources_loaded
-            return super().prepare_preview_prompt_embeddings(
-                prompts, max_sequence_length=max_sequence_length
-            )
+    def tracking_preview(prompts, encoder, config, *, job_dir):
+        order.append("prepare")
+        return real_preview(prompts, encoder, config, job_dir=job_dir)
 
+    class TrackingLifecycle(real_lifecycle):
         def release_text_resources(self):
             order.append("release")
             return super().release_text_resources()
 
+    monkeypatch.setattr(loop_module, "prepare_preview_prompt_cache", tracking_preview)
     monkeypatch.setattr(loop_module, "TrainingModelLifecycle", TrackingLifecycle)
 
     events: list = []
@@ -2106,8 +2316,12 @@ def test_cli_path_builds_default_sampler_before_releasing_text(monkeypatch, tmp_
     sampler = FakeDefaultSampler.last
     assert sampler is not None
     assert sampler.used_factory is True
-    assert set(sampler.kwargs["prompt_embeddings"]) == {"one", "two"}
-    assert set(sampler.kwargs["negative_prompt_embeddings"]) == {"neg"}
+    assert set(sampler.kwargs["prompt_paths"]) == {"one", "two"}
+    assert set(sampler.kwargs["negative_prompt_paths"]) == {"neg"}
+    assert all(isinstance(path, Path) for path in sampler.kwargs["prompt_paths"].values())
+    assert all(
+        isinstance(path, Path) for path in sampler.kwargs["negative_prompt_paths"].values()
+    )
     assert sampler.kwargs["transformer"] is not None
     assert sampler.kwargs["scheduler"] is not None
     assert sampler.kwargs["vae"] is not None
@@ -2361,27 +2575,6 @@ def test_leftover_cuda_vae_fails_prepared_runtime():
         )
 
 
-def test_leftover_cuda_embed_tensor_fails_prepared_runtime():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
-    components = SimpleNamespace(
-        vae=SimpleNamespace(device=torch.device("cpu")),
-        text_encoder=None,
-        sampling_transformer=None,
-    )
-    with pytest.raises(
-        TrainingConfigError, match="preview_prompt_embeddings\\['prompt'\\] on CUDA"
-    ):
-        _validate_prepared_training_runtime(
-            **_cuda_prepared_runtime_kwargs(
-                components=components,
-                preview_prompt_embeddings={
-                    "prompt": torch.zeros(1, device="cuda"),
-                },
-            )
-        )
-
-
 def test_invalid_yaml_update_sets_last_error_and_consumes_command(tmp_path):
     root = make_job(tmp_path, max_steps=2)
     # Enqueue a structurally broken update payload via raw command file.
@@ -2442,9 +2635,7 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
     last_optimizer_device = {"value": None}
 
     real_reload = loop_module.TrainingModelLifecycle.reload_text_resources_on_cpu
-    real_prepare = (
-        loop_module.TrainingModelLifecycle.prepare_preview_prompt_embeddings
-    )
+    real_preview = loop_module.prepare_preview_prompt_cache
     real_release = loop_module.TrainingModelLifecycle.release_text_resources
     real_place = loop_module.TrainingModelLifecycle.place_cache_modules
     real_apply = loop_module._apply_hot_runtime
@@ -2474,21 +2665,20 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
             encoder.to(device)
         return None
 
-    def tracking_prepare(self, prompts, *, max_sequence_length):
+    def tracking_preview(prompts, encoder, config, *, job_dir):
+        if placed["device"] is None:
+            return real_preview(prompts, encoder, config, job_dir=job_dir)
         events.append("te_encode")
-        assert self.text_resources_loaded
-        encoder = self.components.text_encoder
         target = placed["device"]
-        assert target is not None
         assert placed["vae"] is False
         residency = getattr(
-            encoder, "residency", next(encoder.parameters()).device.type
+            encoder.text_encoder,
+            "residency",
+            next(encoder.text_encoder.parameters()).device.type,
         )
         assert residency == target.type
-        assert next(encoder.parameters()).device.type == "cpu"
-        return real_prepare(
-            self, prompts, max_sequence_length=max_sequence_length
-        )
+        assert next(encoder.text_encoder.parameters()).device.type == "cpu"
+        return real_preview(prompts, encoder, config, job_dir=job_dir)
 
     def tracking_release(self):
         result = real_release(self)
@@ -2508,7 +2698,7 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
         after_handoff["text_encoder"] = lifecycle.components.text_encoder
         after_handoff["text_resources_loaded"] = lifecycle.text_resources_loaded
         after_handoff["prompts"] = dict(
-            runtime.get("preview_prompt_embeddings") or {}
+            runtime.get("preview_prompt_paths") or {}
         )
         transformer = runtime["transformer"]
         after_handoff["main_residency"] = getattr(transformer, "residency", None)
@@ -2552,9 +2742,7 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
         tracking_place,
     )
     monkeypatch.setattr(
-        loop_module.TrainingModelLifecycle,
-        "prepare_preview_prompt_embeddings",
-        tracking_prepare,
+        loop_module, "prepare_preview_prompt_cache", tracking_preview
     )
     monkeypatch.setattr(
         loop_module.TrainingModelLifecycle,
@@ -2593,8 +2781,8 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
 
     class CapturingSampler:
         def __init__(self):
-            self.prompt_embeddings = {"old prompt": torch.zeros(1, 4)}
-            self.negative_prompt_embeddings = {}
+            self.prompt_paths = {"old prompt": Path("old")}
+            self.negative_prompt_paths = {}
             self.common_parameters = {}
 
         def sample_unfused(self, **kwargs):
@@ -2638,11 +2826,13 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
     assert after_handoff["text_encoder"] is None
     assert after_handoff["text_resources_loaded"] is False
     assert "brand new prompt" in after_handoff["prompts"]
-    assert "brand new prompt" in sampler.prompt_embeddings
+    assert "brand new prompt" in sampler.prompt_paths
     assert all(
-        tensor.device.type == "cpu"
-        for tensor in after_handoff["prompts"].values()
-        if isinstance(tensor, torch.Tensor)
+        isinstance(path, Path) for path in after_handoff["prompts"].values()
+    )
+    assert all(
+        not isinstance(value, torch.Tensor)
+        for value in after_handoff["prompts"].values()
     )
     vae = payload["loaders"].vae.created[0]
     assert all(torch.device(target).type != "cuda" for target in vae.moved_to)
@@ -2657,8 +2847,11 @@ def test_mid_run_prompt_refresh_serial_te_handoff(tmp_path, monkeypatch):
     ).step == 2
 
 
-def test_serial_refresh_passes_precision_and_converts_reloaded_encoder(monkeypatch):
+def test_serial_refresh_passes_precision_and_converts_reloaded_encoder(
+    monkeypatch, tmp_path
+):
     import zimage.training.loop as loop_module
+    from zimage.training.cache import CacheConfig, load_preview_cache
 
     converted = []
 
@@ -2696,9 +2889,19 @@ def test_serial_refresh_passes_precision_and_converts_reloaded_encoder(monkeypat
     )
     lifecycle = TrainingModelLifecycle(components)
     sampler = SimpleNamespace(
-        prompt_embeddings={},
-        negative_prompt_embeddings={},
+        prompt_paths={},
+        negative_prompt_paths={},
         common_parameters={},
+    )
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    cache_config = CacheConfig(
+        main_revision="fake-revision",
+        vae_config={"shift_factor": 0.0, "scaling_factor": 1.0},
+        text_encoder_config={"model_type": "qwen3"},
+        tokenizer_config={"padding_side": "left"},
+        qwen_chat_template=dict(loop_module.QWEN_CHAT_TEMPLATE),
+        max_sequence_length=4,
     )
     runtime = {
         "lifecycle": lifecycle,
@@ -2713,8 +2916,10 @@ def test_serial_refresh_passes_precision_and_converts_reloaded_encoder(monkeypat
         },
         "transformer": components.main_transformer,
         "device": "cpu",
-        "preview_prompt_embeddings": {},
-        "preview_negative_embeddings": {},
+        "job_dir": job_dir,
+        "cache_config": cache_config,
+        "preview_prompt_paths": {},
+        "preview_negative_paths": {},
     }
     injected = {
         "loaders": make_loaders([]),
@@ -2723,7 +2928,7 @@ def test_serial_refresh_passes_precision_and_converts_reloaded_encoder(monkeypat
         "preview_sampler": sampler,
     }
 
-    loop_module._refresh_preview_embeddings_serial(runtime, injected)
+    loop_module._refresh_preview_prompt_cache_serial(runtime, injected)
 
     assert captured["precision"] == "fp8"
     assert captured["quantize_capable"] is True
@@ -2731,17 +2936,26 @@ def test_serial_refresh_passes_precision_and_converts_reloaded_encoder(monkeypat
     first_id = converted[0][0]
     assert converted == [(first_id, None, "fp8")]
     assert first_id == id(captured["encoder"])
-    embedded = runtime["preview_prompt_embeddings"]["refresh me"]
+    cached_path = runtime["preview_prompt_paths"]["refresh me"]
+    embedded, _metadata = load_preview_cache(cached_path)
     assert torch.isfinite(embedded).all()
     assert lifecycle.text_resources_loaded is False
     assert lifecycle.components.text_encoder is None
-    assert "refresh me" in sampler.prompt_embeddings
+    assert "refresh me" in sampler.prompt_paths
+    assert sampler.prompt_paths["refresh me"] == cached_path
 
     captured.clear()
-    loop_module._refresh_preview_embeddings_serial(runtime, injected)
+    loop_module._refresh_preview_prompt_cache_serial(runtime, injected)
+    assert converted == [(first_id, None, "fp8")]
+    assert "precision" not in captured
+
+    runtime["config"]["sampling"]["prompt"] = "refresh me too"
+    runtime["config"]["sampling"]["samples"] = [{"prompt": "refresh me too"}]
+    loop_module._refresh_preview_prompt_cache_serial(runtime, injected)
     assert converted[1][0] != first_id
     assert converted[1][1] is None
     assert captured["quantize_capable"] is True
+    assert "refresh me too" in runtime["preview_prompt_paths"]
 
 
 def _sampling_block(*, prompt: str, negative: str = "", **sample_extra) -> dict:
@@ -2825,7 +3039,14 @@ def test_per_sample_prompt_updates_stores_without_rebuild(monkeypatch, tmp_path)
     assert rebuilds["n"] == 0
     sampler = FakeDefaultSampler.last
     assert sampler is not None
-    assert "new sample prompt" in sampler.prompt_embeddings
+    assert "new sample prompt" in sampler.prompt_paths
+    new_path = Path(sampler.prompt_paths["new sample prompt"])
+    preview_root = (root / ".cache" / "preview").resolve()
+    assert new_path.is_file()
+    assert new_path.resolve().parent == preview_root
+    files = sorted(preview_root.glob("*.safetensors"))
+    assert new_path.resolve() in [path.resolve() for path in files]
+    assert len(files) >= 2
     assert load_job_state(root).step == 2
     assert load_job_state(root).status is JobStatus.RUNNING
 
@@ -2865,8 +3086,16 @@ def test_per_sample_nonempty_negative_updates_stores_without_rebuild(
     assert rebuilds["n"] == 0
     sampler = FakeDefaultSampler.last
     assert sampler is not None
-    assert "keep prompt" in sampler.prompt_embeddings
-    assert "new sample negative" in sampler.negative_prompt_embeddings
+    assert "keep prompt" in sampler.prompt_paths
+    assert "new sample negative" in sampler.negative_prompt_paths
+    keep_path = Path(sampler.prompt_paths["keep prompt"])
+    neg_path = Path(sampler.negative_prompt_paths["new sample negative"])
+    preview_root = (root / ".cache" / "preview").resolve()
+    assert keep_path.is_file()
+    assert neg_path.is_file()
+    assert keep_path.resolve() != neg_path.resolve()
+    assert keep_path.resolve().parent == preview_root
+    assert neg_path.resolve().parent == preview_root
     assert load_job_state(root).step == 2
 
 
@@ -2879,7 +3108,7 @@ def test_sampling_size_seed_time_shift_and_empty_negative_do_not_load_te(
     te_loads = {"n": 0}
     refresh_calls = {"n": 0}
     real_reload = loop_module.TrainingModelLifecycle.reload_text_resources_on_cpu
-    real_refresh = loop_module._refresh_preview_embeddings_serial
+    real_refresh = loop_module._refresh_preview_prompt_cache_serial
 
     def counting_reload(self, *args, **kwargs):
         te_loads["n"] += 1
@@ -2895,7 +3124,7 @@ def test_sampling_size_seed_time_shift_and_empty_negative_do_not_load_te(
         counting_reload,
     )
     monkeypatch.setattr(
-        loop_module, "_refresh_preview_embeddings_serial", counting_refresh
+        loop_module, "_refresh_preview_prompt_cache_serial", counting_refresh
     )
 
     events: list = []
@@ -2923,6 +3152,88 @@ def test_sampling_size_seed_time_shift_and_empty_negative_do_not_load_te(
     assert refresh_calls["n"] == 0
     assert te_loads["n"] == 0
     assert load_job_state(root).step == 2
+
+
+def test_runtime_and_sampler_store_preview_paths_without_tensors(
+    tmp_path, monkeypatch
+):
+    import zimage.training.loop as loop_module
+
+    _install_fake_default_sampler(monkeypatch)
+    captured: dict[str, object] = {}
+    real_optimize = loop_module._optimize
+
+    def wrapping_optimize(job_dir, state, holder, injected):
+        runtime = holder["runtime"]
+        captured["prompt"] = dict(runtime["preview_prompt_paths"])
+        captured["negative"] = dict(runtime["preview_negative_paths"])
+        captured["has_embed_key"] = "preview_prompt_embeddings" in runtime
+        return real_optimize(job_dir, state, holder, injected)
+
+    monkeypatch.setattr(loop_module, "_optimize", wrapping_optimize)
+    root = make_job(
+        tmp_path,
+        max_steps=1,
+        sampling=_sampling_block(prompt="one", negative="neg"),
+    )
+    assert run_job(root, **default_sampler_injections()) == 0
+    prompt_paths = captured["prompt"]
+    negative_paths = captured["negative"]
+    assert "one" in prompt_paths
+    assert "neg" in negative_paths
+    assert captured["has_embed_key"] is False
+    assert all(isinstance(path, Path) for path in prompt_paths.values())
+    assert all(isinstance(path, Path) for path in negative_paths.values())
+    assert all(not isinstance(value, torch.Tensor) for value in prompt_paths.values())
+    preview_root = (root / ".cache" / "preview").resolve()
+    assert all(Path(path).resolve().parent == preview_root for path in prompt_paths.values())
+    sampler = FakeDefaultSampler.last
+    assert sampler is not None
+    assert set(sampler.prompt_paths) == {"one"}
+    assert set(sampler.negative_prompt_paths) == {"neg"}
+    assert all(
+        not isinstance(value, torch.Tensor) for value in sampler.prompt_paths.values()
+    )
+
+
+def test_positive_and_negative_share_one_preview_file(tmp_path):
+    root = make_job(
+        tmp_path,
+        sampling=_sampling_block(prompt="shared text", negative="shared text"),
+    )
+    assert cache_job(root, **injections()) == 0
+    files = sorted((root / ".cache" / "preview").rglob("*.safetensors"))
+    assert len(files) == 1
+
+
+def test_rebuild_reuses_compatible_preview_prompt_files(tmp_path, monkeypatch):
+    import zimage.training.loop as loop_module
+
+    _install_fake_default_sampler(monkeypatch)
+    root = make_job(
+        tmp_path,
+        max_steps=2,
+        sampling=_sampling_block(prompt="keep preview"),
+    )
+    assert cache_job(root, **injections()) == 0
+    preview_root = root / ".cache" / "preview"
+    before = {path: path.read_bytes() for path in preview_root.rglob("*.safetensors")}
+    assert before
+    encodes = {"n": 0}
+    real_preview = loop_module.prepare_preview_prompt_cache
+
+    def counting_preview(prompts, encoder, config, *, job_dir):
+        encodes["n"] += 1
+        return real_preview(prompts, encoder, config, job_dir=job_dir)
+
+    monkeypatch.setattr(loop_module, "prepare_preview_prompt_cache", counting_preview)
+    updated = load_job_config(root)
+    updated["gradient_checkpointing"] = True
+    enqueue_update(root, updated)
+    assert run_job(root, **default_sampler_injections()) == 0
+    assert encodes["n"] == 0
+    after = {path: path.read_bytes() for path in preview_root.rglob("*.safetensors")}
+    assert after == before
 
 
 def test_epochs_mode_rewinds_step_and_epoch_and_repeats_tail(monkeypatch, tmp_path):

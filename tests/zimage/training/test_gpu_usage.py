@@ -451,6 +451,20 @@ def test_collect_module_nbytes_counts_named_cuda_tensors(monkeypatch):
     assert nbytes["sampling_transformer"] == 0
 
 
+def test_collect_module_nbytes_path_only_preview_stores_are_zero():
+    ctx = GpuProbeContext(
+        preview_prompt_embeddings=None,
+        preview_sampler=SimpleNamespace(
+            prompt_paths={"p": Path("p.safetensors")},
+            negative_prompt_paths={"n": Path("n.safetensors")},
+            prompt_embeddings=None,
+            negative_prompt_embeddings=None,
+        ),
+    )
+    nbytes = collect_module_nbytes(ctx)
+    assert nbytes["preview_embed_maps"] == 0
+
+
 def test_collect_module_nbytes_dedupes_shared_storage(monkeypatch):
     base = torch.zeros(4, 4)
     view = base.view(2, 8)
@@ -852,6 +866,7 @@ def test_tiny_cuda_cache_place_encode_park():
             for embedding in previews.values():
                 assert embedding.device.type == "cpu"
                 assert embedding.dtype is torch.bfloat16
+            del latent, prompt, previews
         finally:
             lifecycle.park_cache_modules()
 

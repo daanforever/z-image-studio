@@ -16,6 +16,7 @@ import torch
 from PIL import Image
 
 from zimage.config import JPEG_QUALITY
+from zimage.training.cache import load_preview_cache
 from zimage.training.checkpoints import load_lora_state
 from zimage.training.contracts import SavedCheckpoint
 from zimage.training.gpu_usage import GpuProbeContext, PeakMemoryScope
@@ -48,8 +49,8 @@ class UnfusedPreviewSampler:
         scheduler: Any | None = None,
         vae: Any | None = None,
         pipeline: Any | None = None,
-        prompt_embeddings: Mapping[str, Any] | None = None,
-        negative_prompt_embeddings: Mapping[str, Any] | None = None,
+        prompt_paths: Mapping[str, Any] | None = None,
+        negative_prompt_paths: Mapping[str, Any] | None = None,
         common_parameters: Mapping[str, Any] | None = None,
         device: str | torch.device | None = None,
         adapter_name: str = "preview",
@@ -65,8 +66,8 @@ class UnfusedPreviewSampler:
         self.scheduler = scheduler
         self.vae = vae
         self.pipeline = pipeline
-        self.prompt_embeddings = dict(prompt_embeddings or {})
-        self.negative_prompt_embeddings = dict(negative_prompt_embeddings or {})
+        self.prompt_paths = dict(prompt_paths or {})
+        self.negative_prompt_paths = dict(negative_prompt_paths or {})
         self.common_parameters = dict(common_parameters or {})
         self.device = device
         self.adapter_name = adapter_name
@@ -90,8 +91,8 @@ class UnfusedPreviewSampler:
         transformer: Any,
         scheduler: Any | None = None,
         vae: Any | None = None,
-        prompt_embeddings: Mapping[str, Any] | None = None,
-        negative_prompt_embeddings: Mapping[str, Any] | None = None,
+        prompt_paths: Mapping[str, Any] | None = None,
+        negative_prompt_paths: Mapping[str, Any] | None = None,
         common_parameters: Mapping[str, Any] | None = None,
         device: str | torch.device | None = None,
         target_modules: list[str] | None = None,
@@ -105,15 +106,15 @@ class UnfusedPreviewSampler:
 
         A full ``ZImagePipeline`` is not required at construction. The loop
         owner can pass the independent sampling transformer, scheduler, VAE,
-        and pre-encoded embeddings produced before text resources are released.
+        and preview prompt cache paths produced before text resources are released.
         """
 
         return cls(
             transformer=transformer,
             scheduler=scheduler,
             vae=vae,
-            prompt_embeddings=prompt_embeddings,
-            negative_prompt_embeddings=negative_prompt_embeddings,
+            prompt_paths=prompt_paths,
+            negative_prompt_paths=negative_prompt_paths,
             common_parameters=common_parameters,
             device=device,
             target_modules=target_modules,
@@ -356,8 +357,8 @@ class UnfusedPreviewSampler:
                     },
                     transformer=self.main_transformer,
                     phase_peak_bytes=int(phase_peak_bytes),
-                    preview_prompt_embeddings=self.prompt_embeddings,
-                    preview_negative_embeddings=self.negative_prompt_embeddings,
+                    preview_prompt_embeddings=None,
+                    preview_negative_embeddings=None,
                     preview_sampler=self,
                 ),
             )
@@ -377,40 +378,61 @@ class UnfusedPreviewSampler:
 
         prompt = str(merged["prompt"])
         negative = str(merged["negative_prompt"])
-        prompt_embeds = _require_embedding(
-            self.prompt_embeddings,
-            prompt,
-            kind="prompt",
-        )
-        if negative == "":
-            negative_embeds = _empty_negative_embeds(prompt_embeds)
-        else:
-            negative_embeds = self.negative_prompt_embeddings.get(negative)
-            if negative_embeds is None and negative in self.prompt_embeddings:
-                negative_embeds = self.prompt_embeddings[negative]
-            if negative_embeds is None:
+        device = self._resolve_device()
+        generator = _make_generator(device, int(merged["seed"]))
+
+        prompt_cpu = None
+        negative_cpu = None
+        prompt_device = None
+        negative_device = None
+        request = None
+        result = None
+        try:
+            prompt_cpu = _require_embedding(
+                self.prompt_paths,
+                prompt,
+                kind="prompt",
+            )
+            if negative == "":
+                negative_cpu = _empty_negative_embeds(prompt_cpu)
+            elif negative in self.negative_prompt_paths:
+                negative_cpu = _require_embedding(
+                    self.negative_prompt_paths,
+                    negative,
+                    kind="negative_prompt",
+                )
+            elif negative in self.prompt_paths:
+                negative_cpu = _require_embedding(
+                    self.prompt_paths,
+                    negative,
+                    kind="negative_prompt",
+                )
+            else:
                 raise PreviewSamplingError(
                     f"missing negative_prompt embedding for {negative!r}"
                 )
 
-        device = self._resolve_device()
-        generator = _make_generator(device, int(merged["seed"]))
-
-        # Diffusers 0.40 ZImagePipeline.__call__ does not take time_shift; the
-        # shift lives on FlowMatchEulerDiscreteScheduler / calculate_shift.
-        request = {
-            "prompt": None,
-            "prompt_embeds": _as_embed_list(prompt_embeds, device),
-            "negative_prompt_embeds": _as_embed_list(negative_embeds, device),
-            "height": int(merged["height"]),
-            "width": int(merged["width"]),
-            "num_inference_steps": int(merged["num_inference_steps"]),
-            "guidance_scale": float(merged["guidance_scale"]),
-            "generator": generator,
-            "output_type": "pil",
-        }
-        result = _invoke_pipeline(pipeline, request)
-        return _coerce_image(result, int(merged["width"]), int(merged["height"]))
+            prompt_device = _as_embed_list(prompt_cpu, device)
+            negative_device = _as_embed_list(negative_cpu, device)
+            # Diffusers 0.40 ZImagePipeline.__call__ does not take time_shift; the
+            # shift lives on FlowMatchEulerDiscreteScheduler / calculate_shift.
+            request = {
+                "prompt": None,
+                "prompt_embeds": prompt_device,
+                "negative_prompt_embeds": negative_device,
+                "height": int(merged["height"]),
+                "width": int(merged["width"]),
+                "num_inference_steps": int(merged["num_inference_steps"]),
+                "guidance_scale": float(merged["guidance_scale"]),
+                "generator": generator,
+                "output_type": "pil",
+            }
+            result = _invoke_pipeline(pipeline, request)
+            return _coerce_image(
+                result, int(merged["width"]), int(merged["height"])
+            )
+        finally:
+            del prompt_cpu, negative_cpu, prompt_device, negative_device, request, result
 
     def _move_preview_components(self, device: torch.device) -> None:
         pipeline = self.pipeline
@@ -596,22 +618,31 @@ def _cast_adapter_to_bfloat16(transformer: Any, adapter_name: str) -> None:
 
 
 def _require_embedding(store: Mapping[str, Any], key: str, *, kind: str) -> Any:
-    if key in store:
-        return store[key]
-    raise PreviewSamplingError(
-        f"missing pre-encoded {kind} embedding for {key!r}; "
-        "the sampler does not reload a text encoder"
-    )
+    if key not in store:
+        raise PreviewSamplingError(
+            f"missing pre-encoded {kind} embedding for {key!r}; "
+            "the sampler does not reload a text encoder"
+        )
+    path = store[key]
+    try:
+        embedding, metadata = load_preview_cache(path)
+    except Exception as exc:
+        raise PreviewSamplingError(
+            f"corrupt {kind} cache for {key!r} at {path}: {exc}; "
+            "the sampler does not reload a text encoder"
+        ) from exc
+    del metadata
+    return embedding
 
 
 def _empty_negative_embeds(prompt_embeds: Any) -> Any:
     if isinstance(prompt_embeds, torch.Tensor):
-        return torch.zeros_like(prompt_embeds)
+        return torch.zeros_like(prompt_embeds, device="cpu")
     return prompt_embeds
 
 
 def _as_embed_list(embeds: Any, device: torch.device) -> list[Any]:
-    """Copy embeddings onto *device*; do not mutate the stored maps."""
+    """Copy embeddings onto *device*; do not write tensors back into path stores."""
 
     if isinstance(embeds, torch.Tensor):
         return [embeds.to(device=device)]

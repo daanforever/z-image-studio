@@ -591,68 +591,58 @@ def test_invalid_numeric_values_raise(path, value):
         validate_job_document(job)
 
 
-def test_gpu_usage_settings_defaults_when_absent():
+def test_debug_settings_defaults_when_absent():
     assert "training" not in load_document()
     settings = resolve_gpu_usage_settings({})
-    assert settings == GpuUsageSettings(every_step=False, detailed=False)
+    assert settings == GpuUsageSettings(detailed=False)
     assert "training" not in load_document()
 
 
-def test_gpu_usage_settings_root_only():
-    dump_document(
-        {"training": {"gpu_usage": {"every_step": True, "detailed": True}}}
-    )
-    assert resolve_gpu_usage_settings({}) == GpuUsageSettings(
-        every_step=True, detailed=True
-    )
+def test_debug_settings_root_only():
+    dump_document({"training": {"debug": {"detailed": True}}})
+    assert resolve_gpu_usage_settings({}) == GpuUsageSettings(detailed=True)
 
 
-def test_gpu_usage_settings_job_overrides_root():
-    dump_document(
-        {"training": {"gpu_usage": {"every_step": True, "detailed": True}}}
-    )
-    settings = resolve_gpu_usage_settings({"gpu_usage": {"every_step": False}})
-    assert settings == GpuUsageSettings(every_step=False, detailed=True)
+def test_debug_settings_job_overrides_root():
+    dump_document({"training": {"debug": {"detailed": True}}})
+    settings = resolve_gpu_usage_settings({"debug": {"detailed": False}})
+    assert settings == GpuUsageSettings(detailed=False)
 
 
-def test_gpu_usage_settings_job_partial_keeps_root_other_key():
-    dump_document({"training": {"gpu_usage": {"every_step": True}}})
-    settings = resolve_gpu_usage_settings({"gpu_usage": {"detailed": True}})
-    assert settings == GpuUsageSettings(every_step=True, detailed=True)
-
-
-def test_gpu_usage_settings_unknown_root_key_raises():
-    dump_document({"training": {"gpu_usage": {"verbose": True}}})
+def test_debug_settings_unknown_root_key_raises():
+    dump_document({"training": {"debug": {"verbose": True}}})
     with pytest.raises(TrainingConfigError, match="unknown"):
         resolve_gpu_usage_settings({})
 
 
-def test_gpu_usage_settings_unknown_job_key_raises():
+def test_debug_settings_unknown_job_key_raises():
     with pytest.raises(TrainingConfigError, match="unknown"):
         resolve_gpu_usage_settings(
-            {"gpu_usage": {"every_step": True, "extra": 1}}
+            {"debug": {"every_step": True}}
         )
 
 
-def test_gpu_usage_settings_ignore_env(monkeypatch):
-    monkeypatch.setenv("ZIMAGE_GPU_USAGE_EVERY_STEP", "1")
-    monkeypatch.setenv("ZIMAGE_GPU_USAGE_VERBOSE", "1")
-    monkeypatch.setenv("ZIMAGE_GPU_USAGE_DETAILED", "1")
+def test_debug_settings_ignore_env(monkeypatch):
+    monkeypatch.setenv("ZIMAGE_DEBUG_DETAILED", "1")
+    monkeypatch.setenv("ZIMAGE_DEBUG_VERBOSE", "1")
     assert resolve_gpu_usage_settings({}) == GpuUsageSettings()
 
 
-def test_validate_job_gpu_usage_optional_and_unknown():
+def test_validate_job_debug_optional_and_unknown():
     job = job_create_template()
     parsed = validate_job_document(job)
-    assert "gpu_usage" not in parsed
-    job["gpu_usage"] = {"every_step": True}
+    assert "debug" not in parsed
+    job["debug"] = {"detailed": True}
     parsed = validate_job_document(job)
-    assert parsed["gpu_usage"] == {"every_step": True}
-    job["gpu_usage"] = {"every_step": True, "verbose": False}
+    assert parsed["debug"] == {"detailed": True}
+    job["debug"] = {"every_step": True}
+    with pytest.raises(TrainingConfigError, match="unknown"):
+        validate_job_document(job)
+    job["debug"] = {"detailed": True, "verbose": False}
     with pytest.raises(TrainingConfigError, match="unknown"):
         validate_job_document(job)
 
 
-def test_training_bootstrap_payload_omits_gpu_usage():
+def test_training_bootstrap_payload_omits_debug():
     resolve_training_paths()
-    assert "gpu_usage" not in load_document()["training"]
+    assert "debug" not in load_document()["training"]

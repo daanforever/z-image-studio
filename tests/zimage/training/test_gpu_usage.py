@@ -630,7 +630,7 @@ def test_run_job_detailed_true_from_job_yaml(tmp_path, monkeypatch):
         return probe
 
     monkeypatch.setattr(loop_mod, "_default_gpu_usage_probe", spy)
-    root = make_job(tmp_path, max_steps=1, gpu_usage={"detailed": True})
+    root = make_job(tmp_path, max_steps=1, debug={"detailed": True})
     assert run_job(root, **injections()) == 0
     assert seen == [GpuUsageSettings(detailed=True)]
 
@@ -647,7 +647,7 @@ def test_run_job_detailed_true_from_root_config(tmp_path, monkeypatch):
             "training": {
                 "datasets_dir": "./datasets",
                 "jobs_dir": "./jobs",
-                "gpu_usage": {"detailed": True},
+                "debug": {"detailed": True},
             }
         }
     )
@@ -679,7 +679,7 @@ def test_run_job_injected_probe_wins_over_detailed_yaml(tmp_path, monkeypatch):
     def probe(phase, context=None):
         phases.append(phase)
 
-    root = make_job(tmp_path, max_steps=1, gpu_usage={"detailed": True})
+    root = make_job(tmp_path, max_steps=1, debug={"detailed": True})
     assert run_job(root, **injections(gpu_usage_probe=probe)) == 0
     assert phases == [
         "load",

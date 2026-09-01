@@ -43,7 +43,7 @@ tests/
 
 First use bootstraps the root `config.yaml` `training` section atomically (`datasets_dir`, `jobs_dir`) when that section is **absent**. If `training` already exists but is incomplete or invalid, resolve **errors** — defaults are not applied as a silent read-time fallback. That is the intended product decision; it overrides older plan language that implied a merge-on-read.
 
-GPU probe toggles (`every_step`, `detailed`) are YAML-only: root `training.gpu_usage` plus optional job `gpu_usage` (job keys override). Absent keys default to `false`. There is no env SSOT (`ZIMAGE_*`) and bootstrap does not write `gpu_usage`.
+Debug toggle (`detailed`) is YAML-only: root `training.debug` plus optional job `debug` (job keys override). Absent keys default to `false`. There is no env SSOT (`ZIMAGE_*`) and bootstrap does not write `debug`. `phase=step` is logged after every optimizer step. With `detailed: true`, each probe also logs named CUDA nbytes buckets and leftover tensor groups.
 
 ## Test tiers and truth claims
 
@@ -149,20 +149,19 @@ python tests/simulation.py
 
 That load path:
 
-1. Reads `tests/simulation/config.yaml` (`max_steps: 100`, `checkpoint_every: 100`; no live `gpu_usage` key).
+1. Reads `tests/simulation/config.yaml` (`max_steps: 100`, `checkpoint_every: 100`; no live `debug` key).
 2. Opens/creates the job under root `training.jobs_dir` (not a tempfile). Re-runs overwrite that job's `config.yaml`.
 3. Calls `JobController.run` — the same subprocess entry as `train.py run` (`job_log_session` + GPU lease).
 4. Keeps a warm dataset `.cache/` (no pre-run wipe).
 5. Prints an aggregate of **this run's** `{job_dir}/logs/job.log` gpu-usage lines: max `phase_peak` by phase, max `nvidia_used`, teardown `summary` line, path to `job.log`.
 
-Probe settings are YAML-only. There is no env SSOT (`ZIMAGE_*`) and no `--compare-log`. `run_job` merges root `training.gpu_usage` with job `gpu_usage` (job keys win). The simulation YAML documents the keys in comments; omitted keys stay `false`:
+Probe settings are YAML-only. There is no env SSOT (`ZIMAGE_*`) and no `--compare-log`. `run_job` merges root `training.debug` with job `debug` (job keys win). The simulation YAML documents the key in comments; omitted keys stay `false`. `phase=step` is logged after every optimizer step:
 
 | Key | Default | Effect |
 |---|---|---|
-| `every_step` | `false` | `step` probes at 1, 2, and checkpoint steps. `true`: every optimizer step. |
 | `detailed` | `false` | Compact one-line snapshots. `true`: nbytes buckets + leftover tensor groups. |
 
-Default `max_steps: 100` / `checkpoint_every: 100` therefore logs `step` at 1, 2, 100, a `preview_run` at 100, and a teardown `summary`. Warm cache omits `cache_encode_peak`.
+Default `max_steps: 100` / `checkpoint_every: 100` therefore logs `step` at every optimizer step (100 lines), a `preview_run` at 100, and a teardown `summary`. Warm cache omits `cache_encode_peak`.
 
 Cross-run comparison is manual: read two `{jobs_dir}/{job_id}/logs/job.log` files. The runner does not parse a reference log or compute a diff.
 

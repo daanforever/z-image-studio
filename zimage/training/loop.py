@@ -79,7 +79,6 @@ from zimage.training.modeling import (
 from zimage.training.quantization import quantized_precision
 from zimage.training.schema import (
     IMMUTABLE_JOB_FIELDS,
-    GpuUsageSettings,
     TrainingConfigError,
     UpdateClassification,
     classify_job_update,
@@ -612,9 +611,6 @@ def _build_runtime(
         injected=injected,
         components=components,
     )
-    settings = injected.get("gpu_usage_settings")
-    if not isinstance(settings, GpuUsageSettings):
-        settings = resolve_gpu_usage_settings(job)
     _probe_gpu_usage(
         injected,
         "train_placed",
@@ -643,7 +639,6 @@ def _build_runtime(
         "preview_sampler": preview_sampler,
         "preview_prompt_paths": preview_prompt_paths,
         "preview_negative_paths": preview_negative_paths,
-        "gpu_usage_settings": settings,
     }
 
 
@@ -709,13 +704,7 @@ def _optimize(
             if callable(getattr(transformer, "train", None)):
                 transformer.train()
 
-            settings = runtime.get("gpu_usage_settings")
-            if not isinstance(settings, GpuUsageSettings):
-                settings = GpuUsageSettings()
-            next_step = step + 1
-            probe_this_step = _should_probe_optimizer_step(next_step, config, settings)
-            step_scope: Any = PeakMemoryScope() if probe_this_step else nullcontext()
-            with step_scope as scope:
+            with PeakMemoryScope() as scope:
                 cache_path = cache_paths[sample_index]
                 try:
                     sample = load_cache(cache_path)
@@ -769,15 +758,14 @@ def _optimize(
                 sample_index = 0
                 epoch += 1
 
-            if probe_this_step:
-                _probe_gpu_usage(
-                    injected,
-                    "step",
-                    context=_gpu_probe_context_from_runtime(
-                        runtime,
-                        phase_peak_bytes=getattr(scope, "peak_bytes", None),
-                    ),
-                )
+            _probe_gpu_usage(
+                injected,
+                "step",
+                context=_gpu_probe_context_from_runtime(
+                    runtime,
+                    phase_peak_bytes=scope.peak_bytes,
+                ),
+            )
 
             persisted = _write_running_state(
                 job_dir, state.job_id, step, epoch, runtime["last_error"]
@@ -868,20 +856,6 @@ def _optimize(
 def _should_checkpoint(step: int, config: Mapping[str, Any]) -> bool:
     every = int(config["checkpoint_every"])
     return every > 0 and step > 0 and step % every == 0
-
-
-def _should_probe_optimizer_step(
-    step: int,
-    config: Mapping[str, Any],
-    settings: GpuUsageSettings,
-) -> bool:
-    if int(step) <= 0:
-        return False
-    if settings.every_step:
-        return True
-    if step in (1, 2):
-        return True
-    return _should_checkpoint(step, config)
 
 
 def _write_checkpoint_then_sample(

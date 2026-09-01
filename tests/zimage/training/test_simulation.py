@@ -50,9 +50,9 @@ def test_simulation_config_steps():
     raw = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
     assert raw["max_steps"] == 100
     assert raw["checkpoint_every"] == 100
-    assert "gpu_usage" not in raw
+    assert "debug" not in raw
     comment_text = SIM_CONFIG.read_text(encoding="utf-8")
-    assert "gpu_usage:" in comment_text
+    assert "debug:" in comment_text
 
 
 def test_parse_formatted_bytes(sim):

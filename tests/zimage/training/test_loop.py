@@ -2023,38 +2023,14 @@ def test_run_job_preview_probe_phases(tmp_path):
     ]
 
 
-def test_run_job_every_step_probes_each_optimizer_step(tmp_path):
+def test_run_job_probes_each_optimizer_step(tmp_path):
     phases: list[str] = []
-    root = make_job(
-        tmp_path, max_steps=3, gpu_usage={"every_step": True}
-    )
+    root = make_job(tmp_path, max_steps=3)
     assert (
         run_job(root, **injections(gpu_usage_probe=_recording_gpu_probe(phases)))
         == 0
     )
     assert phases.count("step") == 3
-
-
-def test_run_job_default_step_probes_first_two_and_checkpoint(tmp_path):
-    phases: list[str] = []
-    root = make_job(tmp_path, max_steps=100, checkpoint_every=100)
-    assert (
-        run_job(
-            root,
-            **injections(
-                gpu_usage_probe=_recording_gpu_probe(phases),
-                checkpoint_writer=RecordingWriter([]),
-                preview_sampler=RecordingSampler([]),
-            ),
-        )
-        == 0
-    )
-    assert phases.count("step") == 3
-    assert phases.count("preview_end") == 1
-    assert phases[-2:] == ["teardown", "summary"]
-    step_indexes = [index for index, phase in enumerate(phases) if phase == "step"]
-    preview_index = phases.index("preview_end")
-    assert preview_index > step_indexes[-1]
 
 
 def test_write_checkpoint_probe_preview_pause_end_restore(tmp_path):

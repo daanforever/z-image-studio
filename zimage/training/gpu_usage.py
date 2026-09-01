@@ -5,10 +5,10 @@ nvidia-smi for board-level used/total memory; failures become zeros.
 Snapshot and log helpers never raise into the job. The default probe
 does not run a garbage-collection pass before sampling.
 
-GPU probe toggles live in root ``config.yaml`` (``training.gpu_usage``)
-and job ``config.yaml`` (``gpu_usage``); job keys override root. There
+GPU probe toggles live in root ``config.yaml`` (``training.debug``)
+and job ``config.yaml`` (``debug``); job keys override root. There
 are no environment variables or a parallel config source. See
-``resolve_gpu_usage_settings``. When ``gpu_usage.detailed`` is true,
+``resolve_gpu_usage_settings``. When ``debug.detailed`` is true,
 ``DetailedGpuUsageProbe`` adds per-module CUDA nbytes and leftover
 tensor groups; otherwise the compact line is the only log output.
 """

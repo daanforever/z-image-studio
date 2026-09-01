@@ -138,14 +138,13 @@ Training paths live only under the root `training` section (not under `ui`):
 training:
   datasets_dir: ./datasets
   jobs_dir: ./jobs
-  # optional; omitted keys default to false. Job YAML `gpu_usage` overrides these.
+  # optional; omitted keys default to false. Job YAML `debug` overrides these.
   # YAML-only — no ZIMAGE_* / env SSOT.
-  gpu_usage:
-    every_step: false  # step probes at 1, 2, checkpoint steps; true = every step
-    detailed: false    # compact log line; true = nbytes buckets + leftover groups
+  debug:
+    detailed: false  # compact log line; true = nbytes buckets + leftover groups
 ```
 
-The first training call (CLI or Training tab) writes `datasets_dir` / `jobs_dir` atomically if the `training` section is missing — it does not write `gpu_usage`. If `training` is present but `datasets_dir` / `jobs_dir` are missing, empty, or not strings, training fails — those defaults are not applied as a silent read-time fallback. GPU probe toggles are YAML-only (root `training.gpu_usage`, job `gpu_usage`); there are no environment variables for them. Compact `gpu usage ...` lines go to `logs/job.log`. Compare runs by reading those logs — there is no log-diff tool.
+The first training call (CLI or Training tab) writes `datasets_dir` / `jobs_dir` atomically if the `training` section is missing — it does not write `debug`. If `training` is present but `datasets_dir` / `jobs_dir` are missing, empty, or not strings, training fails — those defaults are not applied as a silent read-time fallback. Debug toggles are YAML-only (root `training.debug`, job `debug`); there are no environment variables for them. Compact `gpu usage ...` lines go to `logs/job.log` (`phase=step` after every optimizer step). With `debug.detailed: true`, each probe also logs named CUDA nbytes buckets and leftover tensor groups. Compare runs by reading those logs — there is no log-diff tool.
 
 `datasets/` and `jobs/` are gitignored (`.gitkeep` only).
 
@@ -155,7 +154,7 @@ Create/Open writes a full default job. `job_id` is a lowercase ASCII slug of the
 
 `model.main_transformer` must be Base (`Tongyi-MAI/Z-Image`). Turbo is rejected as `model.main_transformer` and is only valid as optional `model.sampling_transformer`. Top-level `main_transformer` and `sampling_transformer` keys are no longer valid; they must be nested under `model`. `datasets[].name` is a folder under `datasets_dir` or an absolute path. `precision` is `fp8` or `bf16`. When both `epochs` and `max_steps` are set, **`max_steps` wins**. Diffusers keys (`guidance_scale`, `num_inference_steps`, `time_shift`, `width`, `height`, `seed`, `prompt`, `negative_prompt`) live on `sampling`; each `samples[]` map overlays those keys. Existing jobs with the old nested sampling YAML fail Validate/Start (unknown keys) and must be edited by hand.
 
-There is no `init_adapter` field. Optional job `gpu_usage` (`every_step`, `detailed`) overrides root `training.gpu_usage`; omitted keys stay `false`.
+There is no `init_adapter` field. Optional job `debug` (`detailed`) overrides root `training.debug`; omitted keys stay `false`. `phase=step` is logged after every optimizer step.
 
 ```yaml
 job_name: "my style"

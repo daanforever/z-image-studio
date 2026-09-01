@@ -128,17 +128,23 @@ def test_idle_save_replaces_legacy_top_level_transformer_keys(tmp_path):
     assert load_job_config(root)["model"]["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
 
 
-def test_idle_save_legacy_current_still_rejects_immutable_path_change(tmp_path):
+def test_idle_save_legacy_current_persists_transformer_path_changes(tmp_path):
     root = create_or_open_job("job", tmp_path)
     _flatten_transformers_to_top_level(root / "config.yaml")
     nested = job_create_template()
     nested["job_name"] = "job"
     nested["model"]["main_transformer"]["path"] = "org/other-main"
+    nested["model"]["sampling_transformer"]["path"] = "org/other-turbo"
 
-    with pytest.raises(TrainingConfigError, match="immutable"):
-        save_job_config(root, nested)
+    saved = save_job_config(root, nested)
+
     persisted = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
-    assert persisted["main_transformer"]["path"] == KNOWN_MAIN_SOURCE
+    assert "main_transformer" not in persisted
+    assert "sampling_transformer" not in persisted
+    assert saved["model"]["main_transformer"]["path"] == "org/other-main"
+    assert saved["model"]["sampling_transformer"]["path"] == "org/other-turbo"
+    assert load_job_config(root)["model"]["main_transformer"]["path"] == "org/other-main"
+    assert load_job_config(root)["model"]["sampling_transformer"]["path"] == "org/other-turbo"
 
 
 def test_idle_save_replaces_unreadable_current_config(tmp_path):
@@ -344,7 +350,7 @@ def test_two_controller_runs_append_two_session_banners(tmp_path):
     assert {path.name for path in root.iterdir()} == set(JOB_ROOT_ENTRIES)
 
 
-def test_idle_save_rejects_immutable_lora_after_checkpoint(tmp_path):
+def test_idle_save_persists_lora_after_checkpoint(tmp_path):
     import torch
 
     from zimage.training.checkpoints import NativeLoraCheckpointWriter
@@ -376,9 +382,9 @@ def test_idle_save_rejects_immutable_lora_after_checkpoint(tmp_path):
     )
     mutated = load_job_config(root)
     mutated["lora"]["alpha"] = float(mutated["lora"]["alpha"]) + 1.0
-    with pytest.raises(TrainingConfigError, match="immutable|lora.alpha"):
-        save_job_config(root, mutated)
-    assert load_job_config(root)["lora"]["alpha"] == config["lora"]["alpha"]
+    saved = save_job_config(root, mutated)
+    assert saved["lora"]["alpha"] == mutated["lora"]["alpha"]
+    assert load_job_config(root)["lora"]["alpha"] == mutated["lora"]["alpha"]
 
     lr_ok = load_job_config(root)
     lr_ok["optimizer"]["learning_rate"] = 5.0e-5

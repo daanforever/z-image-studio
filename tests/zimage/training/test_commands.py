@@ -259,22 +259,19 @@ def test_invalid_idle_save_preserves_pending_commands(tmp_path):
     assert (root / "config.yaml").read_bytes() == yaml_before
 
 
-def test_immutable_idle_save_preserves_pending_commands(tmp_path):
+def test_idle_save_lora_update_discards_pending_commands(tmp_path):
     root = create_or_open_job("job", tmp_path)
     pending = load_job_config(root)
     pending["seed"] = 11
     enqueue_update(root, pending)
-    yaml_before = (root / "config.yaml").read_bytes()
 
     mutated = load_job_config(root)
     mutated["lora"]["alpha"] = float(mutated["lora"]["alpha"]) + 1.0
-    with pytest.raises(TrainingConfigError, match="immutable|lora.alpha"):
-        save_idle_update(root, mutated)
+    saved = save_idle_update(root, mutated)
 
-    assert [path.name for path in (root / "commands").glob("*.json")] == [
-        "00000000000000000001.json"
-    ]
-    assert (root / "config.yaml").read_bytes() == yaml_before
+    assert saved["lora"]["alpha"] == mutated["lora"]["alpha"]
+    assert load_job_config(root)["lora"]["alpha"] == mutated["lora"]["alpha"]
+    assert list((root / "commands").glob("*.json")) == []
 
 
 def test_sequential_consume_still_applies_multiple_updates_in_order(tmp_path):

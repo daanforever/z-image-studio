@@ -30,16 +30,8 @@ WEIGHTING_SCHEME_CHOICES = frozenset(
 OPTIMIZER_NAME_CHOICES = frozenset({"adamw"})
 SCHEDULER_NAME_CHOICES = frozenset({"constant"})
 
-# Dotted paths that must not change after a job's first cache / adapter write.
-IMMUTABLE_JOB_FIELDS: frozenset[str] = frozenset(
-    {
-        "model.main_transformer.path",
-        "model.main_transformer.revision",
-        "lora.rank",
-        "lora.alpha",
-        "lora.targets",
-    }
-)
+# No job YAML fields are locked; cache identity lives in IMMUTABLE_CACHE_FIELDS.
+IMMUTABLE_JOB_FIELDS: frozenset[str] = frozenset()
 
 # Cache tensor schema (versioned). Latent is BF16 [16, H/8, W/8].
 # Prompt embedding is BF16 [valid_tokens, 2560] with no padding.
@@ -67,10 +59,11 @@ IMMUTABLE_MVP_FIELDS: frozenset[str] = (
 REBUILD_REQUIRED_JOB_FIELDS: frozenset[str] = frozenset(
     {
         "datasets",
+        "model.main_transformer",
         "model.sampling_transformer",
         "precision",
         "gradient_checkpointing",
-        "lora.dropout",
+        "lora",
         "max_sequence_length",
     }
 )

@@ -175,7 +175,7 @@ def save_job_config(
     """Validate and atomically replace an idle job's canonical YAML.
 
     When a complete checkpoint exists (or always vs the current on-disk job),
-    reject immutable LoRA / base-model field changes via ``classify_job_update``.
+    reject immutable job-field changes via ``classify_job_update``.
     """
 
     root = Path(job_dir)

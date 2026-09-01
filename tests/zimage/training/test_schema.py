@@ -135,15 +135,7 @@ def test_max_steps_wins_over_epochs():
 
 
 def test_immutable_field_list():
-    assert IMMUTABLE_JOB_FIELDS == frozenset(
-        {
-            "model.main_transformer.path",
-            "model.main_transformer.revision",
-            "lora.rank",
-            "lora.alpha",
-            "lora.targets",
-        }
-    )
+    assert IMMUTABLE_JOB_FIELDS == frozenset()
     assert IMMUTABLE_CACHE_FIELDS == frozenset(
         {
             "cache.tensor_schema",
@@ -151,9 +143,9 @@ def test_immutable_field_list():
         }
     )
     assert IMMUTABLE_MVP_FIELDS == IMMUTABLE_JOB_FIELDS | IMMUTABLE_CACHE_FIELDS
-    assert is_immutable_job_field("lora.rank")
+    assert not is_immutable_job_field("lora.rank")
     assert not is_immutable_job_field("optimizer.learning_rate")
-    assert is_immutable_mvp_field("model.main_transformer.revision")
+    assert not is_immutable_mvp_field("lora.rank")
     assert is_immutable_mvp_field("cache.tensor_schema")
     assert is_immutable_mvp_field("cache.schema_version")
     assert not is_immutable_mvp_field("optimizer.learning_rate")
@@ -479,17 +471,19 @@ def test_job_update_classification():
     assert classification is UpdateClassification.APPLY_AT_STEP
     assert changed == ("scheduler.warmup_steps",)
 
-    immutable = job_create_template()
-    immutable["lora"]["rank"] = 8
-    classification, changed = classify_job_update(current, immutable)
-    assert classification is UpdateClassification.REJECTED_IMMUTABLE
+    rebuild_lora = job_create_template()
+    rebuild_lora["lora"]["rank"] = 8
+    classification, changed = classify_job_update(current, rebuild_lora)
+    assert classification is UpdateClassification.REBUILD_REQUIRED
     assert changed == ("lora.rank",)
+    assert "lora" in REBUILD_REQUIRED_JOB_FIELDS
 
-    immutable_path = job_create_template()
-    immutable_path["model"]["main_transformer"]["path"] = "org/other-main"
-    classification, changed = classify_job_update(current, immutable_path)
-    assert classification is UpdateClassification.REJECTED_IMMUTABLE
+    rebuild_main = job_create_template()
+    rebuild_main["model"]["main_transformer"]["path"] = "org/other-main"
+    classification, changed = classify_job_update(current, rebuild_main)
+    assert classification is UpdateClassification.REBUILD_REQUIRED
     assert changed == ("model.main_transformer.path",)
+    assert "model.main_transformer" in REBUILD_REQUIRED_JOB_FIELDS
 
     rebuild_sampling = job_create_template()
     rebuild_sampling["model"]["sampling_transformer"]["path"] = "org/other-turbo"

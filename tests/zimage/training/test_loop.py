@@ -949,28 +949,18 @@ def test_lora_state_has_no_name_matching_fallback():
 
 def test_immutable_main_and_lora_topology_are_rejected(tmp_path):
     root = make_job(tmp_path, max_steps=2)
-    original = load_job_config(root)
     updated = load_job_config(root)
     updated["lora"]["rank"] = 8
-    updated["model"]["main_transformer"]["path"] = "org/other-main"
     enqueue_update(root, updated)
 
     assert run_job(root, **injections()) == 0
 
     persisted = load_job_config(root)
-    assert persisted["lora"]["rank"] == original["lora"]["rank"]
-    assert (
-        persisted["model"]["main_transformer"]["path"]
-        == original["model"]["main_transformer"]["path"]
-    )
+    assert persisted["lora"]["rank"] == 8
     state = load_job_state(root)
     assert state.status is JobStatus.RUNNING
     assert state.step == 2
-    assert state.last_error is not None
-    assert (
-        "lora.rank" in state.last_error
-        or "model.main_transformer.path" in state.last_error
-    )
+    assert state.last_error is None or "rejected immutable" not in state.last_error
     assert not list((root / "commands").glob("*.json"))
 
 

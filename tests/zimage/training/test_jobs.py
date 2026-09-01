@@ -82,6 +82,92 @@ def test_create_opens_existing_job_without_overwriting_any_file(tmp_path):
     assert state.read_text(encoding="utf-8") == "sentinel state"
 
 
+def test_load_job_config_fills_missing_schema_defaults(tmp_path):
+    root = create_or_open_job("job", tmp_path)
+    path = root / "config.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    del document["sampling"]["image_format"]
+    del document["lora"]["dropout"]
+    del document["model"]["main_transformer"]["revision"]
+    path.write_text(
+        yaml.safe_dump(document, default_flow_style=False, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    loaded = load_job_config(root)
+    persisted = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert loaded["sampling"]["image_format"] == "jpeg"
+    assert loaded["lora"]["dropout"] == 0.0
+    assert loaded["model"]["main_transformer"]["revision"] is None
+    assert persisted["sampling"]["image_format"] == "jpeg"
+    assert persisted["lora"]["dropout"] == 0.0
+    assert persisted["model"]["main_transformer"]["revision"] is None
+    assert persisted["seed"] == document["seed"]
+
+
+def test_load_job_config_leaves_complete_file_bytes_unchanged(tmp_path):
+    root = create_or_open_job("job", tmp_path)
+    path = root / "config.yaml"
+    text = path.read_text(encoding="utf-8")
+    # Comments survive only when the mapping already matches validated output.
+    with_comment = "# keep me\n" + text
+    path.write_text(with_comment, encoding="utf-8")
+    before = path.read_bytes()
+
+    load_job_config(root)
+
+    assert path.read_bytes() == before
+
+
+def test_load_job_config_preserves_raw_job_name_spaces(tmp_path):
+    root = create_or_open_job("  Мой Стиль  ", tmp_path / "jobs")
+    path = root / "config.yaml"
+    before_name = yaml.safe_load(path.read_text(encoding="utf-8"))["job_name"]
+
+    loaded = load_job_config(root)
+    after = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert before_name == "  Мой Стиль  "
+    assert after["job_name"] == "  Мой Стиль  "
+    assert loaded["job_name"] == "Мой Стиль"
+
+
+def test_load_job_config_does_not_invent_optional_omits(tmp_path):
+    root = create_or_open_job("job", tmp_path)
+    path = root / "config.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    del document["model"]["sampling_transformer"]
+    document["sampling"]["samples"] = [{"prompt": "x"}]
+    assert "debug" not in document
+    path.write_text(
+        yaml.safe_dump(document, default_flow_style=False, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    loaded = load_job_config(root)
+    persisted = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert "debug" not in loaded
+    assert "sampling_transformer" not in loaded["model"]
+    assert loaded["sampling"]["samples"] == [{"prompt": "x"}]
+    assert "debug" not in persisted
+    assert "sampling_transformer" not in persisted["model"]
+    assert persisted["sampling"]["samples"] == [{"prompt": "x"}]
+
+
+def test_load_job_config_invalid_yaml_does_not_write(tmp_path):
+    root = create_or_open_job("job", tmp_path)
+    path = root / "config.yaml"
+    path.write_text("{broken", encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(TrainingConfigError):
+        load_job_config(root)
+
+    assert path.read_bytes() == before
+
+
 def test_idle_save_validates_before_atomic_replacement(tmp_path):
     root = create_or_open_job("job", tmp_path)
     original = (root / "config.yaml").read_text(encoding="utf-8")

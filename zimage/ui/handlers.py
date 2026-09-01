@@ -57,6 +57,7 @@ from zimage.training.jobs import (
     clear_job_previews,
     reset_job_progress,
     create_or_open_job,
+    load_job_config,
     load_job_state,
     resolve_job_path,
 )
@@ -544,7 +545,7 @@ def list_training_jobs() -> list[str]:
 
 
 def create_or_open_training_job(name: str) -> dict[str, Any]:
-    """Create a job or open the existing slug without rewriting files."""
+    """Create a job or open the existing slug; view may fill missing schema defaults."""
     job_dir = create_or_open_job(name, _jobs_dir())
     return _job_view(job_dir)
 
@@ -786,6 +787,11 @@ def _require_job_dir(job_id: str) -> Path:
 
 
 def _job_view(job_dir: Path, *, message: str = "") -> dict[str, Any]:
+    """Return job editor payload. May fill missing schema defaults via load."""
+    try:
+        load_job_config(job_dir)
+    except TrainingConfigError:
+        pass
     payload = {
         "job_id": job_dir.name,
         "config_text": (job_dir / CONFIG_FILE).read_text(encoding="utf-8"),

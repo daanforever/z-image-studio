@@ -257,7 +257,7 @@ def handle_load_job(
     *,
     callbacks: TrainingCallbacks,
 ) -> JobPanelData:
-    """Load an existing job into the editor without rewriting files."""
+    """Load an existing job into the editor (handler may fill schema defaults)."""
     resolved = _job_id_text(job_id)
     if not resolved:
         return JobPanelData(

@@ -1103,6 +1103,49 @@ def test_create_or_open_training_job_does_not_rewrite(tmp_path: Path, monkeypatc
     assert payload["state"]["status"] == "stopped"
 
 
+def test_load_training_job_fills_missing_schema_defaults(tmp_path: Path, monkeypatch):
+    import yaml
+
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    path = root / "config.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    del document["sampling"]["image_format"]
+    del document["lora"]["dropout"]
+    path.write_text(
+        yaml.safe_dump(document, default_flow_style=False, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+
+    payload = handlers.load_training_job("job")
+    persisted = yaml.safe_load(payload["config_text"])
+    on_disk = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert persisted["sampling"]["image_format"] == "jpeg"
+    assert persisted["lora"]["dropout"] == 0.0
+    assert on_disk["sampling"]["image_format"] == "jpeg"
+    assert on_disk["lora"]["dropout"] == 0.0
+
+
+def test_load_training_job_invalid_yaml_returns_raw_text(tmp_path: Path, monkeypatch):
+    from zimage.training.jobs import create_or_open_job
+
+    jobs = tmp_path / "jobs"
+    root = create_or_open_job("job", jobs)
+    path = root / "config.yaml"
+    path.write_text("{broken", encoding="utf-8")
+    before = path.read_bytes()
+    monkeypatch.setattr(handlers, "_jobs_dir", lambda: jobs)
+
+    payload = handlers.load_training_job("job")
+
+    assert payload["config_text"] == "{broken"
+    assert path.read_bytes() == before
+
+
 def test_save_and_queue_training_yaml(tmp_path: Path, monkeypatch):
     from zimage.training.commands import consume_commands
     from zimage.training.contracts import JobState, JobStatus

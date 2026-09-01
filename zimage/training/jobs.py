@@ -166,7 +166,23 @@ def create_job(base_name: str, jobs_dir: str | Path) -> Path:
 
 
 def load_job_config(job_dir: str | Path) -> dict[str, Any]:
-    return load_job_document(Path(job_dir) / CONFIG_FILE)
+    """Load and validate job YAML; persist schema defaults when they differ on disk.
+
+    Returns the validated document (``job_name`` stripped). On-disk ``job_name``
+    keeps the raw file value, matching create. Complete files are left untouched.
+    """
+    path = Path(job_dir) / CONFIG_FILE
+    validated = load_job_document(path)
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return validated
+    if not isinstance(raw, dict):
+        return validated
+    persisted = {**validated, "job_name": raw["job_name"]}
+    if raw != persisted:
+        _atomic_write_yaml(path, persisted)
+    return validated
 
 
 def save_job_config(

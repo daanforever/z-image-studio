@@ -150,7 +150,7 @@ The first training call (CLI or Training tab) writes `datasets_dir` / `jobs_dir`
 
 ### Job YAML
 
-Create/Open writes a full default job. `job_id` is a lowercase ASCII slug of the name you type; the original string is stored as `job_name`. Opening an existing slug does not overwrite `config.yaml` or `state.json`.
+Create/Open writes a full default job. `job_id` is a lowercase ASCII slug of the name you type; the original string is stored as `job_name`. Opening an existing slug via Create does not overwrite `config.yaml` or `state.json`. Load and save may add missing schema-default keys to `config.yaml` (complete files are left alone; optional omitted `debug` and `model.sampling_transformer` are not invented). Invalid YAML is not rewritten. `train.py validate` may rewrite via the same load path.
 
 `model.main_transformer` must be Base (`Tongyi-MAI/Z-Image`). Turbo is rejected as `model.main_transformer` and is only valid as optional `model.sampling_transformer`. Top-level `main_transformer` and `sampling_transformer` keys are no longer valid; they must be nested under `model`. `datasets[].name` is a folder under `datasets_dir` or an absolute path. `precision` is `fp8` or `bf16`. When both `epochs` and `max_steps` are set, **`max_steps` wins**. Diffusers keys (`guidance_scale`, `num_inference_steps`, `time_shift`, `width`, `height`, `seed`, `prompt`, `negative_prompt`) live on `sampling`; each `samples[]` map overlays those keys. Existing jobs with the old nested sampling YAML fail Validate/Start (unknown keys) and must be edited by hand.
 

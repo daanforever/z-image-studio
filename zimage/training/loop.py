@@ -47,7 +47,14 @@ from zimage.training.dataset import (
     discover_samples,
     validate_mvp_batch_settings,
 )
-from zimage.training.gpu_usage import GpuUsageProbe
+from zimage.training.gpu_usage import (
+    GpuProbeContext,
+    GpuUsageProbe,
+    PeakMemoryScope,
+    _default_gpu_usage_probe,
+    format_bytes,
+    snapshot_gpu_usage,
+)
 from zimage.training.jobs import (
     load_job_config,
     load_job_state,
@@ -65,10 +72,12 @@ from zimage.training.modeling import (
 )
 from zimage.training.schema import (
     IMMUTABLE_JOB_FIELDS,
+    GpuUsageSettings,
     TrainingConfigError,
     UpdateClassification,
     classify_job_update,
     merge_sample_parameters,
+    resolve_gpu_usage_settings,
     resolve_stop_condition,
     resolve_training_paths,
     sampling_base_parameters,
@@ -82,6 +91,10 @@ QWEN_CHAT_TEMPLATE = {
 
 log = logging.getLogger("zimage.training")
 _DEFAULT_GPU_USAGE_PROBE = GpuUsageProbe()
+_GPU_USAGE_JOB_PEAKS = {"step": 0, "preview": 0, "nvidia": 0}
+_PREVIEW_PROBE_PHASES = frozenset(
+    {"preview_pause", "preview_end", "preview_run", "restore"}
+)
 
 
 @dataclass
@@ -105,6 +118,7 @@ def cache_job(job_dir: Path, **injected: Any) -> int:
 
     job_dir = Path(job_dir)
     job = load_job_config(job_dir)
+    injected = _bind_gpu_usage_probe(job, injected)
     log.info("cache start")
     _validate_batch_settings(injected)
     samples = _discover(job, injected)
@@ -117,7 +131,9 @@ def cache_job(job_dir: Path, **injected: Any) -> int:
     finally:
         if placed[0]:
             lifecycle.park_cache_modules()
-            _probe_gpu_usage(injected, "cache_end", components)
+            _probe_gpu_usage(
+                injected, "cache_end", context=GpuProbeContext(components=components)
+            )
         lifecycle.release_text_resources()
     return 0
 
@@ -127,6 +143,8 @@ def run_job(job_dir: Path, **injected: Any) -> int:
 
     job_dir = Path(job_dir)
     job = load_job_config(job_dir)
+    injected = _bind_gpu_usage_probe(job, injected)
+    _reset_gpu_usage_job_peaks()
     _validate_batch_settings(injected)
     device = _resolve_training_device(injected)
     samples = _discover(job, injected)
@@ -152,7 +170,10 @@ def run_job(job_dir: Path, **injected: Any) -> int:
     finally:
         runtime = holder["runtime"]
         _teardown_runtime(runtime)
-        _probe_gpu_usage(injected, "teardown", runtime.get("components"))
+        _probe_gpu_usage(
+            injected, "teardown", context=_gpu_probe_context_from_runtime(runtime)
+        )
+        _probe_gpu_usage_summary(injected, runtime)
 
 
 def get_scheduler_sigmas(
@@ -326,7 +347,11 @@ def _place_cache_modules(
 ) -> None:
     placed[0] = True
     lifecycle.place_cache_modules(target, vae=vae)
-    _probe_gpu_usage(injected, "cache_place", components)
+    _probe_gpu_usage(
+        injected,
+        "cache_place",
+        context=GpuProbeContext(components=components),
+    )
 
 
 def _prepare_cache(
@@ -344,8 +369,11 @@ def _prepare_cache(
         cache_config = cache_config_from_components(job, components)
     prepare = injected.get("prepare_cache", prepare_cache_at_job_start)
     flag = placed if placed is not None else [False]
+    encode_scope = PeakMemoryScope()
+    encode_scope_entered = False
 
     def on_before_encode() -> None:
+        nonlocal encode_scope_entered
         target = (
             torch.device(device)
             if device is not None
@@ -354,6 +382,22 @@ def _prepare_cache(
         _place_cache_modules(
             flag, lifecycle, target, injected, components, vae=True
         )
+        encode_scope.__enter__()
+        encode_scope_entered = True
+
+    def on_after_first_encode() -> None:
+        nonlocal encode_scope_entered
+        if encode_scope_entered:
+            encode_scope.__exit__(None, None, None)
+            encode_scope_entered = False
+        _probe_gpu_usage(
+            injected,
+            "cache_encode_peak",
+            context=GpuProbeContext(
+                components=components,
+                phase_peak_bytes=encode_scope.peak_bytes,
+            ),
+        )
 
     log.info("cache prepare samples=%s", len(samples))
     return prepare(
@@ -361,6 +405,7 @@ def _prepare_cache(
         lifecycle.cache_encoder(),
         cache_config,
         on_before_encode=on_before_encode,
+        on_after_first_encode=on_after_first_encode,
     )
 
 
@@ -403,6 +448,7 @@ def _build_runtime(
 ) -> dict[str, Any]:
     """Assemble cache and training objects. Device residency: see TrainingModelLifecycle."""
 
+    injected = _bind_gpu_usage_probe(job, injected)
     training_device = (
         torch.device(device)
         if device is not None
@@ -412,6 +458,9 @@ def _build_runtime(
     if not samples:
         raise DatasetError("job has no training samples")
     components, lifecycle = _load_lifecycle(job, injected)
+    _probe_gpu_usage(
+        injected, "load", context=GpuProbeContext(components=components)
+    )
     preview_prompt_embeddings: dict[str, Any] = {}
     preview_negative_embeddings: dict[str, Any] = {}
     preview_sampler = None
@@ -453,7 +502,9 @@ def _build_runtime(
     finally:
         if placed[0]:
             lifecycle.park_cache_modules()
-            _probe_gpu_usage(injected, "cache_end", components)
+            _probe_gpu_usage(
+                injected, "cache_end", context=GpuProbeContext(components=components)
+            )
         lifecycle.release_text_resources()
     transformer, setup = _setup_transformer(
         components.main_transformer, job, injected, training_device
@@ -488,7 +539,21 @@ def _build_runtime(
         preview_prompt_embeddings=preview_prompt_embeddings,
         preview_negative_embeddings=preview_negative_embeddings,
     )
-    _probe_gpu_usage(injected, "train_placed", components)
+    settings = injected.get("gpu_usage_settings")
+    if not isinstance(settings, GpuUsageSettings):
+        settings = resolve_gpu_usage_settings(job)
+    _probe_gpu_usage(
+        injected,
+        "train_placed",
+        context=GpuProbeContext(
+            components=components,
+            optimizer=optimizer,
+            transformer=transformer,
+            preview_prompt_embeddings=preview_prompt_embeddings,
+            preview_negative_embeddings=preview_negative_embeddings,
+            preview_sampler=preview_sampler,
+        ),
+    )
     _seed_everything(int(job["seed"]))
     return {
         "config": job,
@@ -505,6 +570,7 @@ def _build_runtime(
         "preview_sampler": preview_sampler,
         "preview_prompt_embeddings": preview_prompt_embeddings,
         "preview_negative_embeddings": preview_negative_embeddings,
+        "gpu_usage_settings": settings,
     }
 
 
@@ -571,38 +637,57 @@ def _optimize(
             if callable(getattr(transformer, "train", None)):
                 transformer.train()
 
-            result = official_flow_matching_step(
-                transformer=transformer,
-                scheduler=runtime["components"].training_scheduler,
-                latent=sample.latent,
-                prompt_embedding=sample.prompt_embedding,
-                weighting_scheme=str(config["weighting_scheme"]),
-                logit_mean=float(config["logit_mean"]),
-                logit_std=float(config["logit_std"]),
-                mode_scale=float(config["mode_scale"]),
-                noise=_resolve_noise(injected, sample.latent),
-                density_u=injected.get("density_u"),
-                device=device,
-            )
-            ran = True
+            settings = runtime.get("gpu_usage_settings")
+            if not isinstance(settings, GpuUsageSettings):
+                settings = GpuUsageSettings()
+            next_step = step + 1
+            probe_this_step = _should_probe_optimizer_step(next_step, config, settings)
+            step_scope: Any = PeakMemoryScope() if probe_this_step else nullcontext()
+            with step_scope as scope:
+                result = official_flow_matching_step(
+                    transformer=transformer,
+                    scheduler=runtime["components"].training_scheduler,
+                    latent=sample.latent,
+                    prompt_embedding=sample.prompt_embedding,
+                    weighting_scheme=str(config["weighting_scheme"]),
+                    logit_mean=float(config["logit_mean"]),
+                    logit_std=float(config["logit_std"]),
+                    mode_scale=float(config["mode_scale"]),
+                    noise=_resolve_noise(injected, sample.latent),
+                    density_u=injected.get("density_u"),
+                    device=device,
+                )
+                ran = True
 
-            accelerator = runtime["accelerator"]
-            accumulate = getattr(accelerator, "accumulate", None)
-            context = accumulate(transformer) if callable(accumulate) else nullcontext()
-            with context:
-                backward = getattr(accelerator, "backward", None)
-                if callable(backward):
-                    backward(result.loss)
-                else:
-                    result.loss.backward()
-                runtime["optimizer"].step()
-                runtime["optimizer"].zero_grad()
+                accelerator = runtime["accelerator"]
+                accumulate = getattr(accelerator, "accumulate", None)
+                context = (
+                    accumulate(transformer) if callable(accumulate) else nullcontext()
+                )
+                with context:
+                    backward = getattr(accelerator, "backward", None)
+                    if callable(backward):
+                        backward(result.loss)
+                    else:
+                        result.loss.backward()
+                    runtime["optimizer"].step()
+                    runtime["optimizer"].zero_grad()
 
             step += 1
             sample_index += 1
             if sample_index >= len(cached):
                 sample_index = 0
                 epoch += 1
+
+            if probe_this_step:
+                _probe_gpu_usage(
+                    injected,
+                    "step",
+                    context=_gpu_probe_context_from_runtime(
+                        runtime,
+                        phase_peak_bytes=getattr(scope, "peak_bytes", None),
+                    ),
+                )
 
             persisted = _write_running_state(
                 job_dir, state.job_id, step, epoch, runtime["last_error"]
@@ -695,6 +780,20 @@ def _should_checkpoint(step: int, config: Mapping[str, Any]) -> bool:
     return every > 0 and step > 0 and step % every == 0
 
 
+def _should_probe_optimizer_step(
+    step: int,
+    config: Mapping[str, Any],
+    settings: GpuUsageSettings,
+) -> bool:
+    if int(step) <= 0:
+        return False
+    if settings.every_step:
+        return True
+    if step in (1, 2):
+        return True
+    return _should_checkpoint(step, config)
+
+
 def _write_checkpoint_then_sample(
     job_dir: Path,
     state: JobState,
@@ -756,7 +855,24 @@ def _write_checkpoint_then_sample(
                 runtime["optimizer"],
                 injected,
             )
-        _sample_previews(job_dir, saved, runtime["config"], sampler, state.step)
+            _probe_gpu_usage(
+                injected,
+                "preview_pause",
+                context=_gpu_probe_context_from_runtime(
+                    runtime, preview_sampler=sampler
+                ),
+            )
+        with PeakMemoryScope() as preview_scope:
+            _sample_previews(job_dir, saved, runtime["config"], sampler, state.step)
+        _probe_gpu_usage(
+            injected,
+            "preview_end",
+            context=_gpu_probe_context_from_runtime(
+                runtime,
+                phase_peak_bytes=preview_scope.peak_bytes,
+                preview_sampler=sampler,
+            ),
+        )
     except Exception as exc:
         failure = exc
     finally:
@@ -767,6 +883,13 @@ def _write_checkpoint_then_sample(
                     runtime["optimizer"],
                     training_device,
                     injected,
+                )
+                _probe_gpu_usage(
+                    injected,
+                    "restore",
+                    context=_gpu_probe_context_from_runtime(
+                        runtime, preview_sampler=sampler
+                    ),
                 )
             except Exception as exc:
                 restore_failure = RuntimeError(
@@ -1770,10 +1893,98 @@ def _first_text(*values: Any) -> str:
     return "local"
 
 
+def _bind_gpu_usage_probe(
+    job: Mapping[str, Any],
+    injected: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve YAML probe settings once. An injected probe still wins."""
+
+    payload = dict(injected)
+    if "gpu_usage_settings" not in payload:
+        payload["gpu_usage_settings"] = resolve_gpu_usage_settings(job)
+    if "gpu_usage_probe" not in payload:
+        payload["gpu_usage_probe"] = _default_gpu_usage_probe(
+            payload["gpu_usage_settings"]
+        )
+    return payload
+
+
+def _reset_gpu_usage_job_peaks() -> None:
+    _GPU_USAGE_JOB_PEAKS["step"] = 0
+    _GPU_USAGE_JOB_PEAKS["preview"] = 0
+    _GPU_USAGE_JOB_PEAKS["nvidia"] = 0
+
+
+def _gpu_probe_context_from_runtime(
+    runtime: Mapping[str, Any] | None,
+    *,
+    phase_peak_bytes: int | None = None,
+    components: Any = None,
+    preview_sampler: Any = None,
+) -> GpuProbeContext:
+    runtime = runtime or {}
+    return GpuProbeContext(
+        components=(
+            components if components is not None else runtime.get("components")
+        ),
+        optimizer=runtime.get("optimizer"),
+        transformer=runtime.get("transformer"),
+        phase_peak_bytes=phase_peak_bytes,
+        preview_prompt_embeddings=runtime.get("preview_prompt_embeddings"),
+        preview_negative_embeddings=runtime.get("preview_negative_embeddings"),
+        preview_sampler=(
+            preview_sampler
+            if preview_sampler is not None
+            else runtime.get("preview_sampler")
+        ),
+    )
+
+
+def _accumulate_gpu_usage_peaks(phase: str, context: Any) -> None:
+    peak = 0
+    if isinstance(context, GpuProbeContext) and context.phase_peak_bytes is not None:
+        peak = int(context.phase_peak_bytes)
+    if phase == "step":
+        _GPU_USAGE_JOB_PEAKS["step"] = max(_GPU_USAGE_JOB_PEAKS["step"], peak)
+    elif phase in _PREVIEW_PROBE_PHASES:
+        _GPU_USAGE_JOB_PEAKS["preview"] = max(_GPU_USAGE_JOB_PEAKS["preview"], peak)
+
+
+def _probe_gpu_usage_summary(
+    injected: Mapping[str, Any],
+    runtime: Mapping[str, Any] | None,
+) -> None:
+    context = _gpu_probe_context_from_runtime(
+        runtime,
+        phase_peak_bytes=max(
+            _GPU_USAGE_JOB_PEAKS["step"], _GPU_USAGE_JOB_PEAKS["preview"]
+        ),
+    )
+    try:
+        snap = snapshot_gpu_usage("summary", context)
+        _GPU_USAGE_JOB_PEAKS["nvidia"] = max(
+            _GPU_USAGE_JOB_PEAKS["nvidia"], int(snap.nvidia_used_bytes)
+        )
+    except Exception:
+        pass
+    try:
+        log.info(
+            "gpu usage phase=summary max_step_peak=%s max_preview_peak=%s "
+            "max_nvidia_used=%s",
+            format_bytes(_GPU_USAGE_JOB_PEAKS["step"]),
+            format_bytes(_GPU_USAGE_JOB_PEAKS["preview"]),
+            format_bytes(_GPU_USAGE_JOB_PEAKS["nvidia"]),
+        )
+    except Exception:
+        pass
+    _probe_gpu_usage(injected, "summary", context=context)
+
+
 def _probe_gpu_usage(
     injected: Mapping[str, Any],
     phase: str,
-    components: Any = None,
+    *,
+    context: Any = None,
 ) -> None:
     """Log a child-process GPU snapshot. Never raises into the job."""
 
@@ -1781,7 +1992,11 @@ def _probe_gpu_usage(
         probe = injected.get("gpu_usage_probe", _DEFAULT_GPU_USAGE_PROBE)
         if probe is None:
             return
-        probe(phase, components)
+        probe(phase, context)
+    except Exception:
+        pass
+    try:
+        _accumulate_gpu_usage_peaks(phase, context)
     except Exception:
         return
 
@@ -1851,6 +2066,15 @@ def _prepare_preview_embeddings(
     )
 
 
+def _preview_sampler_gpu_usage_probe(injected: Mapping[str, Any]) -> Any:
+    """Bind the job probe so sampler ``preview_run`` peaks feed the summary."""
+
+    def probe(phase: str, context: Any = None) -> None:
+        _probe_gpu_usage(injected, phase, context=context)
+
+    return probe
+
+
 def _default_preview_sampler(
     runtime: Mapping[str, Any],
     injected: Mapping[str, Any] | None = None,
@@ -1876,6 +2100,7 @@ def _default_preview_sampler(
         "device": _preview_sampler_device(runtime, injected),
         "target_modules": list((config.get("lora") or {}).get("targets") or []),
         "main_transformer": getattr(components, "main_transformer", None),
+        "gpu_usage_probe": _preview_sampler_gpu_usage_probe(injected),
     }
     factory = getattr(sampler_cls, "from_components", None)
     if callable(factory):

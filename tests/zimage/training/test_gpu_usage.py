@@ -11,10 +11,21 @@ from PIL import Image
 from zimage.training.cache import CacheConfig, encode_sample
 from zimage.training.dataset import DatasetSample
 from zimage.training.gpu_usage import (
+    DetailedGpuUsageProbe,
+    GpuProbeContext,
     GpuUsageProbe,
     GpuUsageSnapshot,
+    NBYTES_BUCKETS,
+    PeakMemoryScope,
+    TOP_LEFTOVER_GROUPS,
+    _default_gpu_usage_probe,
+    _nvidia_memory,
+    _parse_nvidia_smi_memory,
+    collect_leftover_groups,
+    collect_module_nbytes,
     format_bytes,
     format_gpu_usage,
+    format_gpu_usage_detailed,
     snapshot_gpu_usage,
 )
 from zimage.training.modeling import (
@@ -23,11 +34,17 @@ from zimage.training.modeling import (
     TrainingModelComponents,
     TrainingModelLifecycle,
 )
-from zimage.training.schema import CACHE_PROMPT_EMBED_HIDDEN_SIZE
+from zimage.training.schema import CACHE_PROMPT_EMBED_HIDDEN_SIZE, GpuUsageSettings
 
 
 def _fake_cuda(*, available: bool, allocated=0, reserved=0, peak=0, calls=None):
     tracked = calls if calls is not None else []
+
+    def synchronize():
+        tracked.append("sync")
+
+    def reset_peak_memory_stats():
+        tracked.append("reset")
 
     def memory_allocated():
         tracked.append("allocated")
@@ -43,18 +60,38 @@ def _fake_cuda(*, available: bool, allocated=0, reserved=0, peak=0, calls=None):
 
     return SimpleNamespace(
         is_available=lambda: available,
+        synchronize=synchronize,
+        reset_peak_memory_stats=reset_peak_memory_stats,
         memory_allocated=memory_allocated,
         memory_reserved=memory_reserved,
         max_memory_allocated=max_memory_allocated,
     )
 
 
-def _components(*, vae="cpu", text_encoder="cpu", transformer="cpu"):
-    return SimpleNamespace(
-        vae=SimpleNamespace(device=vae),
-        text_encoder=SimpleNamespace(device=text_encoder),
-        main_transformer=SimpleNamespace(device=transformer),
-    )
+def _components(
+    *,
+    vae="cpu",
+    text_encoder="cpu",
+    transformer="cpu",
+    sampling_transformer="none",
+):
+    kwargs = {
+        "vae": SimpleNamespace(device=vae),
+        "text_encoder": SimpleNamespace(device=text_encoder),
+        "main_transformer": SimpleNamespace(device=transformer),
+    }
+    if sampling_transformer != "none":
+        kwargs["sampling_transformer"] = SimpleNamespace(device=sampling_transformer)
+    return SimpleNamespace(**kwargs)
+
+
+def _devices(*, vae="cpu", text_encoder="cpu", transformer="cpu", sampling="none"):
+    return {
+        "vae": vae,
+        "text_encoder": text_encoder,
+        "transformer": transformer,
+        "sampling_transformer": sampling,
+    }
 
 
 def test_snapshot_cuda_absent_zeros_and_skips_memory_apis():
@@ -70,11 +107,10 @@ def test_snapshot_cuda_absent_zeros_and_skips_memory_apis():
     assert snap.allocated_bytes == 0
     assert snap.reserved_bytes == 0
     assert snap.peak_allocated_bytes == 0
-    assert snap.module_devices == {
-        "vae": "cpu",
-        "text_encoder": "cpu",
-        "transformer": "cpu",
-    }
+    assert snap.phase_peak_allocated_bytes == 0
+    assert snap.nvidia_used_bytes == 0
+    assert snap.nvidia_total_bytes == 0
+    assert snap.module_devices == _devices()
     assert calls == []
 
 
@@ -92,11 +128,12 @@ def test_snapshot_cuda_present_reads_bytes_and_module_devices():
     assert snap.allocated_bytes == 1024
     assert snap.reserved_bytes == 2048
     assert snap.peak_allocated_bytes == 4096
-    assert snap.module_devices == {
-        "vae": "cuda",
-        "text_encoder": "cuda",
-        "transformer": "cpu",
-    }
+    assert snap.phase_peak_allocated_bytes == 0
+    assert snap.nvidia_used_bytes == 0
+    assert snap.nvidia_total_bytes == 0
+    assert snap.module_devices == _devices(
+        vae="cuda", text_encoder="cuda", transformer="cpu"
+    )
 
 
 def test_snapshot_cuda_present_via_monkeypatch(monkeypatch):
@@ -117,11 +154,9 @@ def test_snapshot_cuda_present_via_monkeypatch(monkeypatch):
 def test_snapshot_missing_components_are_none():
     fake = SimpleNamespace(cuda=_fake_cuda(available=False))
     snap = snapshot_gpu_usage("teardown", None, torch_module=fake)
-    assert snap.module_devices == {
-        "vae": "none",
-        "text_encoder": "none",
-        "transformer": "none",
-    }
+    assert snap.module_devices == _devices(
+        vae="none", text_encoder="none", transformer="none"
+    )
 
 
 def test_snapshot_released_text_encoder_is_none():
@@ -132,11 +167,9 @@ def test_snapshot_released_text_encoder_is_none():
         main_transformer=SimpleNamespace(device="cuda"),
     )
     snap = snapshot_gpu_usage("train_placed", components, torch_module=fake)
-    assert snap.module_devices == {
-        "vae": "cpu",
-        "text_encoder": "none",
-        "transformer": "cuda",
-    }
+    assert snap.module_devices == _devices(
+        vae="cpu", text_encoder="none", transformer="cuda"
+    )
 
 
 @pytest.mark.parametrize(
@@ -161,16 +194,18 @@ def test_format_gpu_usage_stable_line():
         allocated_bytes=1024,
         reserved_bytes=2048,
         peak_allocated_bytes=4096,
-        module_devices={
-            "vae": "cuda",
-            "text_encoder": "cuda",
-            "transformer": "cpu",
-        },
+        module_devices=_devices(
+            vae="cuda", text_encoder="cuda", transformer="cpu", sampling="cpu"
+        ),
+        phase_peak_allocated_bytes=3072,
+        nvidia_used_bytes=1024**3,
+        nvidia_total_bytes=2 * 1024**3,
     )
     assert format_gpu_usage(snap) == (
         "gpu usage phase=cache_place cuda=1 allocated=1.0KB "
-        "reserved=2.0KB peak_allocated=4.0KB "
-        "vae=cuda text_encoder=cuda transformer=cpu"
+        "reserved=2.0KB peak_allocated=4.0KB phase_peak=3.0KB "
+        "nvidia_used=1.0GB nvidia_total=2.0GB "
+        "vae=cuda text_encoder=cuda transformer=cpu sampling_transformer=cpu"
     )
 
 
@@ -192,6 +227,470 @@ def test_probe_swallows_logger_errors():
             raise RuntimeError("log failed")
 
     GpuUsageProbe(logger=BoomLogger())("teardown")
+
+
+def test_cuda_stats_synchronizes_before_memory_reads():
+    calls: list[str] = []
+    fake = SimpleNamespace(
+        cuda=_fake_cuda(available=True, allocated=1, reserved=2, peak=3, calls=calls)
+    )
+    snapshot_gpu_usage("train_placed", torch_module=fake)
+    assert calls[:4] == ["sync", "allocated", "reserved", "peak"]
+
+
+def test_snapshot_does_not_call_gc_collect(monkeypatch):
+    called: list[str] = []
+    monkeypatch.setattr(gc, "collect", lambda: called.append("gc") or 0)
+    fake = SimpleNamespace(cuda=_fake_cuda(available=True, allocated=1))
+    snapshot_gpu_usage("teardown", torch_module=fake)
+    assert called == []
+
+
+def test_snapshot_reads_phase_peak_and_sampling_transformer_from_context():
+    fake = SimpleNamespace(
+        cuda=_fake_cuda(available=True, allocated=1, reserved=2, peak=9)
+    )
+    ctx = GpuProbeContext(
+        components=_components(transformer="cuda", sampling_transformer="cpu"),
+        phase_peak_bytes=50,
+    )
+    snap = snapshot_gpu_usage("step", ctx, torch_module=fake)
+    assert snap.phase_peak_allocated_bytes == 50
+    assert snap.peak_allocated_bytes == 9
+    assert snap.module_devices["transformer"] == "cuda"
+    assert snap.module_devices["sampling_transformer"] == "cpu"
+
+
+def test_snapshot_phase_peak_is_at_least_allocated():
+    fake = SimpleNamespace(
+        cuda=_fake_cuda(available=True, allocated=100, reserved=200, peak=300)
+    )
+    low = snapshot_gpu_usage(
+        "preview_run",
+        GpuProbeContext(phase_peak_bytes=50),
+        torch_module=fake,
+    )
+    high = snapshot_gpu_usage(
+        "preview_run",
+        GpuProbeContext(phase_peak_bytes=500),
+        torch_module=fake,
+    )
+    assert low.allocated_bytes == 100
+    assert low.phase_peak_allocated_bytes == 100
+    assert high.phase_peak_allocated_bytes == 500
+    assert high.phase_peak_allocated_bytes >= high.allocated_bytes
+
+
+def test_probe_second_positional_is_components_shorthand():
+    lines: list[str] = []
+
+    class Capture:
+        def info(self, msg):
+            lines.append(msg)
+
+    fake = SimpleNamespace(cuda=_fake_cuda(available=False))
+    GpuUsageProbe(torch_module=fake, logger=Capture())(
+        "cache_place", _components(vae="cuda")
+    )
+    assert lines
+    assert "vae=cuda" in lines[0]
+    assert "phase_peak=" in lines[0]
+    assert "nvidia_used=" in lines[0]
+    assert "nvidia_total=" in lines[0]
+    assert "sampling_transformer=" in lines[0]
+
+
+def test_peak_memory_scope_reset_work_sync_read():
+    calls: list[str] = []
+    fake = SimpleNamespace(cuda=_fake_cuda(available=True, peak=99, calls=calls))
+    with PeakMemoryScope(torch_module=fake) as scope:
+        calls.append("work")
+    assert calls == ["reset", "work", "sync", "peak"]
+    assert scope.peak_bytes == 99
+
+
+def test_peak_memory_scope_without_cuda_is_zero():
+    calls: list[str] = []
+    fake = SimpleNamespace(cuda=_fake_cuda(available=False, peak=99, calls=calls))
+    with PeakMemoryScope(torch_module=fake) as scope:
+        pass
+    assert calls == []
+    assert scope.peak_bytes == 0
+
+
+def test_parse_nvidia_smi_memory_mib_to_bytes():
+    assert _parse_nvidia_smi_memory("1234, 24576\n") == (
+        1234 * 1024 * 1024,
+        24576 * 1024 * 1024,
+    )
+
+
+def test_parse_nvidia_smi_memory_strips_units():
+    assert _parse_nvidia_smi_memory("  8 MiB, 16 MiB\n") == (
+        8 * 1024 * 1024,
+        16 * 1024 * 1024,
+    )
+
+
+def test_nvidia_memory_passes_device_index(monkeypatch):
+    cmds: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        cmds.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="1, 2\n")
+
+    monkeypatch.setattr("zimage.training.gpu_usage.subprocess.run", fake_run)
+    used, total = _nvidia_memory(device_index=3)
+    assert "-i" in cmds[0]
+    assert cmds[0][cmds[0].index("-i") + 1] == "3"
+    assert (used, total) == (1 * 1024 * 1024, 2 * 1024 * 1024)
+
+
+def test_nvidia_memory_defaults_to_current_device(monkeypatch):
+    cmds: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        cmds.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="10, 20\n")
+
+    fake = SimpleNamespace(cuda=SimpleNamespace(current_device=lambda: 4))
+    monkeypatch.setattr("zimage.training.gpu_usage.torch", fake)
+    monkeypatch.setattr("zimage.training.gpu_usage.subprocess.run", fake_run)
+    used, total = _nvidia_memory()
+    assert cmds[0][cmds[0].index("-i") + 1] == "4"
+    assert (used, total) == (10 * 1024 * 1024, 20 * 1024 * 1024)
+
+
+def test_nvidia_memory_missing_binary_returns_zeros(monkeypatch):
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr("zimage.training.gpu_usage.subprocess.run", boom)
+    assert _nvidia_memory(device_index=0) == (0, 0)
+
+
+def test_snapshot_records_nvidia_bytes(monkeypatch):
+    monkeypatch.setattr(
+        "zimage.training.gpu_usage._nvidia_memory",
+        lambda device_index=None, torch_module=None: (11, 22),
+    )
+    fake = SimpleNamespace(cuda=_fake_cuda(available=True, allocated=1))
+    snap = snapshot_gpu_usage("step", torch_module=fake)
+    assert snap.nvidia_used_bytes == 11
+    assert snap.nvidia_total_bytes == 22
+
+
+def test_gpu_usage_module_has_no_probe_env_or_gc_collect():
+    from zimage.training import gpu_usage as gpu_usage_mod
+    from zimage.training import loop as loop_mod
+
+    gpu_text = Path(gpu_usage_mod.__file__).read_text(encoding="utf-8")
+    loop_text = Path(loop_mod.__file__).read_text(encoding="utf-8")
+    assert "os.environ" not in gpu_text
+    assert "getenv" not in gpu_text
+    assert "ZIMAGE_" not in gpu_text
+    assert "gc.collect" not in gpu_text
+    assert "ZIMAGE_GPU" not in loop_text
+
+
+def _param_module(tensor: torch.Tensor):
+    return SimpleNamespace(
+        parameters=lambda recurse=True: iter([tensor]),
+        buffers=lambda recurse=True: iter([]),
+    )
+
+
+def _capture_logger(lines: list[str]):
+    class Capture:
+        def info(self, msg):
+            lines.append(str(msg))
+
+    return Capture()
+
+
+def test_collect_module_nbytes_zeros_for_cpu_and_missing():
+    nbytes = collect_module_nbytes(None)
+    assert tuple(nbytes) == NBYTES_BUCKETS
+    assert all(value == 0 for value in nbytes.values())
+    cpu = torch.zeros(2, 2)
+    nbytes = collect_module_nbytes(_components())
+    assert nbytes["vae"] == 0
+    ctx = GpuProbeContext(components=SimpleNamespace(vae=_param_module(cpu)))
+    assert collect_module_nbytes(ctx)["vae"] == 0
+
+
+def test_collect_module_nbytes_counts_named_cuda_tensors(monkeypatch):
+    vae_t = torch.zeros(2, 2)
+    main_t = torch.zeros(4, 1)
+    opt_t = torch.zeros(3)
+    prompt_t = torch.zeros(5, 5)
+    sampler_t = torch.zeros(6)
+    cuda_ids = {id(vae_t), id(main_t), id(opt_t), id(prompt_t), id(sampler_t)}
+    monkeypatch.setattr(
+        "zimage.training.gpu_usage._is_cuda_tensor",
+        lambda obj: id(obj) in cuda_ids,
+    )
+    ctx = GpuProbeContext(
+        components=SimpleNamespace(
+            vae=_param_module(vae_t),
+            main_transformer=_param_module(main_t),
+        ),
+        optimizer=SimpleNamespace(state={0: {"exp_avg": opt_t}}),
+        preview_prompt_embeddings={"p": prompt_t},
+        preview_sampler=SimpleNamespace(
+            prompt_embeddings={},
+            negative_prompt_embeddings={"n": sampler_t},
+        ),
+    )
+    nbytes = collect_module_nbytes(ctx)
+    assert nbytes["vae"] == vae_t.nbytes
+    assert nbytes["main_transformer"] == main_t.nbytes
+    assert nbytes["optimizer_state"] == opt_t.nbytes
+    assert nbytes["preview_embed_maps"] == prompt_t.nbytes + sampler_t.nbytes
+    assert nbytes["text_encoder"] == 0
+    assert nbytes["sampling_transformer"] == 0
+
+
+def test_collect_module_nbytes_dedupes_shared_storage(monkeypatch):
+    base = torch.zeros(4, 4)
+    view = base.view(2, 8)
+    monkeypatch.setattr(
+        "zimage.training.gpu_usage._is_cuda_tensor",
+        lambda obj: obj is base or obj is view,
+    )
+    module = SimpleNamespace(
+        parameters=lambda recurse=True: iter([base, view]),
+        buffers=lambda recurse=True: iter([]),
+    )
+    ctx = GpuProbeContext(components=SimpleNamespace(vae=module))
+    assert collect_module_nbytes(ctx)["vae"] == base.nbytes
+
+
+def test_collect_leftover_groups_ranks_and_caps_top(monkeypatch):
+    tensors = [torch.zeros(i + 1) for i in range(TOP_LEFTOVER_GROUPS + 1)]
+    cuda_ids = {id(item) for item in tensors}
+    monkeypatch.setattr(
+        "zimage.training.gpu_usage._is_cuda_tensor",
+        lambda obj: id(obj) in cuda_ids,
+    )
+    monkeypatch.setattr(
+        "zimage.training.gpu_usage.gc.get_objects", lambda: list(tensors)
+    )
+    groups, total = collect_leftover_groups(None)
+    expected_total = sum(item.nbytes for item in tensors)
+    assert total == expected_total
+    assert len(groups) == TOP_LEFTOVER_GROUPS
+    assert groups[0]["shape"] == [TOP_LEFTOVER_GROUPS + 1]
+    assert groups[0]["nbytes"] == tensors[-1].nbytes
+    assert groups[0]["count"] == 1
+    assert all(group["shape"] != [1] for group in groups)
+
+
+def test_collect_leftover_groups_excludes_named_buckets(monkeypatch):
+    named = torch.zeros(8, 8)
+    leftover = torch.zeros(3, 3)
+    cuda_ids = {id(named), id(leftover)}
+    monkeypatch.setattr(
+        "zimage.training.gpu_usage._is_cuda_tensor",
+        lambda obj: id(obj) in cuda_ids,
+    )
+    monkeypatch.setattr(
+        "zimage.training.gpu_usage.gc.get_objects", lambda: [named, leftover]
+    )
+    ctx = GpuProbeContext(components=SimpleNamespace(vae=_param_module(named)))
+    groups, total = collect_leftover_groups(ctx)
+    assert total == leftover.nbytes
+    assert groups == [
+        {
+            "shape": [3, 3],
+            "dtype": str(leftover.dtype),
+            "count": 1,
+            "nbytes": leftover.nbytes,
+        }
+    ]
+
+
+def test_format_gpu_usage_detailed_includes_nbytes_and_leftover():
+    snap = GpuUsageSnapshot(
+        phase="train_placed",
+        cuda_available=True,
+        allocated_bytes=1024,
+        reserved_bytes=2048,
+        peak_allocated_bytes=4096,
+        module_devices=_devices(),
+        phase_peak_allocated_bytes=0,
+        nvidia_used_bytes=0,
+        nvidia_total_bytes=0,
+    )
+    nbytes = {key: 0 for key in NBYTES_BUCKETS}
+    nbytes["vae"] = 1024
+    leftover = [
+        {
+            "shape": [2, 2],
+            "dtype": "torch.float32",
+            "count": 1,
+            "nbytes": 16,
+        }
+    ]
+    text = format_gpu_usage_detailed(snap, nbytes, leftover, leftover_nbytes=32)
+    lines = text.splitlines()
+    assert lines[0] == format_gpu_usage(snap)
+    assert lines[1] == (
+        "gpu usage   vae=1.0KB text_encoder=0B main_transformer=0B "
+        "sampling_transformer=0B optimizer_state=0B preview_embed_maps=0B "
+        "leftover=32B"
+    )
+    assert lines[2] == (
+        "gpu usage   leftover shape=[2, 2] dtype=torch.float32 count=1 nbytes=16B"
+    )
+
+
+def test_compact_probe_logs_single_line_without_buckets():
+    lines: list[str] = []
+    fake = SimpleNamespace(cuda=_fake_cuda(available=False))
+    GpuUsageProbe(torch_module=fake, logger=_capture_logger(lines))(
+        "train_placed", _components()
+    )
+    assert len(lines) == 1
+    assert lines[0].startswith("gpu usage phase=train_placed")
+    assert "leftover" not in lines[0]
+    assert "preview_embed_maps" not in lines[0]
+    assert "main_transformer=" not in lines[0]
+
+
+def test_detailed_probe_logs_nbytes_and_leftover_lines():
+    lines: list[str] = []
+    fake = SimpleNamespace(cuda=_fake_cuda(available=False))
+    DetailedGpuUsageProbe(torch_module=fake, logger=_capture_logger(lines))(
+        "train_placed", _components()
+    )
+    assert len(lines) >= 2
+    assert lines[0].startswith("gpu usage phase=train_placed")
+    assert "preview_embed_maps=" in lines[1]
+    assert "leftover=" in lines[1]
+    assert "main_transformer=" in lines[1]
+
+
+def test_default_gpu_usage_probe_factory_compact_vs_detailed():
+    compact = _default_gpu_usage_probe(GpuUsageSettings())
+    detailed = _default_gpu_usage_probe(GpuUsageSettings(detailed=True))
+    assert type(compact) is GpuUsageProbe
+    assert type(detailed) is DetailedGpuUsageProbe
+    assert isinstance(detailed, GpuUsageProbe)
+
+
+def test_run_job_default_probe_is_compact(tmp_path, monkeypatch):
+    from zimage.training import loop as loop_mod
+    from zimage.training.loop import run_job
+
+    from tests.zimage.training.test_loop import injections, make_job
+
+    seen: list[GpuUsageSettings] = []
+    real = loop_mod._default_gpu_usage_probe
+
+    def spy(settings):
+        seen.append(settings)
+        probe = real(settings)
+        assert type(probe) is GpuUsageProbe
+        return probe
+
+    monkeypatch.setattr(loop_mod, "_default_gpu_usage_probe", spy)
+    root = make_job(tmp_path, max_steps=1)
+    assert run_job(root, **injections()) == 0
+    assert seen == [GpuUsageSettings()]
+
+
+def test_run_job_detailed_true_from_job_yaml(tmp_path, monkeypatch):
+    from zimage.training import loop as loop_mod
+    from zimage.training.loop import run_job
+
+    from tests.zimage.training.test_loop import injections, make_job
+
+    seen: list[GpuUsageSettings] = []
+    real = loop_mod._default_gpu_usage_probe
+
+    def spy(settings):
+        seen.append(settings)
+        probe = real(settings)
+        assert type(probe) is DetailedGpuUsageProbe
+        return probe
+
+    monkeypatch.setattr(loop_mod, "_default_gpu_usage_probe", spy)
+    root = make_job(tmp_path, max_steps=1, gpu_usage={"detailed": True})
+    assert run_job(root, **injections()) == 0
+    assert seen == [GpuUsageSettings(detailed=True)]
+
+
+def test_run_job_detailed_true_from_root_config(tmp_path, monkeypatch):
+    from zimage.prefs.store import dump_document
+    from zimage.training import loop as loop_mod
+    from zimage.training.loop import run_job
+
+    from tests.zimage.training.test_loop import injections, make_job
+
+    dump_document(
+        {
+            "training": {
+                "datasets_dir": "./datasets",
+                "jobs_dir": "./jobs",
+                "gpu_usage": {"detailed": True},
+            }
+        }
+    )
+    seen: list[GpuUsageSettings] = []
+    real = loop_mod._default_gpu_usage_probe
+
+    def spy(settings):
+        seen.append(settings)
+        return real(settings)
+
+    monkeypatch.setattr(loop_mod, "_default_gpu_usage_probe", spy)
+    root = make_job(tmp_path, max_steps=1)
+    assert run_job(root, **injections()) == 0
+    assert seen == [GpuUsageSettings(detailed=True)]
+
+
+def test_run_job_injected_probe_wins_over_detailed_yaml(tmp_path, monkeypatch):
+    from zimage.training import loop as loop_mod
+    from zimage.training.loop import run_job
+
+    from tests.zimage.training.test_loop import injections, make_job
+
+    def boom(settings):
+        raise AssertionError("factory must not run when probe is injected")
+
+    monkeypatch.setattr(loop_mod, "_default_gpu_usage_probe", boom)
+    phases: list[str] = []
+
+    def probe(phase, context=None):
+        phases.append(phase)
+
+    root = make_job(tmp_path, max_steps=1, gpu_usage={"detailed": True})
+    assert run_job(root, **injections(gpu_usage_probe=probe)) == 0
+    assert phases == [
+        "load",
+        "cache_place",
+        "cache_encode_peak",
+        "cache_end",
+        "train_placed",
+        "step",
+        "teardown",
+        "summary",
+    ]
+
+
+def test_bucket_helpers_are_not_duplicated_in_simulation():
+    from zimage.training import gpu_usage as gpu_usage_mod
+
+    sim = (
+        Path(__file__).resolve().parents[2] / "simulation.py"
+    ).read_text(encoding="utf-8")
+    gpu = Path(gpu_usage_mod.__file__).read_text(encoding="utf-8")
+    assert "def collect_module_nbytes" in gpu
+    assert "def _leftover_groups" in gpu
+    assert "def collect_module_nbytes" not in sim
+    assert "def _leftover_groups" not in sim
+    assert "def _cuda_nbytes_and_ids" not in sim
 
 
 _CUDA_MEMORY_SLACK_BYTES = 8 * 1024 * 1024

@@ -22,8 +22,14 @@ precision: fp8
 gradient_checkpointing: true
 seed: 0
 epochs: 1
-max_steps: 1
-checkpoint_every: 1
+max_steps: 100
+checkpoint_every: 100
+# Optional GPU probe overrides (job keys override root config.yaml
+# training.gpu_usage). Omit for defaults: compact log lines; step probes
+# at 1, 2, and checkpoint steps only.
+# gpu_usage:
+#   every_step: false
+#   detailed: false
 optimizer:
   name: adamw
   learning_rate: 0.0001

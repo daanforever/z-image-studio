@@ -414,15 +414,19 @@ def prepare_cache_at_job_start(
     *,
     cache_dir: str | Path | None = None,
     on_before_encode: Callable[[], None] | None = None,
+    on_after_first_encode: Callable[[], None] | None = None,
 ) -> list[CachedSample]:
     """Inspect and materialize all caches at an explicit job-start boundary.
 
     ``on_before_encode`` runs once, immediately before the first
-    ``encode_sample``. VALID caches never invoke it.
+    ``encode_sample``. ``on_after_first_encode`` runs once in a ``finally``
+    after that first encode returns or raises. VALID caches never invoke
+    either hook.
     """
 
     cached: list[CachedSample] = []
     encode_hook = on_before_encode
+    after_hook = on_after_first_encode
     encoded = 0
     reused = 0
     for sample in samples:
@@ -435,12 +439,17 @@ def prepare_cache_at_job_start(
             if encode_hook is not None:
                 encode_hook()
                 encode_hook = None
-            latent, prompt_embedding = encode_sample(
-                sample,
-                image,
-                encoder,
-                config,
-            )
+            try:
+                latent, prompt_embedding = encode_sample(
+                    sample,
+                    image,
+                    encoder,
+                    config,
+                )
+            finally:
+                if after_hook is not None:
+                    after_hook()
+                    after_hook = None
             write_cache_atomic(path, latent, prompt_embedding, metadata)
         else:
             reused += 1

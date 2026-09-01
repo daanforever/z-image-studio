@@ -19,6 +19,7 @@ from PIL import Image
 from zimage.config import JPEG_QUALITY
 from zimage.training.checkpoints import load_lora_state
 from zimage.training.contracts import SavedCheckpoint
+from zimage.training.gpu_usage import GpuProbeContext, PeakMemoryScope
 from zimage.training.schema import merge_sample_parameters
 
 log = logging.getLogger("zimage.training")
@@ -61,6 +62,7 @@ class UnfusedPreviewSampler:
         quantizer: PreviewQuantizer | None = None,
         device_mover: DeviceMover | None = None,
         cuda_cleanup: CudaCleanup | None = None,
+        gpu_usage_probe: Callable[..., Any] | None = None,
     ) -> None:
         self.transformer = transformer
         self.scheduler = scheduler
@@ -77,6 +79,7 @@ class UnfusedPreviewSampler:
         self._quantizer = quantizer
         self._device_mover = device_mover
         self._cuda_cleanup = cuda_cleanup
+        self._gpu_usage_probe = gpu_usage_probe
         self._lock = threading.Lock()
         self._active_adapter: str | None = None
         self._fp8_quantized = False
@@ -99,6 +102,7 @@ class UnfusedPreviewSampler:
         quantizer: PreviewQuantizer | None = None,
         device_mover: DeviceMover | None = None,
         cuda_cleanup: CudaCleanup | None = None,
+        gpu_usage_probe: Callable[..., Any] | None = None,
     ) -> UnfusedPreviewSampler:
         """Build a preview sampler from training components.
 
@@ -120,6 +124,7 @@ class UnfusedPreviewSampler:
             quantizer=quantizer,
             device_mover=device_mover,
             cuda_cleanup=cuda_cleanup,
+            gpu_usage_probe=gpu_usage_probe,
         )
 
     def sample_unfused(
@@ -236,11 +241,13 @@ class UnfusedPreviewSampler:
         merged = resolve_preview_parameters(self.common_parameters, parameters)
         self.last_parameters = dict(merged)
         failure: BaseException | None = None
+        preview_run_scope: PeakMemoryScope | None = None
         try:
             self.prepare_for_preview()
             self.load_unfused_adapter(checkpoint)
             self._move_preview_components(self._resolve_device())
-            image = self._run_pipeline(merged)
+            with PeakMemoryScope() as preview_run_scope:
+                image = self._run_pipeline(merged)
             destination.parent.mkdir(parents=True, exist_ok=True)
             _write_preview_image(image, destination)
             return destination
@@ -248,6 +255,11 @@ class UnfusedPreviewSampler:
             failure = exc
             raise
         finally:
+            try:
+                if preview_run_scope is not None:
+                    self._record_preview_run(preview_run_scope.peak_bytes)
+            except Exception:
+                pass
             try:
                 self.release_after_preview()
             except Exception as cleanup_exc:
@@ -323,6 +335,32 @@ class UnfusedPreviewSampler:
         if targets:
             kwargs["target_modules"] = list(targets)
         return factory(**kwargs)
+
+    def _record_preview_run(self, phase_peak_bytes: int) -> None:
+        """Log intra-denoise peak before preview weights leave the GPU."""
+
+        probe = self._gpu_usage_probe
+        if probe is None:
+            return
+        try:
+            probe(
+                "preview_run",
+                GpuProbeContext(
+                    components={
+                        "vae": self.vae,
+                        "sampling_transformer": self.transformer,
+                        "main_transformer": self.main_transformer,
+                        "transformer": self.main_transformer,
+                    },
+                    transformer=self.main_transformer,
+                    phase_peak_bytes=int(phase_peak_bytes),
+                    preview_prompt_embeddings=self.prompt_embeddings,
+                    preview_negative_embeddings=self.negative_prompt_embeddings,
+                    preview_sampler=self,
+                ),
+            )
+        except Exception:
+            return
 
     def _run_pipeline(self, merged: Mapping[str, Any]) -> Image.Image:
         pipeline = self._ensure_pipeline()

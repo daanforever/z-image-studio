@@ -1519,7 +1519,7 @@ def test_stale_cache_job_probe_records_place_and_end(tmp_path):
         cache_job(root, **injections(gpu_usage_probe=_recording_gpu_probe(phases)))
         == 0
     )
-    assert phases == ["cache_place", "cache_end"]
+    assert phases == ["cache_place", "cache_encode_peak", "cache_end"]
 
 
 def test_stale_run_job_probe_phase_order(tmp_path):
@@ -1529,7 +1529,17 @@ def test_stale_run_job_probe_phase_order(tmp_path):
         run_job(root, **injections(gpu_usage_probe=_recording_gpu_probe(phases)))
         == 0
     )
-    assert phases == ["cache_place", "cache_end", "train_placed", "teardown"]
+    assert "step_peak" not in phases
+    assert phases == [
+        "load",
+        "cache_place",
+        "cache_encode_peak",
+        "cache_end",
+        "train_placed",
+        "step",
+        "teardown",
+        "summary",
+    ]
 
 
 def test_warm_cache_run_job_probe_omits_cache_place(tmp_path):
@@ -1541,8 +1551,9 @@ def test_warm_cache_run_job_probe_omits_cache_place(tmp_path):
         == 0
     )
     assert "cache_place" not in phases
+    assert "cache_encode_peak" not in phases
     assert "cache_end" not in phases
-    assert phases == ["train_placed", "teardown"]
+    assert phases == ["load", "train_placed", "step", "teardown", "summary"]
 
 
 def test_warm_cache_default_sampler_probe_records_place_and_end(
@@ -1556,11 +1567,131 @@ def test_warm_cache_default_sampler_probe_records_place_and_end(
         gpu_usage_probe=_recording_gpu_probe(phases)
     )
     assert run_job(root, **payload) == 0
-    assert phases == ["cache_place", "cache_end", "train_placed", "teardown"]
+    assert "cache_encode_peak" not in phases
+    assert phases == [
+        "load",
+        "cache_place",
+        "cache_end",
+        "train_placed",
+        "step",
+        "teardown",
+        "summary",
+    ]
     text_encoder = payload["loaders"].text_encoder.created[0]
     vae = payload["loaders"].vae.created[0]
     assert text_encoder.moved_to
     assert all(torch.device(target).type != "cuda" for target in vae.moved_to)
+
+
+def test_run_job_preview_probe_phases(tmp_path):
+    phases: list[str] = []
+    root = make_job(tmp_path, max_steps=1, checkpoint_every=1)
+    assert (
+        run_job(
+            root,
+            **injections(
+                gpu_usage_probe=_recording_gpu_probe(phases),
+                checkpoint_writer=RecordingWriter([]),
+                preview_sampler=RecordingSampler([]),
+            ),
+        )
+        == 0
+    )
+    assert "step_peak" not in phases
+    assert phases == [
+        "load",
+        "cache_place",
+        "cache_encode_peak",
+        "cache_end",
+        "train_placed",
+        "step",
+        "preview_end",
+        "teardown",
+        "summary",
+    ]
+
+
+def test_run_job_every_step_probes_each_optimizer_step(tmp_path):
+    phases: list[str] = []
+    root = make_job(
+        tmp_path, max_steps=3, gpu_usage={"every_step": True}
+    )
+    assert (
+        run_job(root, **injections(gpu_usage_probe=_recording_gpu_probe(phases)))
+        == 0
+    )
+    assert phases.count("step") == 3
+
+
+def test_run_job_default_step_probes_first_two_and_checkpoint(tmp_path):
+    phases: list[str] = []
+    root = make_job(tmp_path, max_steps=100, checkpoint_every=100)
+    assert (
+        run_job(
+            root,
+            **injections(
+                gpu_usage_probe=_recording_gpu_probe(phases),
+                checkpoint_writer=RecordingWriter([]),
+                preview_sampler=RecordingSampler([]),
+            ),
+        )
+        == 0
+    )
+    assert phases.count("step") == 3
+    assert phases.count("preview_end") == 1
+    assert phases[-2:] == ["teardown", "summary"]
+    step_indexes = [index for index, phase in enumerate(phases) if phase == "step"]
+    preview_index = phases.index("preview_end")
+    assert preview_index > step_indexes[-1]
+
+
+def test_write_checkpoint_probe_preview_pause_end_restore(tmp_path):
+    phases: list[str] = []
+    events: list[str] = []
+    writer = RecordingWriter(events)
+    transformer = FakeTransformer()
+    transformer.residency = "cuda"
+    sampler = CleanupRecordingSampler(events, main_transformer=transformer)
+    optimizer = SimpleNamespace(state={"p": torch.tensor(1.0)})
+    root = make_job(tmp_path)
+    runtime = {
+        "config": load_job_config(root),
+        "transformer": transformer,
+        "optimizer": optimizer,
+        "accelerator": PassthroughAccelerator(),
+        "setup": SimpleNamespace(adapter_name="default"),
+        "last_error": None,
+        "components": SimpleNamespace(),
+    }
+
+    def move_transformer(model, device):
+        model.residency = device.type
+        events.append(f"main_{device.type}")
+
+    def move_optimizer(tensor, device):
+        return tensor
+
+    assert (
+        _write_checkpoint_then_sample(
+            root,
+            JobState("job", JobStatus.RUNNING, step=1, epoch=0),
+            runtime,
+            {
+                "device": torch.device("cuda"),
+                "checkpoint_writer": writer,
+                "preview_sampler": sampler,
+                "get_lora_state": lambda _model: {"lora": torch.tensor(1.0)},
+                "training_transformer_mover": move_transformer,
+                "optimizer_tensor_mover": move_optimizer,
+                "cuda_synchronize": lambda: None,
+                "cuda_empty_cache": lambda: None,
+                "garbage_collect": lambda: None,
+                "gpu_usage_probe": _recording_gpu_probe(phases),
+            },
+        )
+        == 0
+    )
+    assert phases == ["preview_pause", "preview_end", "restore"]
 
 
 def test_raising_gpu_probe_does_not_fail_job(tmp_path):
@@ -1784,6 +1915,7 @@ def test_default_preview_sampler_uses_from_components_without_pipeline(monkeypat
     assert sampler.kwargs["target_modules"] == ["to_k"]
     assert sampler.kwargs["main_transformer"] is components.main_transformer
     assert "pipeline" not in sampler.kwargs
+    assert callable(sampler.kwargs["gpu_usage_probe"])
 
 
 def test_default_preview_sampler_falls_back_to_init_kwargs(monkeypatch):
@@ -1815,6 +1947,47 @@ def test_default_preview_sampler_falls_back_to_init_kwargs(monkeypatch):
     assert sampler.kwargs["scheduler"] == "sched"
     assert sampler.kwargs["vae"] == "vae"
     assert sampler.kwargs["prompt_embeddings"] == {"p": 1}
+    assert callable(sampler.kwargs["gpu_usage_probe"])
+
+
+def test_default_preview_sampler_binds_probe_and_accumulates_preview_peak(
+    monkeypatch,
+):
+    import zimage.training.loop as loop_module
+    from zimage.training.gpu_usage import GpuProbeContext
+
+    _install_fake_default_sampler(monkeypatch)
+    loop_module._reset_gpu_usage_job_peaks()
+    seen: list[tuple[str, int | None]] = []
+
+    def probe(phase, context=None):
+        peak = getattr(context, "phase_peak_bytes", None)
+        seen.append((phase, None if peak is None else int(peak)))
+
+    components = SimpleNamespace(
+        sampling_transformer=object(),
+        sampling_scheduler=object(),
+        vae=object(),
+        main_transformer=object(),
+    )
+    sampler = loop_module._default_preview_sampler(
+        {
+            "components": components,
+            "config": {"sampling": {}, "lora": {"targets": []}},
+        },
+        {"device": "cpu", "gpu_usage_probe": probe},
+    )
+    assert sampler is not None
+    bound = sampler.kwargs["gpu_usage_probe"]
+    bound("preview_run", GpuProbeContext(phase_peak_bytes=100))
+    bound("preview_run", GpuProbeContext(phase_peak_bytes=300))
+    bound("preview_run", GpuProbeContext(phase_peak_bytes=200))
+    assert seen == [
+        ("preview_run", 100),
+        ("preview_run", 300),
+        ("preview_run", 200),
+    ]
+    assert loop_module._GPU_USAGE_JOB_PEAKS["preview"] == 300
 
 
 def test_cli_path_builds_default_sampler_before_releasing_text(monkeypatch, tmp_path):

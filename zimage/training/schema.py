@@ -95,6 +95,7 @@ JOB_TOP_LEVEL_KEYS = frozenset(
         "mode_scale",
         "max_sequence_length",
         "sampling",
+        "gpu_usage",
     }
 )
 
@@ -117,6 +118,7 @@ SAMPLING_PARAMETER_KEYS = frozenset(
     }
 )
 SAMPLING_BLOCK_KEYS = SAMPLING_PARAMETER_KEYS | {"samples", "image_format"}
+GPU_USAGE_KEYS = frozenset({"every_step", "detailed"})
 
 
 class TrainingConfigError(ValueError):
@@ -129,6 +131,14 @@ class TrainingPaths:
 
     datasets_dir: str
     jobs_dir: str
+
+
+@dataclass(frozen=True)
+class GpuUsageSettings:
+    """Resolved GPU probe toggles. Defaults apply when YAML keys are absent."""
+
+    every_step: bool = False
+    detailed: bool = False
 
 
 @dataclass(frozen=True)
@@ -239,6 +249,46 @@ def resolve_training_paths() -> TrainingPaths:
         )
         doc = store.load_document()
     return _parse_training_paths(doc.get(TRAINING_SECTION))
+
+
+# GPU probe toggles live in root config.yaml (training.gpu_usage) and
+# job config.yaml (gpu_usage). Job keys override root. No env vars
+# (ZIMAGE_*) and no parallel config source.
+def resolve_gpu_usage_settings(job: Mapping[str, Any]) -> GpuUsageSettings:
+    """Merge root ``training.gpu_usage`` with job ``gpu_usage``.
+
+    Absent keys use ``GpuUsageSettings`` defaults. Unknown keys raise
+    ``TrainingConfigError``. This function does not write ``config.yaml``.
+    """
+    # Import lazily so ``import zimage.training`` does not execute the prefs
+    # package (which currently reaches inference helpers and Torch).
+    from zimage.prefs import store
+
+    doc = store.load_document()
+    training = doc.get(TRAINING_SECTION)
+    root_raw = training.get("gpu_usage") if isinstance(training, Mapping) else None
+    job_raw = job.get("gpu_usage") if isinstance(job, Mapping) else None
+    merged = {
+        **_parse_gpu_usage_section(root_raw, "training.gpu_usage"),
+        **_parse_gpu_usage_section(job_raw, "gpu_usage"),
+    }
+    return GpuUsageSettings(
+        every_step=merged.get("every_step", False),
+        detailed=merged.get("detailed", False),
+    )
+
+
+def _parse_gpu_usage_section(raw: Any, label: str) -> dict[str, bool]:
+    if raw is None:
+        return {}
+    data = _require_mapping(raw, label)
+    _reject_unknown(data, GPU_USAGE_KEYS, label)
+    parsed: dict[str, bool] = {}
+    if "every_step" in data:
+        parsed["every_step"] = _require_bool(data["every_step"], f"{label}.every_step")
+    if "detailed" in data:
+        parsed["detailed"] = _require_bool(data["detailed"], f"{label}.detailed")
+    return parsed
 
 
 def _parse_training_paths(section: Any) -> TrainingPaths:
@@ -456,6 +506,8 @@ def validate_job_document(raw: Any) -> dict[str, Any]:
     out["sampling"] = _validate_sampling(
         _present(data, "sampling", defaults["sampling"])
     )
+    if "gpu_usage" in data:
+        out["gpu_usage"] = _parse_gpu_usage_section(data["gpu_usage"], "gpu_usage")
     return out
 
 

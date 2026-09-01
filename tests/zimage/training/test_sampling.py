@@ -509,6 +509,7 @@ def test_from_components_builds_sampler_without_pipeline():
     assert sampler.device == "cpu"
     assert sampler.target_modules == ["to_q"]
     assert sampler.main_transformer is transformer
+    assert sampler._gpu_usage_probe is None
     signature = inspect.signature(UnfusedPreviewSampler.from_components)
     assert list(signature.parameters) == [
         "transformer",
@@ -523,7 +524,121 @@ def test_from_components_builds_sampler_without_pipeline():
         "quantizer",
         "device_mover",
         "cuda_cleanup",
+        "gpu_usage_probe",
     ]
+
+
+def test_sample_unfused_probes_preview_run_before_release(tmp_path):
+    job = tmp_path / "job"
+    (job / "checkpoints").mkdir(parents=True)
+    checkpoint = _write_adapter_checkpoint(job, step=1, sign=1.0)
+    transformer = TinyTransformer().to(dtype=torch.bfloat16)
+    pipeline = RecordingPipeline(transformer)
+    events: list[str] = []
+    pipeline.events = events
+    contexts: list[object] = []
+
+    def probe(phase, context=None):
+        events.append(f"probe:{phase}")
+        contexts.append(context)
+
+    sampler = UnfusedPreviewSampler(
+        transformer=transformer,
+        pipeline=pipeline,
+        prompt_embeddings=_embeddings(),
+        common_parameters={"prompt": "a cat", "width": 16, "height": 16},
+        gpu_usage_probe=probe,
+    )
+    original_release = sampler.release_after_preview
+
+    def tracking_release():
+        events.append("release_after_preview")
+        original_release()
+
+    sampler.release_after_preview = tracking_release  # type: ignore[method-assign]
+    path = sampler.sample_unfused(
+        checkpoint=checkpoint,
+        parameters={"prompt": "a cat"},
+        destination=tmp_path / "preview.png",
+    )
+    assert path.is_file()
+    assert "probe:preview_run" in events
+    assert "release_after_preview" in events
+    assert events.index("forward") < events.index("probe:preview_run")
+    assert events.index("probe:preview_run") < events.index("release_after_preview")
+    assert contexts
+    assert getattr(contexts[0], "phase_peak_bytes", None) is not None
+
+
+def test_preview_run_probe_error_does_not_fail_sample(tmp_path):
+    job = tmp_path / "job"
+    (job / "checkpoints").mkdir(parents=True)
+    checkpoint = _write_adapter_checkpoint(job, step=1, sign=1.0)
+    transformer = TinyTransformer().to(dtype=torch.bfloat16)
+    pipeline = RecordingPipeline(transformer)
+    released = {"n": 0}
+
+    def boom(phase, context=None):
+        raise RuntimeError("probe failed")
+
+    sampler = UnfusedPreviewSampler(
+        transformer=transformer,
+        pipeline=pipeline,
+        prompt_embeddings=_embeddings(),
+        common_parameters={"prompt": "a cat", "width": 16, "height": 16},
+        gpu_usage_probe=boom,
+    )
+    original_release = sampler.release_after_preview
+
+    def tracking_release():
+        released["n"] += 1
+        original_release()
+
+    sampler.release_after_preview = tracking_release  # type: ignore[method-assign]
+    path = sampler.sample_unfused(
+        checkpoint=checkpoint,
+        parameters={"prompt": "a cat"},
+        destination=tmp_path / "preview.png",
+    )
+    assert path.is_file()
+    assert released["n"] == 1
+
+
+def test_failed_pipeline_still_probes_then_releases(tmp_path):
+    job = tmp_path / "job"
+    (job / "checkpoints").mkdir(parents=True)
+    checkpoint = _write_adapter_checkpoint(job, step=1, sign=1.0)
+    transformer = TinyTransformer().to(dtype=torch.bfloat16)
+    pipeline = RecordingPipeline(transformer)
+    pipeline.fail = True
+    events: list[str] = []
+    pipeline.events = events
+
+    def probe(phase, context=None):
+        events.append(f"probe:{phase}")
+
+    sampler = UnfusedPreviewSampler(
+        transformer=transformer,
+        pipeline=pipeline,
+        prompt_embeddings=_embeddings(),
+        common_parameters={"prompt": "a cat", "width": 16, "height": 16},
+        gpu_usage_probe=probe,
+    )
+    original_release = sampler.release_after_preview
+
+    def tracking_release():
+        events.append("release_after_preview")
+        original_release()
+
+    sampler.release_after_preview = tracking_release  # type: ignore[method-assign]
+    with pytest.raises(PreviewSamplingError, match="forced sampling failure"):
+        sampler.sample_unfused(
+            checkpoint=checkpoint,
+            parameters={"prompt": "a cat"},
+            destination=tmp_path / "broken.png",
+        )
+    assert events.index("forward") < events.index("probe:preview_run")
+    assert events.index("probe:preview_run") < events.index("release_after_preview")
 
 
 def test_preview_time_shift_installs_flow_match_scheduler(tmp_path):

@@ -498,3 +498,48 @@ def test_on_before_encode_runs_once_on_stale_and_never_on_valid(tmp_path):
     )
     assert events == []
     assert encoder.image_calls == 1
+
+
+def test_on_after_first_encode_runs_once_after_first_stale_encode(tmp_path):
+    valid_sample = _sample(tmp_path, "valid.png")
+    stale_sample = _sample(tmp_path, "stale.png")
+    cache_dir = tmp_path / "cache"
+    prepare_cache_at_job_start(
+        [valid_sample],
+        FakeEncoder(),
+        _config(),
+        cache_dir=cache_dir,
+    )
+
+    events: list[str] = []
+
+    class TrackingEncoder(FakeEncoder):
+        def encode_image(self, image):
+            events.append("encode")
+            return super().encode_image(image)
+
+    encoder = TrackingEncoder()
+
+    def on_after_first_encode() -> None:
+        events.append("after")
+
+    prepare_cache_at_job_start(
+        [valid_sample, stale_sample],
+        encoder,
+        _config(),
+        cache_dir=cache_dir,
+        on_after_first_encode=on_after_first_encode,
+    )
+    assert events == ["encode", "after"]
+    assert encoder.image_calls == 1
+
+    events.clear()
+    prepare_cache_at_job_start(
+        [valid_sample, stale_sample],
+        encoder,
+        _config(),
+        cache_dir=cache_dir,
+        on_after_first_encode=on_after_first_encode,
+    )
+    assert events == []
+    assert encoder.image_calls == 1

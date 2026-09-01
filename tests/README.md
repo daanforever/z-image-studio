@@ -14,6 +14,8 @@ Shared pytest fixtures stay in the root `conftest.py`. Binary and YAML fixtures 
 tests/
   conftest.py                 shared fixtures (config isolation, tiny LoRA, pipeline reset)
   test_app.py                 root app.py
+  simulation.py               production-parity GPU-usage runner (not pytest)
+  simulation/config.yaml      simulation job spec (max_steps 100)
   fixtures/                   LoRA safetensors, job YAML, builders
   zimage/
     test_config.py            zimage/config.py
@@ -32,6 +34,7 @@ tests/
 | Prefs | `tests/zimage/prefs/` | `zimage/prefs/` |
 | UI | `tests/zimage/ui/` | `zimage/ui/` |
 | Training | `tests/zimage/training/` | `zimage/training/` |
+| Simulation runner | `tests/simulation.py` | `JobController.run` / `train.py run` |
 | Fixtures | `tests/fixtures/` | not production code |
 
 `__init__.py` markers exist under `tests/` and each nested domain so pytest can collect two `test_schema.py` files (prefs vs training) without module-name collisions. They do not change production imports.
@@ -39,6 +42,8 @@ tests/
 ## Root `training` section (schema contract)
 
 First use bootstraps the root `config.yaml` `training` section atomically (`datasets_dir`, `jobs_dir`) when that section is **absent**. If `training` already exists but is incomplete or invalid, resolve **errors** — defaults are not applied as a silent read-time fallback. That is the intended product decision; it overrides older plan language that implied a merge-on-read.
+
+GPU probe toggles (`every_step`, `detailed`) are YAML-only: root `training.gpu_usage` plus optional job `gpu_usage` (job keys override). Absent keys default to `false`. There is no env SSOT (`ZIMAGE_*`) and bootstrap does not write `gpu_usage`.
 
 ## Test tiers and truth claims
 
@@ -91,6 +96,20 @@ D:\Projects\Python312\python.exe -m pytest tests/zimage/training/test_capabiliti
 D:\Projects\Python312\python.exe -m pytest tests/zimage/training/test_e2e.py -q --tb=line
 ```
 
+### GPU-usage contract (mocked)
+
+```bat
+D:\Projects\Python312\python.exe -m pytest tests/zimage/training/test_gpu_usage.py tests/zimage/training/test_loop.py tests/zimage/training/test_schema.py tests/zimage/training/test_simulation.py -q --tb=line
+```
+
+### Simulation runner (not pytest)
+
+Zero arguments. Same entry as `train.py run`. CUDA required. See [Simulation](#simulation-production-parity-gpu-usage-run).
+
+```bat
+D:\Projects\Python312\python.exe tests/simulation.py
+```
+
 ### Individual real GPU tests
 
 Tiny CUDA, no production weights:
@@ -119,6 +138,46 @@ set ZIMAGE_REAL_MAIN_MODEL=E:\path\to\Z-Image\snapshot
 set ZIMAGE_REAL_SAMPLING_MODEL=E:\path\to\Z-Image-Turbo\snapshot
 D:\Projects\Python312\python.exe -m pytest tests/zimage/training/test_e2e.py::test_real_blackwell_fp8_warm_start_turbo_preview_smoke -q --tb=line
 ```
+
+## Simulation (production-parity GPU-usage run)
+
+`tests/simulation.py` is not a pytest module (filename does not match `test_*.py` / `*_test.py`) and is not collected. The primary command is zero-arg:
+
+```bat
+python tests/simulation.py
+```
+
+That load path:
+
+1. Reads `tests/simulation/config.yaml` (`max_steps: 100`, `checkpoint_every: 100`; no live `gpu_usage` key).
+2. Opens/creates the job under root `training.jobs_dir` (not a tempfile). Re-runs overwrite that job's `config.yaml`.
+3. Calls `JobController.run` — the same subprocess entry as `train.py run` (`job_log_session` + GPU lease).
+4. Keeps a warm dataset `.cache/` (no pre-run wipe).
+5. Prints an aggregate of **this run's** `{job_dir}/logs/job.log` gpu-usage lines: max `phase_peak` by phase, max `nvidia_used`, teardown `summary` line, path to `job.log`.
+
+Probe settings are YAML-only. There is no env SSOT (`ZIMAGE_*`) and no `--compare-log`. `run_job` merges root `training.gpu_usage` with job `gpu_usage` (job keys win). The simulation YAML documents the keys in comments; omitted keys stay `false`:
+
+| Key | Default | Effect |
+|---|---|---|
+| `every_step` | `false` | `step` probes at 1, 2, and checkpoint steps. `true`: every optimizer step. |
+| `detailed` | `false` | Compact one-line snapshots. `true`: nbytes buckets + leftover tensor groups. |
+
+Default `max_steps: 100` / `checkpoint_every: 100` therefore logs `step` at 1, 2, 100, a `preview_run` at 100, and a teardown `summary`. Warm cache omits `cache_encode_peak`.
+
+Cross-run comparison is manual: read two `{jobs_dir}/{job_id}/logs/job.log` files. The runner does not parse a reference log or compute a diff.
+
+Optional flags (omit for production parity):
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--config` | `tests/simulation/config.yaml` | Job spec |
+| `--mode` | `subprocess` | `in-process` is direct `run_job` (dev; metrics may differ) |
+| `--job-dir` | configured `jobs_dir` | Do not use a tempfile for parity |
+| `--cold-cache` | off | Opt-in wipe of dataset `.cache/` |
+| `--max-steps` | YAML value | Quick smoke override |
+| `--datasets-dir` | root `training.datasets_dir` | Same resolution as production |
+
+CUDA missing → exit 1. nvidia-smi missing → zeros; the job continues.
 
 ## Environment variables and local snapshots
 

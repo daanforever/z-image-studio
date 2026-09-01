@@ -758,6 +758,11 @@ def _optimize(
                 finally:
                     del sample, result
 
+            collect = injected.get("garbage_collect", gc.collect)
+            empty_cache = injected.get("cuda_empty_cache", torch.cuda.empty_cache)
+            collect()
+            empty_cache()
+
             step += 1
             sample_index += 1
             if sample_index >= len(cache_paths):

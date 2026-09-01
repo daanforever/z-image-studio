@@ -1891,6 +1891,26 @@ def test_warm_cache_does_not_reclaim_cuda_cache(tmp_path):
     assert calls == {"gc": 0, "empty_cache": 0}
 
 
+def test_warm_run_reclaims_cuda_cache_per_step(tmp_path):
+    root = make_job(tmp_path)
+    assert cache_job(root, **injections()) == 0
+    calls = {"gc": 0, "empty_cache": 0}
+
+    assert (
+        run_job(
+            root,
+            **injections(
+                garbage_collect=lambda: calls.__setitem__("gc", calls["gc"] + 1),
+                cuda_empty_cache=lambda: calls.__setitem__(
+                    "empty_cache", calls["empty_cache"] + 1
+                ),
+            ),
+        )
+        == 0
+    )
+    assert calls == {"gc": 2, "empty_cache": 2}
+
+
 def test_cache_job_park_failure_does_not_mask_encode_error(tmp_path, monkeypatch):
     import zimage.training.loop as loop_module
 

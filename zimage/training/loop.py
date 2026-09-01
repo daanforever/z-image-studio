@@ -523,6 +523,8 @@ def _build_runtime(
     samples = _discover(job, injected)
     if not samples:
         raise DatasetError("job has no training samples")
+    if not injected.get("optimizer_factory"):
+        _optimizer_factory(str(job["optimizer"]["name"]))
     components, lifecycle = _load_lifecycle(job, injected)
     _probe_gpu_usage(
         injected, "load", context=GpuProbeContext(components=components)
@@ -1026,6 +1028,10 @@ def _move_optimizer_state_tensors(
     """Recursively migrate optimizer-state tensor values without rebuilding it."""
 
     injected = injected or {}
+    move_to = getattr(optimizer, "to", None)
+    if "optimizer_tensor_mover" not in injected and callable(move_to):
+        move_to(device)
+        return
     move_tensor = injected.get("optimizer_tensor_mover", _move_tensor_to_device)
     state = optimizer.state
     for key, value in list(state.items()):
@@ -1224,7 +1230,10 @@ def _apply_hot_runtime(
         else:
             return
     config = runtime["config"]
-    if any(field.startswith("optimizer") for field in changed):
+    if any(
+        field in {"optimizer.learning_rate", "optimizer.weight_decay"}
+        for field in changed
+    ):
         optimizer = runtime["optimizer"]
         learning_rate = float(config["optimizer"]["learning_rate"])
         weight_decay = float(config["optimizer"]["weight_decay"])
@@ -1682,12 +1691,40 @@ def _lora_state(
     return get_peft_model_state_dict(transformer, adapter_name=adapter_name)
 
 
+def _normalize_optimizer_name(name: str) -> str:
+    return "".join(ch for ch in name.strip().casefold() if ch not in "-_")
+
+
+def _optimizer_factory(name: str) -> Any:
+    key = _normalize_optimizer_name(name)
+    if key == "adamw":
+        return torch.optim.AdamW
+    if key == "adamw8bit":
+        try:
+            module = importlib.import_module("bitsandbytes.optim")
+        except ImportError as exc:
+            raise RuntimeError(
+                "optimizer adamw8bit requires bitsandbytes. "
+                "Install it with: pip install bitsandbytes"
+            ) from exc
+        factory = getattr(module, "AdamW8bit", None)
+        if factory is None:
+            raise RuntimeError("bitsandbytes.optim.AdamW8bit is unavailable")
+        return factory
+    raise RuntimeError(
+        f"unknown optimizer.name {name!r}; known aliases: adamw, adamw8bit "
+        "(adamw-8bit)"
+    )
+
+
 def _make_optimizer(
     transformer: Any,
     job: Mapping[str, Any],
     injected: Mapping[str, Any],
 ) -> torch.optim.Optimizer:
-    factory = injected.get("optimizer_factory", torch.optim.AdamW)
+    factory = injected.get("optimizer_factory") or _optimizer_factory(
+        str(job["optimizer"]["name"])
+    )
     params = [param for param in transformer.parameters() if param.requires_grad]
     if not params:
         raise RuntimeError("main transformer has no trainable LoRA parameters")

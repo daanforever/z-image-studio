@@ -27,7 +27,6 @@ TRAINING_PRECISION_CHOICES = frozenset({"fp8", "bf16"})
 WEIGHTING_SCHEME_CHOICES = frozenset(
     {"none", "sigma_sqrt", "logit_normal", "mode", "cosmap"}
 )
-OPTIMIZER_NAME_CHOICES = frozenset({"adamw"})
 SCHEDULER_NAME_CHOICES = frozenset({"constant"})
 
 # No job YAML fields are locked; cache identity lives in IMMUTABLE_CACHE_FIELDS.
@@ -65,6 +64,7 @@ REBUILD_REQUIRED_JOB_FIELDS: frozenset[str] = frozenset(
         "gradient_checkpointing",
         "lora",
         "max_sequence_length",
+        "optimizer.name",
     }
 )
 
@@ -677,9 +677,7 @@ def _validate_optimizer(raw: Any) -> dict[str, Any]:
     if weight_decay < 0:
         raise TrainingConfigError("optimizer.weight_decay must be >= 0")
     return {
-        "name": _require_choice(
-            merged["name"], OPTIMIZER_NAME_CHOICES, "optimizer.name"
-        ),
+        "name": _require_nonempty_str(merged["name"], "optimizer.name"),
         "learning_rate": learning_rate,
         "weight_decay": weight_decay,
     }

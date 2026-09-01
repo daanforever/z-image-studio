@@ -253,6 +253,7 @@ python train.py status <job_id>
 
 - **Base trains, Turbo samples.** `Tongyi-MAI/Z-Image-Turbo` cannot be `model.main_transformer`. Omit `model.sampling_transformer` to sample from the same Base weights; set it to Turbo for distilled previews.
 - **FP8 training** uses TorchAO `convert_to_float8_training` on the main transformer (not inference `apply_quantization`). If the GPU is not FP8-capable (needs Ada 8.9+ / Blackwell), the run falls back to **BF16**.
+- **Optimizer.** `optimizer.name` is a free string. Production aliases: `adamw` (default) and `adamw8bit` (`adamw-8bit`). 8-bit uses bitsandbytes. Validate does not check that the name is implemented; unknown names fail at run.
 - **Warm start** loads the latest complete LoRA checkpoint and builds a **new** optimizer. Checkpoints do not store optimizer state. There is no `init_adapter` field.
 - **Immediate Stop** does not write a checkpoint.
 - **GPU lease.** Generate (inference) and training (`cache` and `run`) cannot own the GPU at the same time. Start training after Generate is idle (or stop Generate first).

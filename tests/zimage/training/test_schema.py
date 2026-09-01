@@ -456,6 +456,14 @@ def test_job_update_classification():
     assert classification is UpdateClassification.APPLY_AT_STEP
     assert changed == ("optimizer.learning_rate",)
 
+    rebuild_name = job_create_template()
+    rebuild_name["optimizer"]["name"] = "adamw8bit"
+    classification, changed = classify_job_update(current, rebuild_name)
+    assert classification is UpdateClassification.REBUILD_REQUIRED
+    assert changed == ("optimizer.name",)
+    assert "optimizer.name" in REBUILD_REQUIRED_JOB_FIELDS
+    assert "optimizer" not in REBUILD_REQUIRED_JOB_FIELDS
+
     rebuild = job_create_template()
     rebuild["max_sequence_length"] = 256
     classification, changed = classify_job_update(current, rebuild)
@@ -567,6 +575,24 @@ def test_template_calls_return_independent_documents():
     first["sampling"]["samples"][0]["prompt"] = "changed"
     assert second["lora"]["targets"] == ["to_k", "to_q", "to_v", "to_out.0"]
     assert second["sampling"]["samples"] == [{"prompt": "a photo of a dog"}]
+
+
+@pytest.mark.parametrize("name", ["adamw", "adamw8bit", "adamw-8bit", "lion"])
+def test_optimizer_name_accepts_any_nonempty_string(name):
+    job = job_create_template()
+    job["optimizer"]["name"] = name
+    parsed = validate_job_document(job)
+    assert parsed["optimizer"]["name"] == name
+
+
+def test_optimizer_name_rejects_empty_and_non_string():
+    job = job_create_template()
+    job["optimizer"]["name"] = ""
+    with pytest.raises(TrainingConfigError, match="optimizer.name"):
+        validate_job_document(job)
+    job["optimizer"]["name"] = 1
+    with pytest.raises(TrainingConfigError, match="optimizer.name"):
+        validate_job_document(job)
 
 
 @pytest.mark.parametrize(

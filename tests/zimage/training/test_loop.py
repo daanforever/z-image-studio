@@ -30,7 +30,9 @@ from zimage.training.jobs import (
 from zimage.training.checkpoints import NativeLoraCheckpointWriter
 from zimage.training.loop import (
     _construct_accelerator,
+    _make_optimizer,
     _move_optimizer_state_tensors,
+    _optimizer_factory,
     _resolve_training_device,
     _validate_prepared_training_runtime,
     _write_checkpoint_then_sample,
@@ -1333,6 +1335,119 @@ def test_nested_optimizer_state_tensor_movement():
     assert nested["containers"][0].item() == 12.0
     assert nested["containers"][1][0].item() == 13.0
     assert nested["containers"][1][1] == "unchanged"
+
+
+def test_optimizer_to_is_used_when_present_and_mover_not_injected():
+    moved: list[str] = []
+
+    class MovingOptimizer:
+        def __init__(self) -> None:
+            self.state = {"p": torch.tensor(1.0)}
+
+        def to(self, device):
+            moved.append(device.type)
+
+    optimizer = MovingOptimizer()
+    _move_optimizer_state_tensors(optimizer, torch.device("cpu"))
+    assert moved == ["cpu"]
+    assert optimizer.state["p"].item() == 1.0
+
+
+def test_injected_optimizer_tensor_mover_wins_over_to():
+    walked: list[str] = []
+
+    class MovingOptimizer:
+        def __init__(self) -> None:
+            self.state = {"p": torch.tensor(1.0)}
+            self.to_calls: list[str] = []
+
+        def to(self, device):
+            self.to_calls.append(device.type)
+
+    def move_tensor(tensor, device):
+        walked.append(device.type)
+        return tensor
+
+    optimizer = MovingOptimizer()
+    _move_optimizer_state_tensors(
+        optimizer,
+        torch.device("cpu"),
+        {"optimizer_tensor_mover": move_tensor},
+    )
+    assert optimizer.to_calls == []
+    assert walked == ["cpu"]
+
+
+def _optimizer_job(**overrides):
+    payload = {"name": "adamw", "learning_rate": 1.0e-3, "weight_decay": 1.0e-2}
+    payload.update(overrides)
+    return {"optimizer": payload}
+
+
+def test_make_optimizer_adamw_without_injected_factory():
+    optimizer = _make_optimizer(FakeTransformer(), _optimizer_job(), {})
+    assert isinstance(optimizer, torch.optim.AdamW)
+
+
+@pytest.mark.parametrize("name", ["adamw8bit", "adamw-8bit", "adamw_8bit"])
+def test_optimizer_factory_adamw8bit_aliases(monkeypatch, name):
+    class FakeAdamW8bit:
+        pass
+
+    def import_module(module_name):
+        assert module_name == "bitsandbytes.optim"
+        return SimpleNamespace(AdamW8bit=FakeAdamW8bit)
+
+    monkeypatch.setattr("zimage.training.loop.importlib.import_module", import_module)
+    assert _optimizer_factory(name) is FakeAdamW8bit
+
+
+def test_make_optimizer_adamw8bit(monkeypatch):
+    class FakeAdamW8bit:
+        def __init__(self, params, *, lr, weight_decay):
+            self.param_groups = [{"lr": lr, "weight_decay": weight_decay}]
+            self.state = {}
+
+    monkeypatch.setattr(
+        "zimage.training.loop.importlib.import_module",
+        lambda module_name: SimpleNamespace(AdamW8bit=FakeAdamW8bit),
+    )
+    optimizer = _make_optimizer(
+        FakeTransformer(), _optimizer_job(name="adamw8bit"), {}
+    )
+    assert isinstance(optimizer, FakeAdamW8bit)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1.0e-3)
+
+
+def test_optimizer_factory_unknown_name_raises():
+    with pytest.raises(RuntimeError, match="unknown optimizer.name 'lion'"):
+        _optimizer_factory("lion")
+
+
+def test_optimizer_factory_missing_bitsandbytes(monkeypatch):
+    def import_module(module_name):
+        raise ImportError("missing")
+
+    monkeypatch.setattr("zimage.training.loop.importlib.import_module", import_module)
+    with pytest.raises(RuntimeError, match="requires bitsandbytes"):
+        _optimizer_factory("adamw8bit")
+    assert _optimizer_factory("adamw") is torch.optim.AdamW
+
+
+def test_injected_optimizer_factory_overrides_name():
+    created: list[str] = []
+
+    def factory(params, **kwargs):
+        created.append("injected")
+        return torch.optim.SGD(params, lr=kwargs["lr"])
+
+    optimizer = _make_optimizer(
+        FakeTransformer(),
+        _optimizer_job(name="adamw8bit"),
+        {"optimizer_factory": factory},
+    )
+    assert created == ["injected"]
+    assert isinstance(optimizer, torch.optim.SGD)
 
 
 def test_cpu_preview_path_does_not_invoke_cuda_handoff(tmp_path):

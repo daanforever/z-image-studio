@@ -18,6 +18,7 @@ from zimage.training.gpu_usage import (
     NBYTES_BUCKETS,
     PeakMemoryScope,
     TOP_LEFTOVER_GROUPS,
+    _allocator_stats,
     _default_gpu_usage_probe,
     _nvidia_memory,
     _parse_nvidia_smi_memory,
@@ -37,7 +38,9 @@ from zimage.training.modeling import (
 from zimage.training.schema import CACHE_PROMPT_EMBED_HIDDEN_SIZE, GpuUsageSettings
 
 
-def _fake_cuda(*, available: bool, allocated=0, reserved=0, peak=0, calls=None):
+def _fake_cuda(
+    *, available: bool, allocated=0, reserved=0, peak=0, calls=None, memory_stats=None
+):
     tracked = calls if calls is not None else []
 
     def synchronize():
@@ -58,7 +61,7 @@ def _fake_cuda(*, available: bool, allocated=0, reserved=0, peak=0, calls=None):
         tracked.append("peak")
         return peak
 
-    return SimpleNamespace(
+    cuda = SimpleNamespace(
         is_available=lambda: available,
         synchronize=synchronize,
         reset_peak_memory_stats=reset_peak_memory_stats,
@@ -66,6 +69,11 @@ def _fake_cuda(*, available: bool, allocated=0, reserved=0, peak=0, calls=None):
         memory_reserved=memory_reserved,
         max_memory_allocated=max_memory_allocated,
     )
+    if callable(memory_stats):
+        cuda.memory_stats = memory_stats
+    elif memory_stats is not None:
+        cuda.memory_stats = lambda: memory_stats
+    return cuda
 
 
 def _components(
@@ -559,6 +567,72 @@ def test_format_gpu_usage_detailed_includes_nbytes_and_leftover():
     )
 
 
+def test_format_gpu_usage_detailed_inserts_allocator_before_leftover():
+    snap = GpuUsageSnapshot(
+        phase="step",
+        cuda_available=True,
+        allocated_bytes=1024,
+        reserved_bytes=2048,
+        peak_allocated_bytes=4096,
+        module_devices=_devices(),
+    )
+    nbytes = {key: 0 for key in NBYTES_BUCKETS}
+    leftover = [
+        {"shape": [2, 2], "dtype": "torch.float32", "count": 1, "nbytes": 16}
+    ]
+    stats = {
+        "allocated": 1024,
+        "active": 2048,
+        "inactive_split": 4096,
+        "reserved": 8192,
+        "retries": 1,
+        "ooms": 2,
+    }
+    lines = format_gpu_usage_detailed(
+        snap, nbytes, leftover, leftover_nbytes=16, allocator_stats=stats
+    ).splitlines()
+    assert lines[2] == (
+        "gpu usage   allocator allocated=1.0KB active=2.0KB "
+        "inactive_split=4.0KB reserved=8.0KB retries=1 ooms=2"
+    )
+    assert lines[3].startswith("gpu usage   leftover ")
+
+
+def test_allocator_stats_maps_memory_stats_keys():
+    fake = SimpleNamespace(
+        cuda=_fake_cuda(available=True, memory_stats={
+            "allocated_bytes.all.current": 10,
+            "active_bytes.all.current": 20,
+            "inactive_split_bytes.all.current": 30,
+            "reserved_bytes.all.current": 40,
+            "num_alloc_retries": 5,
+            "num_ooms": 6,
+        })
+    )
+    assert _allocator_stats(fake) == {
+        "allocated": 10,
+        "active": 20,
+        "inactive_split": 30,
+        "reserved": 40,
+        "retries": 5,
+        "ooms": 6,
+    }
+
+
+def test_allocator_stats_missing_or_raising_returns_none():
+    assert _allocator_stats(SimpleNamespace(cuda=_fake_cuda(available=False))) is None
+    assert _allocator_stats(
+        SimpleNamespace(cuda=_fake_cuda(available=True))
+    ) is None
+
+    def boom():
+        raise RuntimeError("stats failed")
+
+    assert _allocator_stats(
+        SimpleNamespace(cuda=_fake_cuda(available=True, memory_stats=boom))
+    ) is None
+
+
 def test_compact_probe_logs_single_line_without_buckets():
     lines: list[str] = []
     fake = SimpleNamespace(cuda=_fake_cuda(available=False))
@@ -567,6 +641,7 @@ def test_compact_probe_logs_single_line_without_buckets():
     )
     assert len(lines) == 1
     assert lines[0].startswith("gpu usage phase=train_placed")
+    assert not any(line.startswith("gpu usage   allocator ") for line in lines)
     assert "leftover" not in lines[0]
     assert "preview_embed_maps" not in lines[0]
     assert "main_transformer=" not in lines[0]
@@ -583,6 +658,29 @@ def test_detailed_probe_logs_nbytes_and_leftover_lines():
     assert "preview_embed_maps=" in lines[1]
     assert "leftover=" in lines[1]
     assert "main_transformer=" in lines[1]
+    assert not any(line.startswith("gpu usage   allocator ") for line in lines)
+
+
+def test_detailed_probe_logs_allocator_when_memory_stats_present():
+    lines: list[str] = []
+    fake = SimpleNamespace(
+        cuda=_fake_cuda(
+            available=True,
+            memory_stats={
+                "allocated_bytes.all.current": 1024,
+                "inactive_split_bytes.all.current": 2048,
+            },
+        )
+    )
+    DetailedGpuUsageProbe(torch_module=fake, logger=_capture_logger(lines))(
+        "step", _components()
+    )
+    allocator = [line for line in lines if line.startswith("gpu usage   allocator ")]
+    assert len(allocator) == 1
+    assert "allocated=1.0KB" in allocator[0]
+    assert "inactive_split=2.0KB" in allocator[0]
+    assert "retries=0" in allocator[0]
+    assert "ooms=0" in allocator[0]
 
 
 def test_default_gpu_usage_probe_factory_compact_vs_detailed():

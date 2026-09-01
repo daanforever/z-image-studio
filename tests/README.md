@@ -43,7 +43,7 @@ tests/
 
 First use bootstraps the root `config.yaml` `training` section atomically (`datasets_dir`, `jobs_dir`) when that section is **absent**. If `training` already exists but is incomplete or invalid, resolve **errors** — defaults are not applied as a silent read-time fallback. That is the intended product decision; it overrides older plan language that implied a merge-on-read.
 
-Debug toggle (`detailed`) is YAML-only: root `training.debug` plus optional job `debug` (job keys override). Absent keys default to `false`. There is no env SSOT (`ZIMAGE_*`) and bootstrap does not write `debug`. `phase=step` is logged after every optimizer step. With `detailed: true`, each probe also logs named CUDA nbytes buckets and leftover tensor groups.
+Debug toggle (`detailed`) is YAML-only: root `training.debug` plus optional job `debug` (job keys override). Absent keys default to `false`. There is no env SSOT (`ZIMAGE_*`) and bootstrap does not write `debug`. `phase=step` / `cache_encode` are logged after `gc.collect` and before `empty_cache`. With `detailed: true`, each probe also logs named CUDA nbytes buckets, leftover tensor groups, and a caching-allocator line (`inactive_split` is fragmentation). Leftover groups are not expected to sum to `nvidia_used`.
 
 ## Test tiers and truth claims
 
@@ -159,7 +159,7 @@ Probe settings are YAML-only. There is no env SSOT (`ZIMAGE_*`) and no `--compar
 
 | Key | Default | Effect |
 |---|---|---|
-| `detailed` | `false` | Compact one-line snapshots. `true`: nbytes buckets + leftover tensor groups. |
+| `detailed` | `false` | Compact one-line snapshots. `true`: nbytes buckets + leftover groups + allocator (`inactive_split`). |
 
 Default `max_steps: 100` / `checkpoint_every: 100` therefore logs `step` at every optimizer step (100 lines), a `preview_run` at 100, and a teardown `summary`. Warm cache omits `cache_encode_peak`.
 

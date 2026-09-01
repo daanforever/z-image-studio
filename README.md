@@ -141,10 +141,10 @@ training:
   # optional; omitted keys default to false. Job YAML `debug` overrides these.
   # YAML-only — no ZIMAGE_* / env SSOT.
   debug:
-    detailed: false  # compact log line; true = nbytes buckets + leftover groups
+    detailed: false  # compact; true = buckets + leftover + allocator stats
 ```
 
-The first training call (CLI or Training tab) writes `datasets_dir` / `jobs_dir` atomically if the `training` section is missing — it does not write `debug`. If `training` is present but `datasets_dir` / `jobs_dir` are missing, empty, or not strings, training fails — those defaults are not applied as a silent read-time fallback. Debug toggles are YAML-only (root `training.debug`, job `debug`); there are no environment variables for them. Compact `gpu usage ...` lines go to `logs/job.log` (`phase=step` after every optimizer step). With `debug.detailed: true`, each probe also logs named CUDA nbytes buckets and leftover tensor groups. Compare runs by reading those logs — there is no log-diff tool.
+The first training call (CLI or Training tab) writes `datasets_dir` / `jobs_dir` atomically if the `training` section is missing — it does not write `debug`. If `training` is present but `datasets_dir` / `jobs_dir` are missing, empty, or not strings, training fails — those defaults are not applied as a silent read-time fallback. Debug toggles are YAML-only (root `training.debug`, job `debug`); there are no environment variables for them. Compact `gpu usage ...` lines go to `logs/job.log` (`phase=step` / `cache_encode` after `gc.collect` and before `empty_cache`). With `debug.detailed: true`, each probe also logs named CUDA nbytes buckets, leftover tensor groups, and a caching-allocator line (`inactive_split` is fragmentation). Leftover groups are live Python tensors and are not expected to sum to `nvidia_used`; use `reserved − allocated` and `inactive_split`. Compare runs by reading those logs — there is no log-diff tool.
 
 `datasets/` and `jobs/` are gitignored (`.gitkeep` only).
 

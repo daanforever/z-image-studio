@@ -1911,6 +1911,54 @@ def test_warm_run_reclaims_cuda_cache_per_step(tmp_path):
     assert calls == {"gc": 2, "empty_cache": 2}
 
 
+def test_step_probe_after_collect_before_empty_cache(tmp_path):
+    root = make_job(tmp_path, max_steps=1)
+    assert cache_job(root, **injections()) == 0
+    events: list[str] = []
+
+    def probe(phase, context=None):
+        events.append(f"probe:{phase}")
+
+    assert (
+        run_job(
+            root,
+            **injections(
+                garbage_collect=lambda: events.append("gc"),
+                cuda_empty_cache=lambda: events.append("empty_cache"),
+                gpu_usage_probe=probe,
+            ),
+        )
+        == 0
+    )
+    step_at = events.index("probe:step")
+    assert events[step_at - 1 : step_at + 2] == ["gc", "probe:step", "empty_cache"]
+
+
+def test_cache_encode_probe_after_collect_before_empty_cache(tmp_path):
+    events: list[str] = []
+
+    def probe(phase, context=None):
+        events.append(f"probe:{phase}")
+
+    assert (
+        cache_job(
+            make_job(tmp_path),
+            **injections(
+                garbage_collect=lambda: events.append("gc"),
+                cuda_empty_cache=lambda: events.append("empty_cache"),
+                gpu_usage_probe=probe,
+            ),
+        )
+        == 0
+    )
+    encode_at = events.index("probe:cache_encode")
+    assert events[encode_at - 1 : encode_at + 2] == [
+        "gc",
+        "probe:cache_encode",
+        "empty_cache",
+    ]
+
+
 def test_cache_job_park_failure_does_not_mask_encode_error(tmp_path, monkeypatch):
     import zimage.training.loop as loop_module
 

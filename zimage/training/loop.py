@@ -431,10 +431,6 @@ def _prepare_cache(
             encode_scope.__exit__(None, None, None)
             peak_bytes = encode_scope.peak_bytes
             encode_scope = None
-        collect = injected.get("garbage_collect", gc.collect)
-        empty_cache = injected.get("cuda_empty_cache", torch.cuda.empty_cache)
-        collect()
-        empty_cache()
         width, height = image_size
         log.info(
             "cache encode n=%s samples=%s path=%s size=%sx%s",
@@ -444,7 +440,7 @@ def _prepare_cache(
             width,
             height,
         )
-        _probe_gpu_usage(
+        _collect_probe_empty(
             injected,
             "cache_encode",
             context=GpuProbeContext(
@@ -747,18 +743,13 @@ def _optimize(
                 finally:
                     del sample, result
 
-            collect = injected.get("garbage_collect", gc.collect)
-            empty_cache = injected.get("cuda_empty_cache", torch.cuda.empty_cache)
-            collect()
-            empty_cache()
-
             step += 1
             sample_index += 1
             if sample_index >= len(cache_paths):
                 sample_index = 0
                 epoch += 1
 
-            _probe_gpu_usage(
+            _collect_probe_empty(
                 injected,
                 "step",
                 context=_gpu_probe_context_from_runtime(
@@ -986,8 +977,7 @@ def _pause_training_runtime(
     move_transformer = injected.get(
         "training_transformer_mover", _move_transformer_to_device
     )
-    collect = injected.get("garbage_collect", gc.collect)
-    empty_cache = injected.get("cuda_empty_cache", torch.cuda.empty_cache)
+    collect, empty_cache = _injected_gc_empty(injected)
     synchronize()
     move_transformer(transformer, torch.device("cpu"))
     _move_optimizer_state_tensors(optimizer, torch.device("cpu"), injected)
@@ -2034,6 +2024,25 @@ def _probe_gpu_usage_summary(
     except Exception:
         pass
     _probe_gpu_usage(injected, "summary", context=context)
+
+
+def _injected_gc_empty(injected: Mapping[str, Any]) -> tuple[Any, Any]:
+    return (
+        injected.get("garbage_collect", gc.collect),
+        injected.get("cuda_empty_cache", torch.cuda.empty_cache),
+    )
+
+
+def _collect_probe_empty(
+    injected: Mapping[str, Any],
+    phase: str,
+    *,
+    context: Any = None,
+) -> None:
+    collect, empty_cache = _injected_gc_empty(injected)
+    collect()
+    _probe_gpu_usage(injected, phase, context=context)
+    empty_cache()
 
 
 def _probe_gpu_usage(

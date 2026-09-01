@@ -9,8 +9,13 @@ GPU probe toggles live in root ``config.yaml`` (``training.debug``)
 and job ``config.yaml`` (``debug``); job keys override root. There
 are no environment variables or a parallel config source. See
 ``resolve_gpu_usage_settings``. When ``debug.detailed`` is true,
-``DetailedGpuUsageProbe`` adds per-module CUDA nbytes and leftover
-tensor groups; otherwise the compact line is the only log output.
+``DetailedGpuUsageProbe`` adds per-module CUDA nbytes, leftover
+tensor groups, and a caching-allocator line (``inactive_split`` is
+fragmentation). Leftover groups are live Python tensors and are not
+expected to sum to ``nvidia_used``; use ``reserved − allocated`` and
+``inactive_split``. Compact ``phase=step`` / ``cache_encode`` run after
+the job's garbage-collection pass and before ``empty_cache``.
+Otherwise the compact line is the only log output.
 """
 
 from __future__ import annotations
@@ -40,6 +45,14 @@ NBYTES_BUCKETS = (
 TOP_LEFTOVER_GROUPS = 40
 _UNITS = ("B", "KB", "MB", "GB")
 _MIB = 1024 * 1024
+_ALLOCATOR_STATS = (
+    ("allocated", "allocated_bytes.all.current", True),
+    ("active", "active_bytes.all.current", True),
+    ("inactive_split", "inactive_split_bytes.all.current", True),
+    ("reserved", "reserved_bytes.all.current", True),
+    ("retries", "num_alloc_retries", False),
+    ("ooms", "num_ooms", False),
+)
 
 
 def format_bytes(n: int) -> str:
@@ -226,8 +239,9 @@ def format_gpu_usage_detailed(
     nbytes: Mapping[str, int],
     leftover_groups: Sequence[Mapping[str, Any]] | None = None,
     leftover_nbytes: int = 0,
+    allocator_stats: Mapping[str, int] | None = None,
 ) -> str:
-    """Compact line plus nbytes buckets and top leftover groups."""
+    """Compact line plus nbytes buckets, optional allocator stats, leftover."""
 
     groups = leftover_groups if leftover_groups is not None else ()
     lines = [
@@ -246,6 +260,8 @@ def format_gpu_usage_detailed(
             f"leftover={format_bytes(int(leftover_nbytes))}"
         ),
     ]
+    if allocator_stats is not None:
+        lines.append(_format_allocator_line(allocator_stats))
     for group in groups:
         lines.append(
             "gpu usage   leftover "
@@ -285,7 +301,7 @@ class GpuUsageProbe:
 
 
 class DetailedGpuUsageProbe(GpuUsageProbe):
-    """Compact snapshot plus named CUDA buckets and leftover groups."""
+    """Compact snapshot plus named CUDA buckets, allocator stats, leftover."""
 
     def record(self, phase: str, context: Any = None) -> None:
         try:
@@ -298,7 +314,11 @@ class DetailedGpuUsageProbe(GpuUsageProbe):
             if snapshot.cuda_available:
                 leftover, leftover_nbytes = _leftover_groups(named_ids)
             text = format_gpu_usage_detailed(
-                snapshot, nbytes, leftover, leftover_nbytes
+                snapshot,
+                nbytes,
+                leftover,
+                leftover_nbytes,
+                allocator_stats=_allocator_stats(self._torch),
             )
             for line in text.splitlines():
                 self._log.info(line)
@@ -350,6 +370,29 @@ def _cuda_module(torch_module: Any | None) -> Any | None:
     except Exception:
         return None
     return cuda
+
+
+def _allocator_stats(torch_module: Any | None = None) -> dict[str, int] | None:
+    """Return caching-allocator stats, or ``None`` when CUDA/stats are missing."""
+
+    cuda = _cuda_module(torch_module)
+    reader = getattr(cuda, "memory_stats", None) if cuda is not None else None
+    if not callable(reader):
+        return None
+    try:
+        raw = reader()
+        return {name: int(raw.get(key, 0)) for name, key, _bytes in _ALLOCATOR_STATS}
+    except Exception:
+        return None
+
+
+def _format_allocator_line(stats: Mapping[str, int]) -> str:
+    parts = []
+    for name, _key, as_bytes in _ALLOCATOR_STATS:
+        value = int(stats.get(name, 0))
+        text = format_bytes(value) if as_bytes else str(value)
+        parts.append(f"{name}={text}")
+    return "gpu usage   allocator " + " ".join(parts)
 
 
 def _cuda_stats(torch_module: Any | None) -> tuple[bool, int, int, int]:
